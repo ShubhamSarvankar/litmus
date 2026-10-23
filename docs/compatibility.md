@@ -43,7 +43,7 @@ bash scripts/run_ceph_s3tests.sh
 
 ## ceph/s3-tests results by category
 
-> **Current: 98 of 330 selected tests pass.** 225 failed, 7 skipped, 0 errors;
+> **Current: 99 of 330 selected tests pass.** 224 failed, 7 skipped, 0 errors;
 > 508 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`. The drop from 116
 > is expected: see "Unsupported requests now return 501" and "Conditional writes now
 > return 501" below.
@@ -105,6 +105,12 @@ bash scripts/run_ceph_s3tests.sh
 > `test_put_object_ifmatch_overwrite_existed_good`, `test_put_object_ifnonmatch_good`,
 > `test_put_object_ifnonmatch_nonexisted_good` and `test_atomic_conditional_write_1mb`.
 > No other outcome changed. See "Conditional writes are refused, not ignored" below.
+>
+> **Expect: 100-continue connection fix (98 → 99 of 330).** An early error response to
+> a request with `Expect: 100-continue` kept the connection open while the client
+> withheld the body, so the client's next request on that connection was parsed as the
+> body and got 400. Such responses now carry `Connection: close`.
+> `test_100_continue_error_retry` now passes; no other outcome changed.
 
 | Test category | Result | Notes |
 |---|---|---|

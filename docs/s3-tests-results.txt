@@ -1,5 +1,5 @@
 FAILED test_100_continue
-FAILED test_100_continue_error_retry
+PASSED test_100_continue_error_retry
 PASSED test_abort_multipart_upload
 PASSED test_abort_multipart_upload_not_found
 FAILED test_access_bucket_private_object_private
