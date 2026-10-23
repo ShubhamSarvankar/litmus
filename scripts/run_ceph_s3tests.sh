@@ -12,8 +12,9 @@
 #   # Then run this script from the repo root:
 #   bash scripts/run_ceph_s3tests.sh
 #
-# Results are written to docs/compatibility.md (summary) and
-# s3tests-results.txt (full pytest output).
+# Results are written to docs/compatibility.md (summary),
+# s3tests-results.txt (full pytest output), and docs/s3-tests-results.txt
+# (one "OUTCOME test_name" line per selected test, sorted by name).
 
 set -euo pipefail
 
@@ -21,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 S3TESTS_DIR="$REPO_ROOT/.s3tests"
 RESULTS_FILE="$REPO_ROOT/s3tests-results.txt"
+JUNIT_FILE="$S3TESTS_DIR/junit.xml"
+PER_TEST_FILE="$REPO_ROOT/docs/s3-tests-results.txt"
 S3_HOST="localhost"
 S3_PORT="8000"
 BUCKET_PREFIX="litmus-test-"
@@ -130,6 +133,7 @@ S3TEST_CONF="$CONFIG_FILE" "$PYTEST" \
     s3tests/functional/test_s3.py \
     -v \
     --tb=short \
+    --junitxml="$JUNIT_FILE" \
     -k "not (acl or ACL or policy or Policy or versioning or Versioning \
              or website or Website or lifecycle or Lifecycle \
              or encryption or Encryption or sse or SSE or kms or KMS \
@@ -142,6 +146,27 @@ S3TEST_CONF="$CONFIG_FILE" "$PYTEST" \
              or multipart_upload_empty or auth or Auth \
              or presign or checksum)" \
     2>&1 | tee "$RESULTS_FILE" || true
+
+# --- Per-test outcomes (one "OUTCOME test_name" line per selected test, sorted) ---
+"$PYTHON" - "$JUNIT_FILE" > "$PER_TEST_FILE" << 'PYEOF'
+import sys
+import xml.etree.ElementTree as ET
+
+outcomes = []
+for case in ET.parse(sys.argv[1]).iter("testcase"):
+    tags = {child.tag for child in case}
+    if "failure" in tags:
+        outcome = "FAILED"
+    elif "error" in tags:
+        outcome = "ERROR"
+    elif "skipped" in tags:
+        outcome = "SKIPPED"
+    else:
+        outcome = "PASSED"
+    outcomes.append((case.get("name"), outcome))
+for name, outcome in sorted(outcomes):
+    print(f"{outcome} {name}")
+PYEOF
 
 # --- Parse results ---
 PASSED=$(grep -c "PASSED" "$RESULTS_FILE" || true)
@@ -159,6 +184,7 @@ echo "ERROR:   $ERROR"
 echo "SKIPPED: $SKIPPED"
 echo ""
 echo "Full output saved to: $RESULTS_FILE"
+echo "Per-test outcomes saved to: $PER_TEST_FILE"
 echo "Update docs/compatibility.md with these results."
 
 cd "$REPO_ROOT"
