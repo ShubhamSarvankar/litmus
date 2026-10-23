@@ -128,6 +128,17 @@ CONDITIONAL_DELETE_HEADERS = (
     "if-unmodified-since",
 )
 
+# Conditional write headers, from the S3 API reference: PutObject takes If-Match,
+# If-None-Match and x-amz-write-offset-bytes (append at an offset that must equal the
+# current size); CompleteMultipartUpload takes If-Match and If-None-Match. Litmus does
+# not evaluate them, and ignoring one would overwrite an object the client asked to
+# keep (or replace it with only the appended bytes). They also cannot be supported
+# safely yet: in the current layout the new bytes replace the old file before the
+# metadata commit, so a precondition that fails at commit time would already have
+# overwritten the object. Real support waits for the storage layout redesign.
+CONDITIONAL_PUT_OBJECT_HEADERS = ("if-match", "if-none-match", "x-amz-write-offset-bytes")
+CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
+
 # Headers that select an operation Litmus does not implement on an otherwise
 # supported request: CopyObject and UploadPartCopy.
 _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
@@ -160,9 +171,16 @@ def _check(method: str, path: str, query, headers) -> None:
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
         if method == "DELETE":
-            for h in CONDITIONAL_DELETE_HEADERS:
-                if h in headers:
-                    raise NotImplementedOperation(extra={"Header": h, "Method": method})
+            conditional = CONDITIONAL_DELETE_HEADERS
+        elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart
+            conditional = CONDITIONAL_PUT_OBJECT_HEADERS
+        elif method == "POST" and "uploadId" in query_keys:  # CompleteMultipartUpload
+            conditional = CONDITIONAL_COMPLETE_HEADERS
+        else:
+            conditional = ()
+        for h in conditional:
+            if h in headers:
+                raise NotImplementedOperation(extra={"Header": h, "Method": method})
         if "versionId" in query_keys:
             if method not in _NULL_VERSION_METHODS or any(
                 v != NULL_VERSION_ID for v in query.getlist("versionId")

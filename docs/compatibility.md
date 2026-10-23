@@ -43,9 +43,10 @@ bash scripts/run_ceph_s3tests.sh
 
 ## ceph/s3-tests results by category
 
-> **Current: 103 of 330 selected tests pass.** 220 failed, 7 skipped, 0 errors;
+> **Current: 98 of 330 selected tests pass.** 225 failed, 7 skipped, 0 errors;
 > 508 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`. The drop from 116
-> is expected: see "Unsupported requests now return 501" below.
+> is expected: see "Unsupported requests now return 501" and "Conditional writes now
+> return 501" below.
 >
 > - ceph/s3-tests pinned at `5b3987116eca0b4b8fa57d6b10f3db57bab196b6` (2026-10-12).
 >   The script checks out exactly this commit; it never pulls.
@@ -97,6 +98,13 @@ bash scripts/run_ceph_s3tests.sh
 >   to fail and the target to be unchanged, and gets 501. It passes for the wrong
 >   reason (the expected error is a missing source key), so a real UploadPartCopy
 >   implementation must keep it passing by returning that error.
+>
+> **Conditional writes now return 501 (103 → 98 of 330).** `If-Match` / `If-None-Match`
+> on PutObject were ignored, so these 5 tests passed without the condition ever being
+> checked; they now get 501 and fail: `test_put_object_ifmatch_good`,
+> `test_put_object_ifmatch_overwrite_existed_good`, `test_put_object_ifnonmatch_good`,
+> `test_put_object_ifnonmatch_nonexisted_good` and `test_atomic_conditional_write_1mb`.
+> No other outcome changed. See "Conditional writes are refused, not ignored" below.
 
 | Test category | Result | Notes |
 |---|---|---|
@@ -195,6 +203,19 @@ preconditions, and deleting anyway could remove an object the client asked to ke
 
 Real conditional delete support will be revisited once the conditional headers work
 (If-None-Match / If-Modified-Since / If-Unmodified-Since, category e) is done.
+
+**Conditional writes are refused, not ignored.** PutObject with `If-Match`,
+`If-None-Match` or `x-amz-write-offset-bytes`, and CompleteMultipartUpload with
+`If-Match` or `If-None-Match` (the conditional headers the S3 API reference lists for
+those operations), return 501 NotImplemented: the existing object is untouched, no new
+object is created, and the multipart upload stays open. Previously these headers were
+ignored, so `If-None-Match: *` ("create only if absent") overwrote an existing object.
+They are not implemented yet because the current storage layout replaces an object's
+bytes before its metadata commit, so a precondition found false at commit time would
+already have overwritten the object; real support waits for the storage layout
+redesign (`docs/design/storage-layout.md`), which evaluates the precondition
+atomically with the metadata commit after the new bytes are durable at a fresh path.
+UploadPart is unaffected (these headers are not UploadPart parameters).
 
 ---
 
