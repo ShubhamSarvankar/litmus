@@ -6,7 +6,7 @@ Litmus is a correctness-focused implementation, not a feature-complete one.
 This document states precisely what passes, what fails, and **why** each failure
 is out of scope. Unexplained pass rates are not useful — this is the honest version.
 
-Results are based on running `ceph/s3-tests` (`s3tests_boto3/functional/test_s3.py`)
+Results are based on running `ceph/s3-tests` (`s3tests/functional/test_s3.py`)
 against a local Litmus instance.
 
 **Running the suite:** ceph/s3-tests requires Linux (it uses POSIX tooling and its own
@@ -43,9 +43,26 @@ bash scripts/run_ceph_s3tests.sh
 
 ## ceph/s3-tests results by category
 
-> Results from running against Litmus on Ubuntu 24.04 (WSL2), Python 3.12.3.
-> Run `scripts/run_ceph_s3tests.sh` to reproduce. 325 tests selected (504 deselected
-> as out-of-scope via `-k` filter). **115 passed, 205 failed, 5 skipped, 0 errors.**
+> **Baseline: 116 of 328 selected tests pass.** 205 failed, 7 skipped, 0 errors;
+> 510 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`.
+>
+> - ceph/s3-tests pinned at `5b3987116eca0b4b8fa57d6b10f3db57bab196b6` (2026-10-12).
+>   The script checks out exactly this commit; it never pulls.
+> - s3-tests virtualenv: Python 3.12.3, packages pinned by `scripts/s3tests-constraints.txt`
+>   (boto3/botocore 1.43.118, pytest 9.1.1).
+> - Litmus run on Ubuntu 24.04 (WSL2, ext4), Python 3.12.15 via `uv sync --python 3.12`.
+> - Per-test outcomes: [`docs/s3-tests-results.txt`](s3-tests-results.txt), regenerated
+>   by every run of the script.
+>
+> **Why the numbers changed from 115 of 325.** The earlier figure was measured against
+> whatever s3-tests `master` was at the time, because the script used to `git pull`.
+> It reproduces exactly (325 selected, 504 deselected, 115 passed, 205 failed, 5 skipped)
+> at s3-tests `fb8b73092bb1dd8db829f1205a9e52e73bf9a232` (2026-04-10). Between that commit
+> and the pin, upstream added 9 tests to `test_s3.py`. The `-k` filter deselects 6 of them
+> and selects 3: `test_multipart_upload_complete_without_create` (passes), and
+> `test_list_objects_restore_status` / `test_list_object_versions_restore_status`
+> (skipped: no `[s3 cloud]` config). The outcome of every one of the 325 tests that exist
+> at both commits is unchanged. Litmus itself did not change.
 
 | Test category | Result | Notes |
 |---|---|---|
