@@ -5,6 +5,16 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from server.crash_points import (
+    ABORT_AFTER_COMMIT,
+    ABORT_BEFORE_COMMIT,
+    PART_AFTER_BYTES,
+    PART_AFTER_COMMIT,
+    PART_AFTER_REGISTER,
+    PART_MID_WRITE,
+    armed_point,
+    crash_point,
+)
 from server.errors.s3errors import InvalidPart, NoSuchBucket, NoSuchUpload
 from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
 from server.multipart.state_machine import complete_multipart_upload
@@ -151,11 +161,15 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     blob_id = metadata.register_blob(
         "part", bucket, key, upload_id=upload_id, part_number=part_number
     )
+    crash_point(PART_AFTER_REGISTER)
     try:
-        part_etag, size = storage.write_blob(blob_id, io.BytesIO(body))
+        part_etag, size = storage.write_blob(
+            blob_id, io.BytesIO(body), mid_write_point=armed_point(PART_MID_WRITE)
+        )
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
         raise
+    crash_point(PART_AFTER_BYTES)
     part = PartMeta(
         upload_id=upload_id, part_number=part_number, etag=part_etag, size=size, blob_id=blob_id
     )
@@ -167,6 +181,7 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
         raise
+    crash_point(PART_AFTER_COMMIT)
     if replaced:
         collect_garbage(storage, metadata, [replaced])
     return Response(status_code=200, headers={"ETag": part_etag})
@@ -208,8 +223,10 @@ async def _abort(bucket: str, key: str, upload_id: str, request: Request) -> Res
 
     # docs/design/storage-layout.md §6.8: the rows go in one commit, the part blobs
     # after it.
+    crash_point(ABORT_BEFORE_COMMIT)
     garbage = metadata.abort_upload(upload_id)
     if garbage is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
+    crash_point(ABORT_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)

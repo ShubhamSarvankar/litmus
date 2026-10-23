@@ -7,6 +7,8 @@ dropped, is left for the startup sweep, which finds it through the registry.
 
 import logging
 
+from server.crash_points import crash_point
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,9 +34,11 @@ def discard_new_blob(storage, metadata, blob_id: str) -> None:
         )
 
 
-def collect_garbage(storage, metadata, blob_ids: list[str]) -> None:
+def collect_garbage(
+    storage, metadata, blob_ids: list[str], after_unlink_point: str | None = None
+) -> None:
     """GC: unlink blobs a committed transaction made garbage, then drop the rows of
-    the ones that are gone."""
+    the ones that are gone. after_unlink_point fires after the first unlink."""
     unlinked = []
     for blob_id in blob_ids:
         try:
@@ -45,6 +49,8 @@ def collect_garbage(storage, metadata, blob_ids: list[str]) -> None:
             logger.warning("could not unlink garbage blob %s", blob_id, exc_info=True)
             continue
         unlinked.append(blob_id)
+        if after_unlink_point and len(unlinked) == 1:
+            crash_point(after_unlink_point)
     if unlinked:
         try:
             metadata.purge_garbage(unlinked)

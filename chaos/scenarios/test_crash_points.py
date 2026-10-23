@@ -12,24 +12,56 @@ written as strict xfails while the consistency sweep could not see orphaned blob
 the blob registry closed both gaps and they now run as ordinary tests. Their setup
 problems use pytest.fail, so a broken setup is a real failure, never a pass.
 
-Overwrite and DELETE crash points are deliberately not covered yet.
+The tests after the "write paths" marker follow docs/design/storage-layout.md §15.
+Each asserts four things: (a) the raw state while the server is down, (b) the sweep
+report, (c) what clients see after the restart, and (d) that the client's natural
+retry succeeds. Where (c) would consume state that (d) needs (completing or aborting
+the upload), the dead server's directory is copied first and (d) runs on the copy,
+so both start from the same crash state.
 """
 
 import hashlib
 import os
+import shutil
 import signal
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
 from chaos.fixtures.subprocess import ServerProcess, _find_free_port
-from server.consistency import MissingPart, OrphanedMetadata, run_consistency_sweep
+from server.consistency import (
+    InterruptedCleanup,
+    InterruptedWrite,
+    LeftoverTemp,
+    MissingPart,
+    OrphanedMetadata,
+    run_consistency_sweep,
+)
 from server.crash_points import (
+    ABORT_AFTER_COMMIT,
+    ABORT_BEFORE_COMMIT,
+    BUCKET_DELETE_AFTER_COMMIT,
     COMPLETE_AFTER_ASSEMBLE,
     COMPLETE_AFTER_COMMIT,
+    COMPLETE_AFTER_GC_UNLINK,
+    COMPLETE_AFTER_REGISTER,
+    COMPLETE_MID_ASSEMBLE,
+    DELETE_AFTER_COMMIT,
+    DELETE_BEFORE_COMMIT,
+    DELETE_OBJECTS_AFTER_COMMIT,
+    PART_AFTER_BYTES,
+    PART_AFTER_COMMIT,
+    PART_AFTER_REGISTER,
+    PART_MID_WRITE,
     PUT_AFTER_BYTES,
+    PUT_AFTER_COMMIT,
+    PUT_AFTER_GC_UNLINK,
+    PUT_AFTER_REGISTER,
+    PUT_MID_WRITE,
+    SWEEP_AFTER_UNLINK,
 )
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.blobs import BlobStore
@@ -185,6 +217,13 @@ def test_put_killed_after_bytes_before_metadata(tmp_path: Path):
     assert pending.read_bytes() == body
     assert _temp_files(tmp_path) == []
 
+    # (b) The sweep report, from a copy, so that the restart below runs its own sweep
+    # on the original.
+    report = _sweep(_twin(tmp_path, server, "sweep"))
+    assert report.issues == [
+        InterruptedWrite(pending.name, "object", BUCKET, KEY, None, None, bytes_durable=True)
+    ]
+
     server2, client2 = _start(tmp_path)
     try:
         # Not visible to clients.
@@ -226,6 +265,13 @@ def test_complete_killed_after_assemble_before_metadata(tmp_path: Path):
     (pending,) = _pending_files(tmp_path, BUCKET, KEY)
     assert pending.read_bytes() == body
     assert _temp_files(tmp_path) == []
+
+    # (b) The sweep report, from a copy, so that the restart below runs its own sweep
+    # on the original.
+    report = _sweep(_twin(tmp_path, server, "sweep"))
+    assert report.issues == [
+        InterruptedWrite(pending.name, "object", BUCKET, KEY, upload_id, None, bytes_durable=True)
+    ]
 
     server2, client2 = _start(tmp_path)
     try:
@@ -278,6 +324,16 @@ def test_complete_killed_after_commit_before_part_cleanup(tmp_path: Path):
     leftovers = _garbage_part_files(tmp_path, upload_id)
     assert len(leftovers) == 3
 
+    # (b) The sweep report, from a copy, so that the restart below runs its own sweep
+    # on the original.
+    report = _sweep(_twin(tmp_path, server, "sweep"))
+    garbage_parts = sorted(_registry(tmp_path, "garbage"), key=lambda r: r.part_number)
+    assert sorted(report.issues, key=lambda i: i.part_number) == [
+        InterruptedCleanup(r.blob_id, "part", BUCKET, KEY, upload_id, r.part_number)
+        for r in garbage_parts
+    ]
+    assert [r.part_number for r in garbage_parts] == [1, 2, 3]
+
     server2, client2 = _start(tmp_path)
     try:
         # Visible with exactly the right bytes and ETag.
@@ -296,6 +352,12 @@ def test_complete_killed_after_commit_before_part_cleanup(tmp_path: Path):
         assert _blob_files(tmp_path) == {meta.blob_id}
         assert not any(p.exists() for p in leftovers)
         assert _registry(tmp_path, "garbage") == []
+
+        # (d) A retried Complete changes nothing. S3 answers it with 200 and the same
+        # ETag; see test_gap_retried_complete_returns_same_etag (j3).
+        before = _snapshot(tmp_path, upload_id)
+        _complete(client2, upload_id, etags)
+        assert _snapshot(tmp_path, upload_id) == before
     finally:
         client2.close()
         server2.stop()
@@ -367,3 +429,857 @@ def test_gap_sweep_reports_part_files_of_completed_upload(tmp_path: Path):
         if not isinstance(i, MissingPart) and getattr(i, "upload_id", None) == upload_id
     ]
     assert reported, f"sweep did not report the leftover part files; issues: {report.issues}"
+
+
+# --- write paths: docs/design/storage-layout.md §15 ---
+
+OLD = b"old body. " * 3000
+NEW = b"new body! " * 4000
+
+
+def _setup_unarmed(tmp_path: Path, setup):
+    """Run setup(client) on an unarmed server, so setup requests cannot reach the
+    armed point, then stop it."""
+    server, client = _start(tmp_path)
+    try:
+        return setup(client)
+    finally:
+        client.close()
+        server.stop()
+
+
+def _twin(tmp_path: Path, dead: ServerProcess, name: str = "twin") -> Path:
+    """Copy the dead server's directory: two next steps from one crash state.
+
+    Taken only after the server process has exited. Every file is copied, the
+    database's -wal and -shm files included whenever they exist, and the copy is
+    checked to hold the same files with byte-identical database files.
+    """
+    assert dead.wait_for_exit() is not None, "the server must have exited before the copy"
+    twin = tmp_path.parent / f"{tmp_path.name}-{name}"
+    shutil.copytree(tmp_path, twin)
+
+    def files(root: Path) -> set[Path]:
+        return {p.relative_to(root) for p in root.rglob("*") if p.is_file()}
+
+    assert files(twin) == files(tmp_path)
+    for db_file in tmp_path.glob("meta.db*"):
+        assert (twin / db_file.name).read_bytes() == db_file.read_bytes()
+    return twin
+
+
+def _snapshot(tmp_path: Path, upload_id: str | None = None):
+    """Everything a retry must leave unchanged: buckets, objects, open uploads, the
+    given upload and its parts, registry rows, blob bytes and temp files."""
+    store = _store(tmp_path)
+    buckets = store.list_buckets()
+    return (
+        buckets,
+        [store.list_objects(b.name) for b in buckets],
+        store.list_incomplete_uploads(),
+        store.get_upload(upload_id) if upload_id else None,
+        store.get_parts(upload_id) if upload_id else None,
+        store.list_blob_records(),
+        {blob_id: _blob_bytes(tmp_path, blob_id) for blob_id in _blob_files(tmp_path)},
+        _temp_files(tmp_path),
+    )
+
+
+@contextmanager
+def _restarted(tmp_path: Path):
+    """An unarmed server on tmp_path and a client for it."""
+    server, client = _start(tmp_path)
+    try:
+        yield client
+    finally:
+        client.close()
+        server.stop()
+
+
+def _put_old(client) -> None:
+    assert client.put(f"/{BUCKET}").status_code == 200
+    assert client.put(f"/{BUCKET}/{KEY}", content=OLD).status_code == 200
+
+
+def _open_upload(client, parts: list[bytes]) -> tuple[str, list[str]]:
+    """Create an upload in an existing bucket and upload parts; (upload_id, etags)."""
+    upload_id = ET.fromstring(client.post(f"/{BUCKET}/{KEY}?uploads").text).findtext("UploadId")
+    etags = []
+    for num, data in enumerate(parts, start=1):
+        r = client.put(f"/{BUCKET}/{KEY}?partNumber={num}&uploadId={upload_id}", content=data)
+        assert r.status_code == 200
+        etags.append(r.headers["etag"])
+    return upload_id, etags
+
+
+def _complete(client, upload_id: str, etags: list[str]):
+    return client.post(f"/{BUCKET}/{KEY}?uploadId={upload_id}", content=_complete_xml(etags))
+
+
+def _assert_object(client, body: bytes, etag: str, key: str = KEY) -> None:
+    resp = client.get(f"/{BUCKET}/{key}")
+    assert resp.status_code == 200
+    assert resp.content == body
+    assert resp.headers["etag"] == etag
+
+
+def _store_parts(tmp_path: Path, upload_id: str):
+    return _store(tmp_path).get_parts(upload_id)
+
+
+def _blob_bytes(tmp_path: Path, blob_id: str) -> bytes | None:
+    path = _blobs(tmp_path).blob_path(blob_id)
+    return path.read_bytes() if path.exists() else None
+
+
+# PutObject
+
+
+def test_put_killed_after_register(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=PUT_AFTER_REGISTER)
+    assert client.put(f"/{BUCKET}").status_code == 200
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    client.close()
+
+    # (a) A registered ID with no bytes.
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) is None
+    (row,) = _registry(tmp_path)
+    assert (row.state, row.kind, row.bucket, row.key) == ("pending", "object", BUCKET, KEY)
+    assert _blob_files(tmp_path) == set()
+    assert _temp_files(tmp_path) == []
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(row.blob_id, "object", BUCKET, KEY, None, None, bytes_durable=False)
+    ]
+    assert _registry(tmp_path) == []
+
+    with _restarted(tmp_path) as client2:
+        # (c)
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        # (d)
+        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        _assert_object(client2, NEW, _md5(NEW))
+
+
+def test_put_killed_mid_write(tmp_path: Path):
+    body = os.urandom(200 * 1024)
+    server, client = _start(tmp_path, crash_point=PUT_MID_WRITE)
+    assert client.put(f"/{BUCKET}").status_code == 200
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=body))
+    client.close()
+
+    # (a) A partial temp file and no blob.
+    (row,) = _registry(tmp_path, "pending")
+    temp = _blobs(tmp_path).temp_path(row.blob_id)
+    assert _temp_files(tmp_path) == [temp]
+    assert temp.read_bytes() == body[:65536]
+    assert _blob_files(tmp_path) == set()
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) is None
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        LeftoverTemp(temp),
+        InterruptedWrite(row.blob_id, "object", BUCKET, KEY, None, None, bytes_durable=False),
+    ]
+    assert _temp_files(tmp_path) == [] and _registry(tmp_path) == []
+
+    with _restarted(tmp_path) as client2:
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        assert client2.put(f"/{BUCKET}/{KEY}", content=body).status_code == 200
+        _assert_object(client2, body, _md5(body))
+
+
+def test_overwrite_killed_after_bytes_keeps_old_object(tmp_path: Path):
+    """R2: new bytes durable at a fresh path, not committed; the old object's bytes
+    and ETag survive."""
+    _setup_unarmed(tmp_path, _put_old)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=PUT_AFTER_BYTES)
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    client.close()
+
+    # (a) The row and the old blob are untouched; the new blob is pending and complete.
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) == old
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+    (pending,) = _registry(tmp_path, "pending")
+    assert _blob_bytes(tmp_path, pending.blob_id) == NEW
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(pending.blob_id, "object", BUCKET, KEY, None, None, bytes_durable=True)
+    ]
+    assert _blob_files(tmp_path) == {old.blob_id}
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+
+    with _restarted(tmp_path) as client2:
+        # (c) Exactly the old object.
+        _assert_object(client2, OLD, _md5(OLD))
+        # (d)
+        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        _assert_object(client2, NEW, _md5(NEW))
+        current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
+        assert _blob_files(tmp_path) == {current}
+
+
+def test_overwrite_killed_after_commit(tmp_path: Path):
+    _setup_unarmed(tmp_path, _put_old)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=PUT_AFTER_COMMIT)
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    client.close()
+
+    # (a) The row names the new live blob; the old blob is garbage, its file present.
+    new = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    assert (new.etag, new.size) == (_md5(NEW), len(NEW)) and new.blob_id != old.blob_id
+    assert _registry(tmp_path, "live") == _registry(tmp_path, blob_id=new.blob_id)
+    assert [r.blob_id for r in _registry(tmp_path, "garbage")] == [old.blob_id]
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+    assert _blob_bytes(tmp_path, new.blob_id) == NEW
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [InterruptedCleanup(old.blob_id, "object", BUCKET, KEY, None, None)]
+    assert _blob_files(tmp_path) == {new.blob_id}
+    assert [r.blob_id for r in _registry(tmp_path)] == [new.blob_id]
+
+    with _restarted(tmp_path) as client2:
+        _assert_object(client2, NEW, _md5(NEW))
+        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        _assert_object(client2, NEW, _md5(NEW))
+        current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
+        assert _blob_files(tmp_path) == {current}
+
+
+def test_overwrite_killed_after_gc_unlink(tmp_path: Path):
+    _setup_unarmed(tmp_path, _put_old)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=PUT_AFTER_GC_UNLINK)
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    client.close()
+
+    # (a) The old blob's file is unlinked; its garbage row is still there.
+    new = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    assert [r.blob_id for r in _registry(tmp_path, "garbage")] == [old.blob_id]
+    assert _blob_files(tmp_path) == {new.blob_id}
+
+    # (b) A garbage row without a file is purged silently.
+    report = _sweep(tmp_path)
+    assert report.clean
+    assert [r.blob_id for r in _registry(tmp_path)] == [new.blob_id]
+
+    with _restarted(tmp_path) as client2:
+        _assert_object(client2, NEW, _md5(NEW))
+        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        _assert_object(client2, NEW, _md5(NEW))
+
+
+# DeleteObject and DeleteObjects
+
+
+def test_delete_killed_before_commit_keeps_object(tmp_path: Path):
+    """R3: a kill before the delete's commit leaves the object and its bytes."""
+    _setup_unarmed(tmp_path, _put_old)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=DELETE_BEFORE_COMMIT)
+    _request_into_crash(server, lambda: client.delete(f"/{BUCKET}/{KEY}"))
+    client.close()
+
+    # (a)
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) == old
+    assert _registry(tmp_path, "live") == _registry(tmp_path)
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.clean
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+
+    with _restarted(tmp_path) as client2:
+        # (c)
+        _assert_object(client2, OLD, _md5(OLD))
+        # (d)
+        assert client2.delete(f"/{BUCKET}/{KEY}").status_code == 204
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        assert _blob_files(tmp_path) == set() and _registry(tmp_path) == []
+
+
+def test_delete_killed_after_commit(tmp_path: Path):
+    _setup_unarmed(tmp_path, _put_old)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=DELETE_AFTER_COMMIT)
+    _request_into_crash(server, lambda: client.delete(f"/{BUCKET}/{KEY}"))
+    client.close()
+
+    # (a) The row is gone; the blob is garbage with its file present.
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) is None
+    assert [r.blob_id for r in _registry(tmp_path, "garbage")] == [old.blob_id]
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+
+    # (b) Never a row without a file: no OrphanedMetadata.
+    report = _sweep(tmp_path)
+    assert report.issues == [InterruptedCleanup(old.blob_id, "object", BUCKET, KEY, None, None)]
+    assert _blob_files(tmp_path) == set() and _registry(tmp_path) == []
+
+    with _restarted(tmp_path) as client2:
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        assert client2.delete(f"/{BUCKET}/{KEY}").status_code == 204
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+
+
+def test_delete_objects_killed_after_commit(tmp_path: Path):
+    bodies = {"k1": b"one" * 1000, "k2": b"two" * 1000, "k3": b"three" * 1000}
+
+    def setup(client):
+        assert client.put(f"/{BUCKET}").status_code == 200
+        for key, body in bodies.items():
+            assert client.put(f"/{BUCKET}/{key}", content=body).status_code == 200
+
+    _setup_unarmed(tmp_path, setup)
+    store = _store(tmp_path)
+    rows = {key: store.get_object_meta(BUCKET, key) for key in bodies}
+    # k3 carries a version ID Litmus does not implement: a per-key error, kept.
+    request = (
+        b"<Delete><Object><Key>k1</Key></Object><Object><Key>k2</Key></Object>"
+        b"<Object><Key>k3</Key><VersionId>v1</VersionId></Object></Delete>"
+    )
+    server, client = _start(tmp_path, crash_point=DELETE_OBJECTS_AFTER_COMMIT)
+    _request_into_crash(server, lambda: client.post(f"/{BUCKET}?delete", content=request))
+    client.close()
+
+    # (a) k1 and k2 are gone in one commit, their blobs garbage with files present.
+    store = _store(tmp_path)
+    assert store.get_object_meta(BUCKET, "k1") is None
+    assert store.get_object_meta(BUCKET, "k2") is None
+    assert store.get_object_meta(BUCKET, "k3") == rows["k3"]
+    garbage = {rows["k1"].blob_id, rows["k2"].blob_id}
+    assert {r.blob_id for r in _registry(tmp_path, "garbage")} == garbage
+    assert _blob_files(tmp_path) == garbage | {rows["k3"].blob_id}
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert sorted(report.issues, key=lambda i: i.key) == [
+        InterruptedCleanup(rows[k].blob_id, "object", BUCKET, k, None, None) for k in ("k1", "k2")
+    ]
+    assert _blob_files(tmp_path) == {rows["k3"].blob_id}
+
+    with _restarted(tmp_path) as client2:
+        # (c)
+        assert client2.get(f"/{BUCKET}/k1").status_code == 404
+        assert client2.get(f"/{BUCKET}/k2").status_code == 404
+        _assert_object(client2, bodies["k3"], _md5(bodies["k3"]), key="k3")
+        # (d)
+        resp = client2.post(f"/{BUCKET}?delete", content=request)
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.text)
+        assert [d.findtext("Key") for d in root.findall("Deleted")] == ["k1", "k2"]
+        assert [(e.findtext("Key"), e.findtext("Code")) for e in root.findall("Error")] == [
+            ("k3", "NotImplemented")
+        ]
+        _assert_object(client2, bodies["k3"], _md5(bodies["k3"]), key="k3")
+
+
+# UploadPart
+
+
+def _part_killed_before_commit(tmp_path: Path, point: str, body: bytes):
+    server, client = _start(tmp_path, crash_point=point)
+    assert client.put(f"/{BUCKET}").status_code == 200
+    upload_id, _ = _open_upload(client, [])
+    url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
+    _request_into_crash(server, lambda: client.put(url, content=body))
+    client.close()
+    return upload_id, url
+
+
+def _part_retry(tmp_path: Path, upload_id: str, url: str, body: bytes) -> None:
+    with _restarted(tmp_path) as client2:
+        # (c) The part was never recorded: Complete with its ETag is refused, and the
+        # upload stays open.
+        resp = _complete(client2, upload_id, [_md5(body)])
+        assert resp.status_code == 400
+        assert ET.fromstring(resp.text).findtext("Code") == "InvalidPart"
+        assert _store(tmp_path).upload_exists(upload_id)
+        # (d)
+        retry = client2.put(url, content=body)
+        assert retry.status_code == 200
+        assert _complete(client2, upload_id, [retry.headers["etag"]]).status_code == 200
+        _assert_object(client2, body, _multipart_etag([body]))
+
+
+def test_upload_part_killed_after_register(tmp_path: Path):
+    body = b"part body " * 1000
+    upload_id, url = _part_killed_before_commit(tmp_path, PART_AFTER_REGISTER, body)
+
+    # (a)
+    (row,) = _registry(tmp_path)
+    assert (row.state, row.kind, row.upload_id, row.part_number) == (
+        "pending",
+        "part",
+        upload_id,
+        1,
+    )
+    assert _store(tmp_path).get_parts(upload_id) == []
+    assert _store(tmp_path).upload_exists(upload_id)
+    assert _blob_files(tmp_path) == set() and _temp_files(tmp_path) == []
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(row.blob_id, "part", BUCKET, KEY, upload_id, 1, bytes_durable=False)
+    ]
+    assert _registry(tmp_path) == []
+
+    _part_retry(tmp_path, upload_id, url, body)
+
+
+def test_upload_part_killed_mid_write(tmp_path: Path):
+    body = os.urandom(200 * 1024)
+    upload_id, url = _part_killed_before_commit(tmp_path, PART_MID_WRITE, body)
+
+    # (a)
+    (row,) = _registry(tmp_path, "pending")
+    temp = _blobs(tmp_path).temp_path(row.blob_id)
+    assert _temp_files(tmp_path) == [temp]
+    assert temp.read_bytes() == body[:65536]
+    assert _blob_files(tmp_path) == set()
+    assert _store(tmp_path).get_parts(upload_id) == []
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        LeftoverTemp(temp),
+        InterruptedWrite(row.blob_id, "part", BUCKET, KEY, upload_id, 1, bytes_durable=False),
+    ]
+    assert _temp_files(tmp_path) == [] and _registry(tmp_path) == []
+
+    _part_retry(tmp_path, upload_id, url, body)
+
+
+X = b"first attempt " * 1000
+Y = b"second attempt " * 1000
+
+
+def _upload_x(client) -> tuple[str, str]:
+    assert client.put(f"/{BUCKET}").status_code == 200
+    upload_id, (x_etag,) = _open_upload(client, [X])
+    return upload_id, x_etag
+
+
+def test_reupload_part_killed_after_bytes_keeps_old_part(tmp_path: Path):
+    upload_id, x_etag = _setup_unarmed(tmp_path, _upload_x)
+    (x_part,) = _store(tmp_path).get_parts(upload_id)
+    url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
+    server, client = _start(tmp_path, crash_point=PART_AFTER_BYTES)
+    _request_into_crash(server, lambda: client.put(url, content=Y))
+    client.close()
+
+    # (a) Part 1 is still X, intact; Y is a pending, complete blob.
+    assert _store(tmp_path).get_parts(upload_id) == [x_part]
+    assert _blob_bytes(tmp_path, x_part.blob_id) == X
+    (pending,) = _registry(tmp_path, "pending")
+    assert _blob_bytes(tmp_path, pending.blob_id) == Y
+    twin = _twin(tmp_path, server)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(pending.blob_id, "part", BUCKET, KEY, upload_id, 1, bytes_durable=True)
+    ]
+    assert _blob_files(tmp_path) == {x_part.blob_id}
+
+    with _restarted(tmp_path) as client2:
+        # (c) Y was never recorded; Complete with the old ETag gives the old bytes.
+        refused = _complete(client2, upload_id, [_md5(Y)])
+        assert ET.fromstring(refused.text).findtext("Code") == "InvalidPart"
+        assert _complete(client2, upload_id, [x_etag]).status_code == 200
+        _assert_object(client2, X, _multipart_etag([X]))
+
+    with _restarted(twin) as client3:
+        # (d) The client retries the re-upload, then completes with it.
+        retry = client3.put(url, content=Y)
+        assert retry.status_code == 200
+        assert _complete(client3, upload_id, [retry.headers["etag"]]).status_code == 200
+        _assert_object(client3, Y, _multipart_etag([Y]))
+
+
+def test_reupload_part_killed_after_commit(tmp_path: Path):
+    upload_id, x_etag = _setup_unarmed(tmp_path, _upload_x)
+    (x_part,) = _store(tmp_path).get_parts(upload_id)
+    url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
+    server, client = _start(tmp_path, crash_point=PART_AFTER_COMMIT)
+    _request_into_crash(server, lambda: client.put(url, content=Y))
+    client.close()
+
+    # (a) Part 1 is Y; X's blob is garbage with its file present.
+    (y_part,) = _store(tmp_path).get_parts(upload_id)
+    assert (y_part.etag, y_part.size) == (_md5(Y), len(Y))
+    assert _blob_bytes(tmp_path, y_part.blob_id) == Y
+    assert [r.blob_id for r in _registry(tmp_path, "garbage")] == [x_part.blob_id]
+    assert _blob_bytes(tmp_path, x_part.blob_id) == X
+    twin = _twin(tmp_path, server)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [InterruptedCleanup(x_part.blob_id, "part", BUCKET, KEY, upload_id, 1)]
+    assert _blob_files(tmp_path) == {y_part.blob_id}
+
+    with _restarted(tmp_path) as client2:
+        # (c) The new part is the recorded one.
+        refused = _complete(client2, upload_id, [x_etag])
+        assert ET.fromstring(refused.text).findtext("Code") == "InvalidPart"
+        assert _complete(client2, upload_id, [_md5(Y)]).status_code == 200
+        _assert_object(client2, Y, _multipart_etag([Y]))
+
+    with _restarted(twin) as client3:
+        # (d)
+        retry = client3.put(url, content=Y)
+        assert retry.status_code == 200
+        assert _complete(client3, upload_id, [retry.headers["etag"]]).status_code == 200
+        _assert_object(client3, Y, _multipart_etag([Y]))
+
+
+# CompleteMultipartUpload
+
+
+def _complete_retry(tmp_path: Path, upload_id: str, parts: list[bytes], etags: list[str]):
+    body, etag = b"".join(parts), _multipart_etag(parts)
+    with _restarted(tmp_path) as client2:
+        # (c)
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        assert _store(tmp_path).upload_exists(upload_id)
+        # (d)
+        resp = _complete(client2, upload_id, etags)
+        assert resp.status_code == 200
+        assert ET.fromstring(resp.text).findtext("ETag") == etag
+        _assert_object(client2, body, etag)
+        current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
+        assert _blob_files(tmp_path) == {current}
+
+
+def test_complete_killed_after_register(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_REGISTER)
+    upload_id, parts, etags = _prepare_upload(client)
+    part_blobs = {p.blob_id for p in _store_parts(tmp_path, upload_id)}
+    _complete_into_crash(server, client, upload_id, etags)
+    client.close()
+
+    # (a) A pending object blob with no bytes; the upload and its parts untouched.
+    (row,) = _registry(tmp_path, "pending")
+    assert (row.kind, row.key, row.upload_id) == ("object", KEY, upload_id)
+    assert _blob_files(tmp_path) == part_blobs
+    assert _temp_files(tmp_path) == []
+    assert _store(tmp_path).upload_exists(upload_id)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(row.blob_id, "object", BUCKET, KEY, upload_id, None, bytes_durable=False)
+    ]
+    assert _registry(tmp_path, "pending") == []
+
+    _complete_retry(tmp_path, upload_id, parts, etags)
+
+
+def test_complete_killed_mid_assemble(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=COMPLETE_MID_ASSEMBLE)
+    upload_id, parts, etags = _prepare_upload(client)
+    part_blobs = {p.blob_id for p in _store_parts(tmp_path, upload_id)}
+    _complete_into_crash(server, client, upload_id, etags)
+    client.close()
+
+    # (a) The first part is in the temp file; the parts are intact.
+    (row,) = _registry(tmp_path, "pending")
+    temp = _blobs(tmp_path).temp_path(row.blob_id)
+    assert _temp_files(tmp_path) == [temp]
+    assert temp.read_bytes() == parts[0]
+    assert _blob_files(tmp_path) == part_blobs
+    assert _store(tmp_path).upload_exists(upload_id)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        LeftoverTemp(temp),
+        InterruptedWrite(row.blob_id, "object", BUCKET, KEY, upload_id, None, bytes_durable=False),
+    ]
+    assert _temp_files(tmp_path) == []
+
+    _complete_retry(tmp_path, upload_id, parts, etags)
+
+
+def test_complete_over_existing_killed_after_assemble_keeps_old_object(tmp_path: Path):
+    """R2/R6: an existing object at the key keeps its bytes when Complete is killed
+    after assembling into a fresh blob."""
+    parts = [bytes([n]) * (256 * 1024) for n in (7, 8)]
+
+    def setup(client):
+        _put_old(client)
+        return _open_upload(client, parts)
+
+    upload_id, etags = _setup_unarmed(tmp_path, setup)
+    old = _store(tmp_path).get_object_meta(BUCKET, KEY)
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_ASSEMBLE)
+    _complete_into_crash(server, client, upload_id, etags)
+    client.close()
+
+    # (a) The row and the old blob are untouched; the assembled blob is pending.
+    assert _store(tmp_path).get_object_meta(BUCKET, KEY) == old
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+    (pending,) = _registry(tmp_path, "pending")
+    assert _blob_bytes(tmp_path, pending.blob_id) == b"".join(parts)
+    assert _store(tmp_path).upload_exists(upload_id)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(
+            pending.blob_id, "object", BUCKET, KEY, upload_id, None, bytes_durable=True
+        )
+    ]
+    assert _blob_bytes(tmp_path, old.blob_id) == OLD
+
+    with _restarted(tmp_path) as client2:
+        # (c) Exactly the old object.
+        _assert_object(client2, OLD, _md5(OLD))
+        # (d)
+        assert _complete(client2, upload_id, etags).status_code == 200
+        _assert_object(client2, b"".join(parts), _multipart_etag(parts))
+        current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
+        assert _blob_files(tmp_path) == {current}
+
+
+# AbortMultipartUpload
+
+
+def test_abort_killed_before_commit_keeps_upload(tmp_path: Path):
+    """R3: a kill before the abort's commit leaves the upload and its parts."""
+    server, client = _start(tmp_path, crash_point=ABORT_BEFORE_COMMIT)
+    upload_id, parts, etags = _prepare_upload(client)
+    recorded = _store_parts(tmp_path, upload_id)
+    _request_into_crash(server, lambda: client.delete(f"/{BUCKET}/{KEY}?uploadId={upload_id}"))
+    client.close()
+
+    # (a)
+    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store_parts(tmp_path, upload_id) == recorded
+    for part, data in zip(recorded, parts, strict=True):
+        assert _blob_bytes(tmp_path, part.blob_id) == data
+    twin = _twin(tmp_path, server)
+
+    # (b)
+    report = _sweep(tmp_path)
+    assert report.clean
+
+    with _restarted(tmp_path) as client2:
+        # (c) The parts are intact and Complete still works.
+        assert _complete(client2, upload_id, etags).status_code == 200
+        _assert_object(client2, b"".join(parts), _multipart_etag(parts))
+
+    with _restarted(twin) as client3:
+        # (d) The client retries the abort.
+        assert client3.delete(f"/{BUCKET}/{KEY}?uploadId={upload_id}").status_code == 204
+        again = client3.put(f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}", content=b"x")
+        assert again.status_code == 404
+        assert _blob_files(twin) == set() and _registry(twin) == []
+
+
+# Startup sweep
+
+
+def test_sweep_killed_mid_cleanup(tmp_path: Path):
+    body = os.urandom(64 * 1024)
+    server, client = _start(tmp_path, crash_point=PUT_AFTER_BYTES)
+    assert client.put(f"/{BUCKET}").status_code == 200
+    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=body))
+    client.close()
+    (pending,) = _registry(tmp_path, "pending")
+
+    # The next start is killed by its own sweep, after unlinking the pending blob's
+    # file and before deleting its row.
+    sweeper = ServerProcess(
+        data_dir=tmp_path,
+        db_path=tmp_path / "meta.db",
+        port=_find_free_port(),
+        crash_point=SWEEP_AFTER_UNLINK,
+    )
+    sweeper.start()
+    assert sweeper.wait_for_exit() == -signal.SIGKILL
+
+    # (a) The row survived its file.
+    assert _registry(tmp_path) == [pending]
+    assert _blob_files(tmp_path) == set() and _temp_files(tmp_path) == []
+
+    # (b) The next sweep finishes the job: the same final state as one uninterrupted
+    # sweep, reported once more without bytes.
+    report = _sweep(tmp_path)
+    assert report.issues == [
+        InterruptedWrite(pending.blob_id, "object", BUCKET, KEY, None, None, bytes_durable=False)
+    ]
+    assert _registry(tmp_path) == [] and _blob_files(tmp_path) == set()
+
+    with _restarted(tmp_path) as client2:
+        assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
+        assert client2.put(f"/{BUCKET}/{KEY}", content=body).status_code == 200
+        _assert_object(client2, body, _md5(body))
+
+
+def test_complete_killed_after_gc_unlink(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_GC_UNLINK)
+    upload_id, parts, etags = _prepare_upload(client)
+    recorded = _store_parts(tmp_path, upload_id)
+    body, etag = b"".join(parts), _multipart_etag(parts)
+    _complete_into_crash(server, client, upload_id, etags)
+    client.close()
+
+    # (a) Committed: the object names a live blob with the full body, the upload is
+    # closed, the listed parts keep their ETag and size without bytes. One part blob
+    # is unlinked; the other two are garbage with their files present.
+    store = _store(tmp_path)
+    meta = store.get_object_meta(BUCKET, KEY)
+    assert (meta.etag, meta.size, meta.upload_id) == (etag, len(body), upload_id)
+    assert _blob_bytes(tmp_path, meta.blob_id) == body
+    assert not store.upload_exists(upload_id)
+    assert [(p.part_number, p.etag, p.size, p.blob_id) for p in store.get_parts(upload_id)] == [
+        (p.part_number, p.etag, p.size, None) for p in recorded
+    ]
+    part_blobs = {p.blob_id for p in recorded}
+    assert {r.blob_id for r in _registry(tmp_path, "garbage")} == part_blobs
+    remaining = _blob_files(tmp_path) - {meta.blob_id}
+    assert remaining < part_blobs and len(part_blobs - remaining) == 1
+
+    # (b) The two files still present are reported; the unlinked one's row goes
+    # silently.
+    report = _sweep(tmp_path)
+    part_number = {p.blob_id: p.part_number for p in recorded}
+    assert sorted(report.issues, key=lambda i: i.part_number) == sorted(
+        (
+            InterruptedCleanup(blob_id, "part", BUCKET, KEY, upload_id, part_number[blob_id])
+            for blob_id in remaining
+        ),
+        key=lambda i: i.part_number,
+    )
+    assert _blob_files(tmp_path) == {meta.blob_id}
+    assert [r.blob_id for r in _registry(tmp_path)] == [meta.blob_id]
+
+    with _restarted(tmp_path) as client2:
+        # (c)
+        _assert_object(client2, body, etag)
+        # (d) A retried Complete changes nothing. S3 answers it with 200 and the same
+        # ETag; see test_gap_retried_complete_returns_same_etag (j3).
+        before = _snapshot(tmp_path, upload_id)
+        _complete(client2, upload_id, etags)
+        assert _snapshot(tmp_path, upload_id) == before
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="gap (j3): re-completing a completed multipart upload is not implemented; "
+    "S3 answers a retried CompleteMultipartUpload with 200 and the same ETag",
+)
+@pytest.mark.parametrize("point", [COMPLETE_AFTER_COMMIT, COMPLETE_AFTER_GC_UNLINK])
+def test_gap_retried_complete_returns_same_etag(tmp_path: Path, point: str):
+    """The client's natural retry after a Complete that committed but never answered.
+    Setup problems use pytest.fail, so they are real failures, not absorbed xfails."""
+    server, client = _start(tmp_path, crash_point=point)
+    try:
+        upload_id, parts, etags = _prepare_upload(client)
+        _complete_into_crash(server, client, upload_id, etags)
+    except AssertionError as e:
+        pytest.fail(f"setup: Complete did not die at {point}: {e}")
+    client.close()
+    etag = _multipart_etag(parts)
+
+    with _restarted(tmp_path) as client2:
+        if client2.get(f"/{BUCKET}/{KEY}").headers.get("etag") != etag:
+            pytest.fail("setup: the object was not committed before the kill")
+        resp = _complete(client2, upload_id, etags)
+        assert resp.status_code == 200
+        assert ET.fromstring(resp.text).findtext("ETag") == etag
+
+
+def _part_cleanup_issues(recorded, upload_id: str) -> list:
+    """The sweep issues for part blobs a commit made garbage, by part number."""
+    return [
+        InterruptedCleanup(p.blob_id, "part", BUCKET, KEY, upload_id, p.part_number)
+        for p in recorded
+    ]
+
+
+def test_abort_killed_after_commit(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=ABORT_AFTER_COMMIT)
+    upload_id, _parts, _etags = _prepare_upload(client)
+    recorded = _store_parts(tmp_path, upload_id)
+    abort = f"/{BUCKET}/{KEY}?uploadId={upload_id}"
+    _request_into_crash(server, lambda: client.delete(abort))
+    client.close()
+
+    # (a) The upload and its part rows are gone in one commit; the part blobs are
+    # garbage with their files present.
+    store = _store(tmp_path)
+    assert store.get_upload(upload_id) is None
+    assert store.get_parts(upload_id) == []
+    part_blobs = {p.blob_id for p in recorded}
+    assert {r.blob_id for r in _registry(tmp_path, "garbage")} == part_blobs
+    assert _blob_files(tmp_path) == part_blobs
+
+    # (b) The part files are reported as interrupted cleanup; never MissingPart.
+    report = _sweep(tmp_path)
+    issues = sorted(report.issues, key=lambda i: i.part_number)
+    assert issues == _part_cleanup_issues(recorded, upload_id)
+    assert _blob_files(tmp_path) == set() and _registry(tmp_path) == []
+
+    with _restarted(tmp_path) as client2:
+        # (c) The upload is gone.
+        part = client2.put(f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}", content=b"x")
+        assert part.status_code == 404
+        assert ET.fromstring(part.text).findtext("Code") == "NoSuchUpload"
+        # (d) The retried abort finds it gone, as on S3: 404 NoSuchUpload, and nothing
+        # changes.
+        before = _snapshot(tmp_path, upload_id)
+        retry = client2.delete(abort)
+        assert retry.status_code == 404
+        assert ET.fromstring(retry.text).findtext("Code") == "NoSuchUpload"
+        assert _snapshot(tmp_path, upload_id) == before
+
+
+def test_delete_bucket_killed_after_commit(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=BUCKET_DELETE_AFTER_COMMIT)
+    upload_id, _parts, _etags = _prepare_upload(client)
+    recorded = _store_parts(tmp_path, upload_id)
+    _request_into_crash(server, lambda: client.delete(f"/{BUCKET}"))
+    client.close()
+
+    # (a) The bucket and its open upload are gone in one commit; the part blobs are
+    # garbage with their files present.
+    store = _store(tmp_path)
+    assert not store.bucket_exists(BUCKET)
+    assert store.get_upload(upload_id) is None
+    assert store.get_parts(upload_id) == []
+    part_blobs = {p.blob_id for p in recorded}
+    assert {r.blob_id for r in _registry(tmp_path, "garbage")} == part_blobs
+    assert _blob_files(tmp_path) == part_blobs
+
+    # (b)
+    report = _sweep(tmp_path)
+    issues = sorted(report.issues, key=lambda i: i.part_number)
+    assert issues == _part_cleanup_issues(recorded, upload_id)
+    assert _blob_files(tmp_path) == set() and _registry(tmp_path) == []
+
+    with _restarted(tmp_path) as client2:
+        # (c) The bucket is gone, and its upload with it.
+        assert client2.head(f"/{BUCKET}").status_code == 404
+        assert f"<Name>{BUCKET}</Name>" not in client2.get("/").text
+        part = client2.put(f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}", content=b"x")
+        assert part.status_code == 404
+        assert ET.fromstring(part.text).findtext("Code") == "NoSuchUpload"
+        # (d) The retried DeleteBucket finds it gone, as on S3: 404 NoSuchBucket, and
+        # nothing changes.
+        before = _snapshot(tmp_path, upload_id)
+        retry = client2.delete(f"/{BUCKET}")
+        assert retry.status_code == 404
+        assert ET.fromstring(retry.text).findtext("Code") == "NoSuchBucket"
+        assert _snapshot(tmp_path, upload_id) == before

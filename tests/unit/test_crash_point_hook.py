@@ -45,3 +45,22 @@ def test_unknown_configured_point_is_rejected(monkeypatch):
 def test_unset_configured_point_is_accepted(monkeypatch):
     monkeypatch.setattr(settings, "test_crash_point", "")
     crash_points.validate_configured_crash_point()
+
+
+@pytest.mark.parametrize("name", sorted(crash_points.CRASH_POINTS))
+def test_armed_point_is_none_when_unset(monkeypatch, name):
+    """An unarmed server passes None where a mid-write point would go, so it makes
+    exactly the calls it makes without crash points."""
+    monkeypatch.setattr(settings, "test_crash_point", "")
+    assert crash_points.armed_point(name) is None
+
+
+def test_armed_point_names_only_the_armed_point(monkeypatch):
+    monkeypatch.setattr(settings, "test_crash_point", crash_points.PUT_MID_WRITE)
+    assert crash_points.armed_point(crash_points.PUT_MID_WRITE) == crash_points.PUT_MID_WRITE
+    assert crash_points.armed_point(crash_points.PART_MID_WRITE) is None
+
+
+def test_armed_point_rejects_an_unknown_name():
+    with pytest.raises(ValueError):
+        crash_points.armed_point("no-such-point")

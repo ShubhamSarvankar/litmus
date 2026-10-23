@@ -1,6 +1,14 @@
 from datetime import UTC, datetime
 
-from server.crash_points import COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_COMMIT, crash_point
+from server.crash_points import (
+    COMPLETE_AFTER_ASSEMBLE,
+    COMPLETE_AFTER_COMMIT,
+    COMPLETE_AFTER_GC_UNLINK,
+    COMPLETE_AFTER_REGISTER,
+    COMPLETE_MID_ASSEMBLE,
+    armed_point,
+    crash_point,
+)
 from server.errors.s3errors import InternalError, InvalidPart, NoSuchUpload
 from server.metadata.base import ObjectMeta, PartsChanged
 from server.multipart.etag import composite_etag
@@ -64,8 +72,13 @@ def complete_multipart_upload(
 
     # C2, C3: register a fresh blob and assemble the parts into it.
     blob_id = metadata.register_blob("object", bucket, key, upload_id=upload_id)
+    crash_point(COMPLETE_AFTER_REGISTER)
     try:
-        size = storage.assemble_blob(blob_id, [part_blob_ids[r["PartNumber"]] for r in ordered])
+        size = storage.assemble_blob(
+            blob_id,
+            [part_blob_ids[r["PartNumber"]] for r in ordered],
+            mid_write_point=armed_point(COMPLETE_MID_ASSEMBLE),
+        )
     except MissingPartBlob as missing:
         discard_new_blob(storage, metadata, blob_id)
         _raise_for_missing_part(metadata, upload_id, missing.blob_id)
@@ -106,5 +119,5 @@ def complete_multipart_upload(
     crash_point(COMPLETE_AFTER_COMMIT)
 
     # C5: unlink the part blobs and the replaced object blob.
-    collect_garbage(storage, metadata, released)
+    collect_garbage(storage, metadata, released, after_unlink_point=COMPLETE_AFTER_GC_UNLINK)
     return etag

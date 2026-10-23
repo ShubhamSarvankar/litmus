@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from server.crash_points import SWEEP_AFTER_UNLINK, crash_point
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +136,7 @@ def run_consistency_sweep(metadata, storage) -> ConsistencyReport:
         report(LeftoverTemp(path), logging.INFO, "deleted leftover temp file %s", path)
 
     # 2. pending and garbage rows: no committed row refers to these blobs.
+    unlinked = 0
     for rec in metadata.list_blob_records():
         if rec.state == "live":
             continue
@@ -155,6 +158,10 @@ def run_consistency_sweep(metadata, storage) -> ConsistencyReport:
             removed = False
         else:
             removed = True
+            if had_file:
+                unlinked += 1
+                if unlinked == 1:
+                    crash_point(SWEEP_AFTER_UNLINK)
         names = (rec.blob_id, rec.kind, rec.bucket, rec.key, rec.upload_id, rec.part_number)
         if rec.state == "pending":
             report(

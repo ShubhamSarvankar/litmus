@@ -6,7 +6,17 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from server.crash_points import PUT_AFTER_BYTES, crash_point
+from server.crash_points import (
+    DELETE_AFTER_COMMIT,
+    DELETE_BEFORE_COMMIT,
+    PUT_AFTER_BYTES,
+    PUT_AFTER_COMMIT,
+    PUT_AFTER_GC_UNLINK,
+    PUT_AFTER_REGISTER,
+    PUT_MID_WRITE,
+    armed_point,
+    crash_point,
+)
 from server.errors.s3errors import (
     InternalError,
     NoSuchBucket,
@@ -82,8 +92,11 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     content_type = request.headers.get("content-type", "binary/octet-stream")
 
     blob_id = metadata.register_blob("object", bucket, key)
+    crash_point(PUT_AFTER_REGISTER)
     try:
-        etag, size = storage.write_blob(blob_id, io.BytesIO(body))
+        etag, size = storage.write_blob(
+            blob_id, io.BytesIO(body), mid_write_point=armed_point(PUT_MID_WRITE)
+        )
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
         raise
@@ -106,8 +119,9 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
         raise
+    crash_point(PUT_AFTER_COMMIT)
     if replaced:
-        collect_garbage(storage, metadata, [replaced])
+        collect_garbage(storage, metadata, [replaced], after_unlink_point=PUT_AFTER_GC_UNLINK)
     return Response(status_code=200, headers={"ETag": etag})
 
 
@@ -228,7 +242,9 @@ async def _delete_object(bucket: str, key: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
+    crash_point(DELETE_BEFORE_COMMIT)
     garbage = metadata.delete_object_meta(bucket, key)
+    crash_point(DELETE_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)
 

@@ -5,6 +5,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.api.request_guard import NULL_VERSION_ID, unsafe_key
+from server.crash_points import (
+    BUCKET_DELETE_AFTER_COMMIT,
+    DELETE_OBJECTS_AFTER_COMMIT,
+    crash_point,
+)
 from server.errors.s3errors import (
     BucketAlreadyExists,
     BucketNotEmpty,
@@ -222,6 +227,7 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         entries.append(d)
 
     garbage = metadata.delete_objects(bucket, to_delete)
+    crash_point(DELETE_OBJECTS_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
 
     result = ET.Element("DeleteResult")
@@ -267,5 +273,6 @@ async def delete_bucket(bucket: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket}) from None
     except BucketHasObjects:
         raise BucketNotEmpty(extra={"BucketName": bucket}) from None
+    crash_point(BUCKET_DELETE_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)
