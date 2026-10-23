@@ -168,8 +168,7 @@ S3TEST_CONF="$CONFIG_FILE" "$PYTEST" \
              or analytics or Analytics or inventory or Inventory \
              or accelerate or Accelerate or requestpayment \
              or bucket_logging or public_access or object_lock \
-             or torrent or copy_object_ifmatch_failed \
-             or multipart_upload_empty or auth or Auth \
+             or torrent or auth or Auth \
              or presign or checksum)" \
     2>&1 | tee "$RESULTS_FILE" || true
 
@@ -177,7 +176,13 @@ S3TEST_CONF="$CONFIG_FILE" "$PYTEST" \
 # Parse into a temp file in the same directory and rename it over the committed
 # file only once the parse has succeeded, so a failed run leaves it untouched.
 PER_TEST_TMP="$(mktemp "$(dirname "$PER_TEST_FILE")/.s3-tests-results.XXXXXX")"
-trap 'rm -f "$PER_TEST_TMP"' EXIT
+cleanup_per_test_tmp() { rm -f "$PER_TEST_TMP"; }
+trap cleanup_per_test_tmp EXIT
+# Explicit signal traps so an interrupted parse (Ctrl-C, kill, closed terminal)
+# also removes the temp file, rather than relying on bash running EXIT on signals.
+trap 'cleanup_per_test_tmp; exit 130' INT
+trap 'cleanup_per_test_tmp; exit 143' TERM
+trap 'cleanup_per_test_tmp; exit 129' HUP
 "$PYTHON" - "$JUNIT_FILE" > "$PER_TEST_TMP" << 'PYEOF'
 import sys
 import xml.etree.ElementTree as ET

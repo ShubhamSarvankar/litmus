@@ -147,6 +147,7 @@ FAILED test_bucket_recreate_not_overriding
 PASSED test_buckets_create_then_list
 PASSED test_buckets_list_ctime
 PASSED test_bucketv2_notexist
+FAILED test_copy_object_ifmatch_failed
 FAILED test_copy_object_ifmatch_good
 FAILED test_copy_object_ifnonematch_failed
 FAILED test_copy_object_ifnonematch_good
@@ -217,6 +218,7 @@ FAILED test_multipart_single_get_part
 FAILED test_multipart_upload
 PASSED test_multipart_upload_complete_without_create
 PASSED test_multipart_upload_contents
+FAILED test_multipart_upload_empty
 PASSED test_multipart_upload_incorrect_etag
 PASSED test_multipart_upload_missing_part
 PASSED test_multipart_upload_multiple_sizes

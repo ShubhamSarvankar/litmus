@@ -43,8 +43,8 @@ bash scripts/run_ceph_s3tests.sh
 
 ## ceph/s3-tests results by category
 
-> **Baseline: 116 of 328 selected tests pass.** 205 failed, 7 skipped, 0 errors;
-> 510 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`.
+> **Baseline: 116 of 330 selected tests pass.** 207 failed, 7 skipped, 0 errors;
+> 508 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`.
 >
 > - ceph/s3-tests pinned at `5b3987116eca0b4b8fa57d6b10f3db57bab196b6` (2026-10-12).
 >   The script checks out exactly this commit; it never pulls.
@@ -62,7 +62,20 @@ bash scripts/run_ceph_s3tests.sh
 > and selects 3: `test_multipart_upload_complete_without_create` (passes), and
 > `test_list_objects_restore_status` / `test_list_object_versions_restore_status`
 > (skipped: no `[s3 cloud]` config). The outcome of every one of the 325 tests that exist
-> at both commits is unchanged. Litmus itself did not change.
+> at both commits is unchanged. Litmus itself did not change. That gave 116 of 328.
+>
+> **Two tests restored to the denominator (328 → 330).** The filter used to deselect
+> `test_copy_object_ifmatch_failed` and `test_multipart_upload_empty` by exact name.
+> Nothing recorded why, both test in-scope behaviour, and both fail for real reasons,
+> so they are now selected:
+>
+> - `test_copy_object_ifmatch_failed`: CopyObject with a non-matching
+>   `x-amz-copy-source-if-match` must return 412 PreconditionFailed. Litmus does not
+>   implement CopyObject; it treats the request as a zero-byte PUT and returns 200.
+> - `test_multipart_upload_empty`: CompleteMultipartUpload with no request body must
+>   return 400 MalformedXML. Litmus fails to parse the empty body and returns 500.
+>
+> Neither hangs or crashes the server. No other outcome changed.
 
 | Test category | Result | Notes |
 |---|---|---|
