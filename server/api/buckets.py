@@ -14,6 +14,9 @@ from server.errors.s3errors import (
 
 router = APIRouter()
 
+# Per-key conditions a DeleteObjects <Object> may carry (ObjectIdentifier).
+_CONDITIONAL_DELETE_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
+
 
 def _list_buckets_xml(buckets) -> str:
     root = ET.Element("ListAllMyBucketsResult")
@@ -168,6 +171,9 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         value = obj.findtext(f"{{{ns}}}{tag}")
         return value if value is not None else obj.findtext(tag)
 
+    def _has(obj, tag):
+        return obj.find(f"{{{ns}}}{tag}") is not None or obj.find(tag) is not None
+
     def _error(key, version_id, code, message):
         e = ET.Element("Error")
         ET.SubElement(e, "Key").text = key
@@ -191,6 +197,14 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         # Same rule as DELETE /{bucket}/{key}?versionId=: every bucket is unversioned,
         # so "null" is the current object and any other version ID is not implemented.
         if version_id is not None and version_id != NULL_VERSION_ID:
+            entries.append(
+                _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
+            )
+            continue
+        # Per-key delete conditions (ObjectIdentifier in the S3 API reference). Litmus
+        # does not evaluate them; deleting anyway could delete an object the client
+        # asked to keep, so the key gets an error and is kept.
+        if any(_has(obj, tag) for tag in _CONDITIONAL_DELETE_ELEMENTS):
             entries.append(
                 _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
             )

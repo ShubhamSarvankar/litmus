@@ -180,8 +180,21 @@ but return XML listings. Not implemented; would be straightforward to add.
 full request body via FastAPI's `await request.body()`, which handles standard chunked
 encoding via HTTP/1.1 but not the aws-chunked trailer format.
 
-**Conditional headers.** `If-Match` is implemented. `If-None-Match`, `If-Modified-Since`,
-and `If-Unmodified-Since` are not — they are accepted without error but have no effect.
+**Conditional headers.** `If-Match` is implemented on GET. `If-None-Match`, `If-Modified-Since`,
+and `If-Unmodified-Since` are not — on GET they are accepted without error but have no effect.
+
+**Conditional deletes are refused, not ignored.** Litmus does not evaluate delete
+preconditions, and deleting anyway could remove an object the client asked to keep, so:
+
+- `DELETE /{bucket}/{key}` (DeleteObject and AbortMultipartUpload) with any of
+  `If-Match`, `x-amz-if-match-last-modified-time`, `x-amz-if-match-size`,
+  `x-amz-if-match-initiated-time`, `If-None-Match`, `If-Modified-Since` or
+  `If-Unmodified-Since` returns 501 NotImplemented and changes nothing.
+- A DeleteObjects entry with `ETag`, `LastModifiedTime` or `Size` gets a per-key
+  `NotImplemented` error and the object is kept; other entries are still deleted.
+
+Real conditional delete support will be revisited once the conditional headers work
+(If-None-Match / If-Modified-Since / If-Unmodified-Since, category e) is done.
 
 ---
 

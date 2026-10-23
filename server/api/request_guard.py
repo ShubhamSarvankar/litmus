@@ -111,6 +111,23 @@ _ALLOWED_MUTATING_OBJECT = {
 NULL_VERSION_ID = "null"
 _NULL_VERSION_METHODS = frozenset({"GET", "HEAD", "DELETE"})
 
+# Conditional DELETE headers. Litmus does not evaluate them, and ignoring one would
+# delete an object (or abort an upload) the client asked to keep. From the S3 API
+# reference: DeleteObject takes If-Match, x-amz-if-match-last-modified-time and
+# x-amz-if-match-size; AbortMultipartUpload takes x-amz-if-match-initiated-time. The
+# reference lists no other conditional headers for these operations; If-None-Match,
+# If-Modified-Since and If-Unmodified-Since (RFC 7232 preconditions) are refused too,
+# so no precondition on a DELETE is ever silently dropped.
+CONDITIONAL_DELETE_HEADERS = (
+    "if-match",
+    "x-amz-if-match-last-modified-time",
+    "x-amz-if-match-size",
+    "x-amz-if-match-initiated-time",
+    "if-none-match",
+    "if-modified-since",
+    "if-unmodified-since",
+)
+
 # Headers that select an operation Litmus does not implement on an otherwise
 # supported request: CopyObject and UploadPartCopy.
 _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
@@ -142,6 +159,10 @@ def _check(method: str, path: str, query, headers) -> None:
         )
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
+        if method == "DELETE":
+            for h in CONDITIONAL_DELETE_HEADERS:
+                if h in headers:
+                    raise NotImplementedOperation(extra={"Header": h, "Method": method})
         if "versionId" in query_keys:
             if method not in _NULL_VERSION_METHODS or any(
                 v != NULL_VERSION_ID for v in query.getlist("versionId")
