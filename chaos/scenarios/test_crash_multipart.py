@@ -3,8 +3,13 @@ Tier B chaos: real process crash (SIGKILL) tests.
 
 Skipped automatically on Windows — see live_server fixture in subprocess.py.
 
-Timing approach: S3_TEST_WRITE_DELAY_MS=200 slows each write chunk so that a
-large upload takes >1s, giving a reliable window to SIGKILL mid-write.
+Timing approach: these tests SIGKILL the server 300ms after starting a request.
+S3_TEST_WRITE_DELAY_MS=200 adds a single 200ms sleep per PUT/UploadPart before the
+body is written to the temp file; it is not per chunk, and CompleteMultipartUpload
+assembly is not delayed at all. On a local ext4 disk a 5MB PUT with the delay takes
+~235ms and a 3x2MB Complete ~20ms, so in practice the kill usually lands after the
+request finished. Which branch of the invariant a run exercises depends on timing.
+For a kill at an exact step, see test_crash_points.py.
 
 Invariants under test (both must hold after restart):
 1. Either the object is visible with the correct content, OR it is not visible.
@@ -41,10 +46,18 @@ def _md5(data: bytes) -> str:
     return '"' + hashlib.md5(data).hexdigest() + '"'
 
 
+def _multipart_etag(parts: list[bytes]) -> str:
+    """S3 composite ETag: MD5 of the concatenated binary part MD5s, then -<part count>.
+    Computed from the part bodies, independently of anything the server returned."""
+    digests = b"".join(hashlib.md5(p).digest() for p in parts)
+    return f'"{hashlib.md5(digests).hexdigest()}-{len(parts)}"'
+
+
 def _check_invariants_after_restart(
-    client: httpx.Client, bucket: str, key: str, expected_bodies: list[bytes]
+    client: httpx.Client, bucket: str, key: str, expected_body: bytes, expected_etag: str
 ) -> None:
-    """Assert storage invariants hold after a crash+restart."""
+    """Assert storage invariants hold after a crash+restart: the object is either
+    not visible (404) or visible with exactly the expected body and ETag."""
     resp = client.get(f"/{bucket}/{key}")
 
     if resp.status_code == 404:
@@ -55,16 +68,15 @@ def _check_invariants_after_restart(
         f"Expected 200 or 404, got {resp.status_code}: {resp.text[:200]}"
     )
 
-    # Object is visible — body must be one of the expected bodies, never partial
-    assert resp.content in expected_bodies, (
-        f"Object body after crash is neither of the expected values.\n"
+    # Object is visible — body must be the complete expected body, never partial
+    assert resp.content == expected_body, (
+        f"Object body after crash is not the expected body.\n"
         f"Got {len(resp.content)} bytes: {resp.content[:100]!r}"
     )
 
-    # ETag must match the MD5 of the body actually returned
-    body_md5 = _md5(resp.content)
-    assert resp.headers.get("etag") == body_md5, (
-        f"ETag {resp.headers.get('etag')!r} does not match body MD5 {body_md5!r}"
+    # ETag must be the exact ETag for that body
+    assert resp.headers.get("etag") == expected_etag, (
+        f"ETag {resp.headers.get('etag')!r} does not match expected {expected_etag!r}"
     )
 
 
@@ -72,7 +84,9 @@ def _check_invariants_after_restart(
 
 
 def test_sigkill_during_single_put(tmp_path: Path):
-    """SIGKILL mid-PUT of a large object → after restart, GET returns 404 (not partial)."""
+    """SIGKILL ~300ms into a large PUT → after restart, GET returns 404 or the full
+    body with its MD5 ETag, never a partial object. (The PUT usually finishes before
+    the kill; see the module docstring.)"""
     import os
 
     if os.name == "nt":
@@ -91,8 +105,8 @@ def test_sigkill_during_single_put(tmp_path: Path):
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=30.0)
     client.put("/crash-bucket")
 
-    # 5MB body — with 200ms delay per 64KB chunk, takes ~15s to write
-    # We kill after 300ms, well into the write
+    # 5MB body. The 200ms write delay is a single sleep before the body is written,
+    # so the PUT takes ~235ms locally and usually completes before the 300ms kill.
     large_body = b"x" * (5 * 1024 * 1024)
 
     put_thread_result = {}
@@ -136,7 +150,9 @@ def test_sigkill_during_single_put(tmp_path: Path):
 
 
 def test_sigkill_during_complete_multipart(tmp_path: Path):
-    """SIGKILL mid-CompleteMultipartUpload → after restart, invariants hold."""
+    """SIGKILL ~300ms into CompleteMultipartUpload → after restart, GET returns 404 or
+    the full body with the exact multipart composite ETag. (Assembly is not delayed and
+    usually finishes before the kill; see the module docstring.)"""
     import os
 
     if os.name == "nt":
@@ -200,7 +216,9 @@ def test_sigkill_during_complete_multipart(tmp_path: Path):
     client2 = httpx.Client(base_url=f"http://127.0.0.1:{port2}", timeout=10.0)
 
     try:
-        _check_invariants_after_restart(client2, "mp-bucket", "assembled", [expected_body])
+        _check_invariants_after_restart(
+            client2, "mp-bucket", "assembled", expected_body, _multipart_etag(parts_data)
+        )
     finally:
         client2.close()
         server2.stop()

@@ -136,6 +136,14 @@ venv/bin/pip install -q -r requirements.txt -c "$CONSTRAINTS_FILE"
 PYTHON="$S3TESTS_DIR/venv/bin/python"
 PYTEST="$S3TESTS_DIR/venv/bin/pytest"
 
+# --- Refuse to run with a Tier B crash point armed ---
+# A litmus started from this shell would inherit it and SIGKILL itself mid-suite.
+if [ -n "${S3_TEST_CRASH_POINT:-}" ]; then
+    echo "ERROR: S3_TEST_CRASH_POINT is set ($S3_TEST_CRASH_POINT). It is for Tier B chaos"
+    echo "tests only; unset it and restart litmus without it before running ceph/s3-tests."
+    exit 1
+fi
+
 # --- Verify litmus is reachable ---
 echo "Checking litmus is running on $S3_HOST:$S3_PORT..."
 if ! curl -sf "http://$S3_HOST:$S3_PORT/health" > /dev/null; then

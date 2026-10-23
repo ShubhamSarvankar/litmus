@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
+from server.crash_points import PUT_AFTER_BYTES, crash_point
 from server.errors.s3errors import InternalError, NoSuchBucket, NoSuchKey, PreconditionFailed
 from server.metadata.base import ObjectMeta
 
@@ -63,6 +64,7 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     body = await request.body()
     content_type = request.headers.get("content-type", "binary/octet-stream")
     etag = storage.write_object(bucket, key, io.BytesIO(body), len(body))
+    crash_point(PUT_AFTER_BYTES)
     metadata.put_object_meta(
         bucket,
         key,

@@ -1,5 +1,6 @@
 from datetime import UTC
 
+from server.crash_points import COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_OBJECT_META, crash_point
 from server.errors.s3errors import InvalidPart
 from server.metadata.base import ObjectMeta
 from server.storage.base import PartSpec
@@ -43,6 +44,7 @@ def complete_multipart_upload(
 
     # 1. Assemble parts into final object file (durable write)
     composite_etag = storage.assemble_parts(bucket, key, upload_id, parts)
+    crash_point(COMPLETE_AFTER_ASSEMBLE)
 
     # 2. Compute total size from recorded part metadata
     total_size = sum(recorded[p.part_number].size for p in parts)
@@ -62,6 +64,8 @@ def complete_multipart_upload(
             content_type=content_type,
         ),
     )
+
+    crash_point(COMPLETE_AFTER_OBJECT_META)
 
     # 4. Mark upload complete
     metadata.complete_upload(upload_id)

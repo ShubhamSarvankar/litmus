@@ -38,11 +38,19 @@ def _wait_ready(port: int, timeout: float = 10.0) -> None:
 
 
 class ServerProcess:
-    def __init__(self, data_dir: Path, db_path: Path, port: int, write_delay_ms: int = 0):
+    def __init__(
+        self,
+        data_dir: Path,
+        db_path: Path,
+        port: int,
+        write_delay_ms: int = 0,
+        crash_point: str | None = None,
+    ):
         self._data_dir = data_dir
         self._db_path = db_path
         self._port = port
         self._write_delay_ms = write_delay_ms
+        self._crash_point = crash_point
         self._proc: subprocess.Popen | None = None
         self._log: list[str] = []
 
@@ -54,6 +62,12 @@ class ServerProcess:
         env["S3_DB_PATH"] = str(self._db_path)
         env["S3_PORT"] = str(self._port)
         env["S3_TEST_WRITE_DELAY_MS"] = str(self._write_delay_ms)
+        # Set or clear explicitly so a value inherited from the test runner's
+        # environment can never arm a crash point on a server that didn't ask for one.
+        if self._crash_point:
+            env["S3_TEST_CRASH_POINT"] = self._crash_point
+        else:
+            env.pop("S3_TEST_CRASH_POINT", None)
 
         self._proc = subprocess.Popen(
             [
@@ -79,6 +93,12 @@ class ServerProcess:
         if self._proc and self._proc.poll() is None:
             os.kill(self._proc.pid, signal.SIGKILL)
             self._proc.wait()
+
+    def wait_for_exit(self, timeout: float = 10.0) -> int:
+        """Wait for the process to exit on its own (e.g. at a crash point) and
+        return its return code; -signal.SIGKILL means it was SIGKILLed."""
+        assert self._proc is not None
+        return self._proc.wait(timeout=timeout)
 
     def restart(self) -> None:
         self.start()
@@ -137,7 +157,12 @@ def live_server(tmp_path: Path):
 
 @pytest.fixture
 def live_server_slow(tmp_path: Path):
-    """Same as live_server but with TEST_WRITE_DELAY_MS set for reliable SIGKILL timing."""
+    """Same as live_server but with S3_TEST_WRITE_DELAY_MS=200.
+
+    The delay is a single 200ms sleep per PUT/UploadPart before the body is written
+    to the temp file (see server/config.py); it does not slow CompleteMultipartUpload.
+    For a deterministic kill at a specific step, use ServerProcess(crash_point=...).
+    """
     if os.name == "nt":
         pytest.skip("Tier B crash tests require POSIX (SIGKILL not available on Windows)")
 
@@ -146,7 +171,7 @@ def live_server_slow(tmp_path: Path):
         data_dir=tmp_path,
         db_path=tmp_path / "meta.db",
         port=port,
-        write_delay_ms=200,  # 200ms delay per chunk — makes SIGKILL timing reliable
+        write_delay_ms=200,  # one 200ms sleep per PUT/UploadPart, before the body is written
     )
     server.start()
     server.wait_ready()

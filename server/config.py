@@ -20,8 +20,15 @@ class Settings:
     host: str = "0.0.0.0"
     # crash_model: only process-kill (SIGKILL) durability is guaranteed
     crash_model: str = "process-kill"
-    # TEST_WRITE_DELAY_MS: used by Tier B chaos tests to slow writes for reliable SIGKILL timing
+    # S3_TEST_WRITE_DELAY_MS: Tier B chaos tests only. One sleep of this many ms in
+    # FilesystemBackend._durable_write (PUT and UploadPart), after the temp file is
+    # created and before any bytes are written to it. The request body is already
+    # fully buffered by then. Not applied per chunk, and not applied to
+    # CompleteMultipartUpload assembly.
     test_write_delay_ms: int = field(default_factory=lambda: _env_int("S3_TEST_WRITE_DELAY_MS", 0))
+    # S3_TEST_CRASH_POINT: Tier B chaos tests only. Names a step in the write path at
+    # which the server SIGKILLs itself; see server/crash_points.py. Empty = inert.
+    test_crash_point: str = field(default_factory=lambda: os.environ.get("S3_TEST_CRASH_POINT", ""))
 
 
 settings = Settings()

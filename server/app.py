@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -5,9 +6,12 @@ from fastapi.responses import JSONResponse, Response
 
 from server.config import settings
 from server.consistency import run_consistency_sweep
+from server.crash_points import validate_configured_crash_point
 from server.errors.s3errors import S3Error, render_error
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.filesystem import FilesystemBackend
+
+logger = logging.getLogger(__name__)
 
 
 def _default_storage() -> FilesystemBackend:
@@ -26,6 +30,13 @@ def create_app(
     storage: FilesystemBackend | None = None,
     metadata: SQLiteMetadataStore | None = None,
 ) -> FastAPI:
+    validate_configured_crash_point()
+    if settings.test_crash_point:
+        logger.warning(
+            "TEST CRASH POINT ARMED: %s — this server will SIGKILL itself",
+            settings.test_crash_point,
+        )
+
     _storage = storage or _default_storage()
     _metadata = metadata or _default_metadata()
 
