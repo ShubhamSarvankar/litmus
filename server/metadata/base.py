@@ -55,6 +55,15 @@ class BlobRecord:
     part_number: int | None
 
 
+@dataclass
+class StoreRecord:
+    """The store identity row (docs/design/storage-layout.md I7, §5)."""
+
+    store_id: str
+    state: str  # 'initializing' or 'ready'
+    blob_dir: str
+
+
 # --- refused commits ---
 
 

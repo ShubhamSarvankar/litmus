@@ -51,6 +51,14 @@ def _seed_object(deps, bucket: str, key: str, body: bytes = b"data"):
     return etag
 
 
+def _first_start(deps):
+    """Start and stop an app on these stores once, so the store ID exists before any
+    data is seeded (a first start refuses a database that already has rows)."""
+    storage, metadata = deps
+    with TestClient(create_app(storage=storage, metadata=metadata)):
+        pass
+
+
 def _object_path(deps, bucket: str, key: str):
     """The blob file of an object, resolved through its metadata row."""
     storage, metadata = deps
@@ -194,6 +202,7 @@ def test_sweep_completed_uploads_not_checked(deps):
 
 
 def test_server_starts_with_orphaned_metadata(deps):
+    _first_start(deps)
     storage, metadata = deps
     _seed_object(deps, "b", "orphan.txt")
     _object_path(deps, "b", "orphan.txt").unlink()
@@ -206,6 +215,7 @@ def test_server_starts_with_orphaned_metadata(deps):
 
 
 def test_server_accepts_requests_with_sweep_issues(deps):
+    _first_start(deps)
     storage, metadata = deps
     _seed_object(deps, "b", "orphan.txt")
     _object_path(deps, "b", "orphan.txt").unlink()

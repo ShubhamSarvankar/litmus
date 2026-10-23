@@ -33,7 +33,10 @@ def test_startup_hook_runs_in_process(tmp_path):
     storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")
     app = create_app(storage=storage, metadata=metadata)
-    # create_app made the tree; plant leftovers of a write that died.
+    # First start: establishes the store ID before any data exists.
+    with TestClient(app):
+        pass
+    # Plant leftovers of a write that died.
     blob_id = metadata.register_blob("object", "b", "k")
     storage.temp_path(blob_id).write_bytes(b"partial")
     with TestClient(app) as client:
@@ -53,7 +56,7 @@ def test_startup_builds_default_stores_and_tree(default_paths):
         assert client.put("/b/k", content=b"hello").status_code == 200
         assert client.get("/b/k").content == b"hello"
     blobs = default_paths / "blobs"
-    assert sorted(p.name for p in blobs.iterdir()) == sorted([*FANOUT, "tmp"])
+    assert sorted(p.name for p in blobs.iterdir()) == sorted([*FANOUT, "tmp", "LOCK", "STORE_ID"])
     assert (default_paths / "meta.db").is_file()
 
 

@@ -1,7 +1,7 @@
 # Storage layout redesign
 
-Status: accepted, not implemented. The design follows the requirements below; the
-decisions are recorded in §19.
+Status: step (a) implemented; step (b) not started. The design follows the
+requirements below; the decisions are recorded in §19.
 
 ## Requirements
 
@@ -189,8 +189,8 @@ rename, fsync of the parent directory, then the SQLite commit).
 
 ## Design proposal
 
-Status: accepted, not implemented. Reviewed on 2026-10-23; the decisions are recorded
-in §19 and the open questions marked in §18. Requirement numbers are written R1 to R25
+Status: step (a) implemented; step (b) not started. Reviewed on 2026-10-23; the
+decisions are recorded in §19 and the open questions marked in §18. Requirement numbers are written R1 to R25
 (the numbered items above); sections of this design are written §1 to §19.
 
 Notation used in the sequences:
@@ -680,8 +680,8 @@ after it, an open upload with no parts.
 #### §6.6 UploadPart, including re-uploading a part number
 
 U1. Read-only checks: the upload is open and belongs to this bucket and key (else
-    NoSuchUpload; the bucket and key check is new, see open question 9 in §18); the
-    part number is between 1 and 10000.
+    NoSuchUpload); the part number is between 1 and 10000. Decision 17: the bucket and
+    key check stays in the design but comes with the multipart work, not step (a).
 
 U2. `id = REGISTER('part', bucket, key, upload_id, part_number)` **[C]**.
     `⚡part-after-register`
@@ -720,7 +720,8 @@ same part number both succeed; the later commit wins (§9).
 #### §6.7 CompleteMultipartUpload
 
 C1. Read-only: parse and validate the body (an empty body is MalformedXML, separate
-    work). The upload is open and belongs to this bucket and key (else NoSuchUpload).
+    work). The upload is open and belongs to this bucket and key (else NoSuchUpload;
+    the bucket and key part comes with the multipart work, decision 17).
     Read the part rows and validate the requested list: ascending part numbers, every
     part recorded with a matching ETag (else InvalidPart / InvalidPartOrder). Remember
     each requested part's `blob_id` and size. Optional early conditional check (§10).
@@ -738,9 +739,13 @@ C3. `ASSEMBLE_BLOB(id, <the remembered part blob_ids>)` **[Ff] [Fd]**
 
 C4. BEGIN IMMEDIATE
 
-    a. SELECT state FROM multipart_uploads WHERE upload_id = ?; anything but 'open':
-       ROLLBACK, unlink, RELEASE(id), NoSuchUpload. The existing object is untouched,
-       because nothing outside the fresh blob was written (R6).
+    a. UPDATE multipart_uploads SET state = 'completed'
+       WHERE upload_id = ? AND state = 'open'. No row updated (the upload is aborted,
+       completed or unknown): ROLLBACK, unlink, RELEASE(id), NoSuchUpload. The
+       existing object is untouched, because nothing outside the fresh blob was
+       written (R6). This compare-and-set on the upload state runs first, so every
+       later failure in the transaction is rolled back together with it (recorded in
+       step (a); the proposal listed it last).
     b. Each requested part's current multipart_parts.blob_id must equal the blob that
        was assembled; otherwise a re-upload committed during assembly: ROLLBACK,
        unlink, RELEASE(id), InvalidPart.
@@ -756,11 +761,9 @@ C4. BEGIN IMMEDIATE
     g. Listed parts: their blobs become 'garbage'; UPDATE multipart_parts SET
        blob_id = NULL for them (ETag and size stay, R21).
     h. Unlisted parts: their blobs become 'garbage'; delete their part rows.
-    i. UPDATE multipart_uploads SET state = 'completed'
-       WHERE upload_id = ? AND state = 'open' (exactly one row, else ROLLBACK).
 
 COMMIT **[C]**. This one transaction carries both the object metadata (d) and the
-upload completion (i), as `commit_completed_upload` does today (R5).
+upload completion (a), as `commit_completed_upload` does today (R5).
 `⚡complete-after-commit`
 
 C5. `GC(<old object blob, if any> + <every part blob>)` (`⚡complete-after-gc-unlink`
@@ -876,19 +879,23 @@ naming the cause, before anything in `blobs/` is deleted.
    | `ready`, id X | missing, or not X | refuse: this blob directory does not belong to this database |
    | none | present | refuse: this blob directory belongs to another database |
    | none | missing | first start (below) |
-   | `initializing`, id X, `blob_dir` B | missing or X, and realpath(`S3_BLOB_DIR`) is B | finish the first start (below, from step c) |
+   | `initializing`, id X, `blob_dir` B | missing or X, realpath(`S3_BLOB_DIR`) is B, and the store never held data (decision 16, below) | finish the first start (below, from step c) |
    | `initializing` | anything else | refuse |
 
    First start:
 
    a. Refuse unless `blobs/` holds nothing but `LOCK`, `tmp/` and empty fanout
-      directories. Blob files without a marker belong to some other store.
+      directories, and no table other than `store` and `schema_version` has a row.
+      Blob files without a marker belong to some other store. A database with rows
+      but no store ID was not created for this blob directory; binding the two would
+      make the right blob directory refused for good.
    b. Generate `store_id = token_hex(16)`; INSERT the `store` row with
       `state = 'initializing'` and `blob_dir = realpath(S3_BLOB_DIR)` **[C]**. If the
       insert fails because a row appeared (a second server initializing the same
       database at the same moment), read the row again and go back to the table.
       `⚡store-init-after-commit`
-   c. Write `tmp/STORE_ID.tmp` (removing a leftover first) **[Ff]**, rename it to
+   c. Write `tmp/STORE_ID.tmp` (creating `tmp/` first if it is missing, with
+      **[Fd]** `blobs/`, and removing a leftover temp file) **[Ff]**, rename it to
       `blobs/STORE_ID`, **[Fd]** `blobs/`.
    d. UPDATE the row to `state = 'ready'` **[C]**.
 
@@ -899,6 +906,13 @@ naming the cause, before anything in `blobs/` is deleted.
    still starts; refusing it would leave a store that can never start after a kill
    during its first start (decision 16). Recording `blob_dir` means that only the blob
    directory chosen at first start can adopt an `initializing` row.
+
+   Decision 16, as accepted: an `initializing` store is finished only if it never held
+   data. No table other than `store` and `schema_version` may have a row (bucket rows
+   count), and `blobs/` may contain nothing except `LOCK`, empty fanout directories, a
+   `tmp/` that is empty or holds only `tmp/STORE_ID.tmp`, and `STORE_ID` when it holds
+   this store's own ID (left by a kill between c and d). Otherwise the server refuses
+   to start.
 7. Create the fanout directories and `tmp/` and fsync them (§4).
 8. Run the sweep.
 
@@ -953,9 +967,10 @@ GET (and range GET):
 3. `fd = open(blobs/<id[:2]>/<id>)`.
    - ENOENT: read the row again. If it now names a different blob, go back to step 2
      with the new row; if it is gone, 404; if it still names the same blob, the bytes
-     are lost: 500 InternalError (reported by the sweep as `OrphanedMetadata`). After
-     three retries in a row (three commits replacing the key during one GET), answer
-     503 SlowDown. Decision 14.
+     are lost: 500 InternalError (reported by the sweep as `OrphanedMetadata`). Three
+     such retries are allowed; the fourth failed open answers 503 SlowDown, so one GET
+     opens at most four times. Three commits racing one GET are served on the fourth
+     open; four get 503. Decision 14.
 4. `fstat(fd).st_size` must equal the row's size, else 500 (never send a truncated
    body).
 5. Send the headers from the row from step 1 (or its retry), then stream from `fd`
@@ -1154,7 +1169,7 @@ the index now supports them.
 | R22 | §5, §6.5 |
 | R23 | §5, §13 |
 | R24 | §4 |
-| R25 | not in this change. After steps (a) and (b) are implemented, you rewrite `docs/crash-model.md`, `docs/publication-barrier.md` and `docs/compatibility.md` before any feature work (decision 15). The README's crash and publication-barrier sections are not assigned yet (open question 12) |
+| R25 | not in this change. After steps (a) and (b) are implemented, you rewrite `docs/crash-model.md`, `docs/publication-barrier.md` and `docs/compatibility.md` before any feature work (decision 15). The README's crash and publication-barrier sections are part of that rewrite (decision 18) |
 
 ### §15. Tier B tests
 
@@ -1229,8 +1244,9 @@ New tests outside Tier B (conformance or Tier A):
 
 **Store identity tests (I7, §7 step 6).** Each refusal test asserts that the server exits
 non-zero before accepting requests, that the log names the mismatch, and that the blob
-directory and the database are unchanged: the same files and the same rows before and
-after. That proves the sweep never ran.
+directory and the database are unchanged: the same files with the same bytes before
+and after, except that a `LOCK` file may appear (§7 step 5 runs before the check).
+That proves the sweep never ran.
 
 - `test_first_start_writes_matching_store_ids`: a fresh database and a fresh blob
   directory. Afterwards the `store` row is `ready` and `blobs/STORE_ID` holds the same
@@ -1466,25 +1482,22 @@ written. Each is marked **Resolved** (with the decision that settled it) or **Op
    `test_path_safety.py` tests are converted, not deleted (§16), in step (b).
 8. **Resolved (decision 4). R12 "migration".** No migration; the server refuses to start
    on version-1 data or the old environment variables (§5).
-9. **Open. Upload and request bucket/key mismatch.** UploadPart, Complete and Abort look
-   up the upload by ID only. §6.6 and §6.7 add a check that the upload belongs to the
-   request's bucket and key (NoSuchUpload otherwise). That this matches S3 is not
-   confirmed, and it is not in the requirements. Confirm or drop before step (a)
-   lands.
+9. **Resolved (decision 17). Upload and request bucket/key mismatch.** UploadPart,
+   Complete and Abort look up the upload by ID only. The check that the upload belongs
+   to the request's bucket and key (§6.6, §6.7) stays in the design and is implemented
+   with the multipart work, not in step (a). Whether it matches S3 is still to be
+   confirmed then.
 10. **Open. R23 and keys that are not valid UTF-8.** Keys are stored as SQLite TEXT,
     today and in this design. Whether a percent-encoded key with invalid UTF-8 can
     reach the handlers, and what S3 does with it, is not covered by any requirement.
     Listing order (BINARY collation) assumes valid UTF-8.
-11. **Open (decision 16). The first-start exception to the store identity rule.** You
-    asked to refuse startup when only one side has the store ID. Applied literally, a
-    kill between the database write and the marker write at first start would leave a
-    store that can never start again. §7 therefore accepts exactly one one-sided state,
-    an `initializing` row adopted only by the blob directory recorded with it, and
-    refuses everything else.
-12. **Open. README sections in R25.** R25 also lists the README's crash and
-    publication-barrier sections. Decision 15 assigns you `docs/crash-model.md`,
-    `docs/publication-barrier.md` and `docs/compatibility.md`; the README is not
-    assigned to anyone yet.
+11. **Resolved (decision 16). The first-start exception to the store identity rule.**
+    Applied literally, refusing every one-sided store would leave a store that can never
+    start after a kill between the database write and the marker write at first start.
+    §7 accepts exactly one one-sided state: an `initializing` row, adopted only by the
+    blob directory recorded with it, and only if the store never held data.
+12. **Resolved (decision 18). README sections in R25.** The README's crash and
+    publication-barrier sections are part of your doc rewrite after steps (a) and (b).
 
 ### §19. Decisions
 
@@ -1519,7 +1532,9 @@ Recorded on 2026-10-23.
 12. **DeleteObjects.** One transaction per request (§6.4).
 13. **Schema details.** User metadata as one JSON column, plus the system header
     columns listed in §5.
-14. **GET retry bound.** Three ENOENT retries, then 503 SlowDown (§8).
+14. **GET retry bound.** Three ENOENT retries, then 503 SlowDown on the fourth failed
+    open: at most four opens per GET. Three racing commits are served on the fourth
+    open; four get 503 (§8).
 15. **Order of work.** The implementation covers only:
     - (a) the layout, the blob registry, the sweep, the startup lock and store
       identity, the Tier B tests in §15 and the other tests in §16, including the
@@ -1533,13 +1548,19 @@ Recorded on 2026-10-23.
     (§10) and CopyObject / UploadPartCopy (§11) come later, in an order you choose.
     They are not part of this implementation.
 
-Still needed from you:
+Recorded during step (a):
 
-16. **First-start exception (open question 11).** Accept §7's rule that an
-    `initializing` store row, adopted only by the blob directory recorded with it, is
-    the one one-sided state that may start. The alternative is to refuse it as well;
-    an operator would then have to empty both sides after a kill during first start.
-17. **Upload bucket/key check (open question 9).** Keep or drop the check that an upload
-    belongs to the request's bucket and key.
-18. **README (open question 12).** Who rewrites the README's crash and
-    publication-barrier sections, and when.
+16. **First-start exception.** Accepted, on one condition: an `initializing` store row
+    is finished only by the blob directory recorded with it, and only if the store
+    never held data. No table other than `store` and `schema_version` may have a row
+    (bucket rows count), and `blobs/` may contain nothing except `LOCK`, empty fanout
+    directories, a `tmp/` that is empty or holds only the store ID temp file, and
+    `STORE_ID` when it holds this store's own ID (left by a kill between the marker
+    write and the ready update). Otherwise the server refuses to start (§7). A first
+    start where neither side has an ID also requires every table other than `store`
+    and `schema_version` to be empty (§7 step 6a). The refusal tests (§16) allow a `LOCK`
+    file to appear; every other file must be unchanged.
+17. **Upload bucket/key check.** Kept in the design (§6.6, §6.7), implemented with the
+    multipart work, not in step (a).
+18. **README.** The README's crash and publication-barrier sections are part of your
+    doc rewrite after steps (a) and (b) (decision 15).

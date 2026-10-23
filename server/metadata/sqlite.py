@@ -12,6 +12,7 @@ from server.metadata.base import (
     ObjectMeta,
     PartMeta,
     PartsChanged,
+    StoreRecord,
     UploadMeta,
     UploadNotOpen,
 )
@@ -223,6 +224,51 @@ class SQLiteMetadataStore:
             for statement in _DDL:
                 conn.execute(statement)
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
+
+    # --- Store identity (I7, §7) ---
+
+    def get_store(self) -> StoreRecord | None:
+        rows = self._read("SELECT store_id, state, blob_dir FROM store")
+        if not rows:
+            return None
+        r = rows[0]
+        return StoreRecord(store_id=r["store_id"], state=r["state"], blob_dir=r["blob_dir"])
+
+    def create_store(self, store_id: str, blob_dir: str) -> bool:
+        """Insert the store row as 'initializing'. False, changing nothing, if a row
+        already exists (another server initialized this database meanwhile)."""
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    "INSERT INTO store (singleton, store_id, state, blob_dir, created_at) "
+                    "VALUES (1, ?, 'initializing', ?, ?)",
+                    (store_id, blob_dir, _now()),
+                )
+        except sqlite3.IntegrityError:
+            if self.get_store() is None:
+                raise
+            return False
+        return True
+
+    def mark_store_ready(self, store_id: str) -> None:
+        with self._write() as conn:
+            cur = conn.execute(
+                "UPDATE store SET state = 'ready' WHERE store_id = ? AND state = 'initializing'",
+                (store_id,),
+            )
+            if cur.rowcount != 1:
+                raise RegistryError(f"store {store_id} is not initializing")
+
+    def holds_data(self) -> bool:
+        """Whether any table other than store and schema_version has a row."""
+        conn = self._connect()
+        try:
+            return any(
+                conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                for table in ("buckets", "blobs", "multipart_uploads", "multipart_parts", "objects")
+            )
+        finally:
+            conn.close()
 
     # --- Buckets ---
 

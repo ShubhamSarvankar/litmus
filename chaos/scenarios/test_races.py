@@ -223,8 +223,39 @@ def test_get_gives_up_with_503_when_every_read_is_raced(env, monkeypatch):
 
     assert resp.status_code == 503
     assert ET.fromstring(resp.text).findtext("Code") == "SlowDown"
-    assert 2 <= len(opens) <= 4
+    assert len(opens) == 4
     assert all(outcome == "ENOENT" for _, outcome in opens)
+
+
+def _racing_commits(env, monkeypatch, commits: int):
+    """GET with `commits` overwrites, one right after each of its first row reads."""
+    reader, writer, storage, metadata = env
+    bodies = iter([b"version %d" % n * 100 for n in range(2, 2 + commits)])
+    _after_row_read(
+        monkeypatch,
+        metadata,
+        lambda: writer.put(f"/{BUCKET}/{KEY}", content=next(bodies)),
+        times=commits,
+    )
+    opens = _record_opens(monkeypatch, storage)
+    return reader.get(f"/{BUCKET}/{KEY}"), opens
+
+
+def test_get_three_racing_commits_are_served_on_the_fourth_open(env, monkeypatch):
+    """Decision 14's boundary: three ENOENT retries are allowed."""
+    resp, opens = _racing_commits(env, monkeypatch, 3)
+    assert [outcome for _, outcome in opens] == ["ENOENT", "ENOENT", "ENOENT", "ok"]
+    assert resp.status_code == 200
+    assert resp.content == b"version 4" * 100
+    assert resp.headers["etag"] == _md5(b"version 4" * 100)
+
+
+def test_get_four_racing_commits_get_503_after_four_opens(env, monkeypatch):
+    """Decision 14's boundary: the fourth failed open answers 503."""
+    resp, opens = _racing_commits(env, monkeypatch, 4)
+    assert [outcome for _, outcome in opens] == ["ENOENT"] * 4
+    assert resp.status_code == 503
+    assert ET.fromstring(resp.text).findtext("Code") == "SlowDown"
 
 
 # --- §9: concurrent PUTs to the same key ---

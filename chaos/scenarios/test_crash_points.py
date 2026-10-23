@@ -61,6 +61,7 @@ from server.crash_points import (
     PUT_AFTER_GC_UNLINK,
     PUT_AFTER_REGISTER,
     PUT_MID_WRITE,
+    STORE_INIT_AFTER_COMMIT,
     SWEEP_AFTER_UNLINK,
 )
 from server.metadata.sqlite import SQLiteMetadataStore
@@ -1283,3 +1284,61 @@ def test_delete_bucket_killed_after_commit(tmp_path: Path):
         assert retry.status_code == 404
         assert ET.fromstring(retry.text).findtext("Code") == "NoSuchBucket"
         assert _snapshot(tmp_path, upload_id) == before
+
+
+# First start (§7 step 6)
+
+
+def test_first_start_killed_after_store_row(tmp_path: Path):
+    """The store row is committed as 'initializing', the marker not yet written."""
+    starter = ServerProcess(
+        data_dir=tmp_path,
+        db_path=tmp_path / "meta.db",
+        port=_find_free_port(),
+        crash_point=STORE_INIT_AFTER_COMMIT,
+    )
+    starter.start()
+    assert starter.wait_for_exit() == -signal.SIGKILL
+
+    # (a) One side holds the ID: an initializing row for this blob directory, no
+    # marker, and nothing in blobs/ but its LOCK.
+    store = _store(tmp_path).get_store()
+    blob_root = tmp_path / "blobs"
+    assert store.state == "initializing"
+    assert store.blob_dir == os.path.realpath(blob_root)
+    assert not (blob_root / "STORE_ID").exists()
+    assert sorted(p.name for p in blob_root.iterdir()) == ["LOCK"]
+
+    # (b) Nothing for the sweep to do.
+    assert _sweep(tmp_path).clean
+
+    # (c) A server given this database and another blob directory refuses and
+    # changes nothing (a LOCK file may appear).
+    def files() -> dict[Path, bytes]:
+        return {
+            p.relative_to(tmp_path): p.read_bytes()
+            for p in sorted(tmp_path.rglob("*"))
+            if p.is_file() and p.name != "LOCK"
+        }
+
+    other = tmp_path / "other"
+    (other / "blobs").mkdir(parents=True)
+    before = files()
+    wrong = ServerProcess(data_dir=other, db_path=tmp_path / "meta.db", port=_find_free_port())
+    wrong.start()
+    returncode = wrong.wait_for_exit()
+    logs = wrong.collect_logs()
+    assert returncode not in (0, -signal.SIGKILL), logs
+    assert "was initialized for blob directory" in logs
+    assert files() == before
+    assert _store(tmp_path).get_store() == store
+
+    # (d) The retry: a restart with the same blob directory finishes the first
+    # start, then serves.
+    with _restarted(tmp_path) as client:
+        finished = _store(tmp_path).get_store()
+        assert (finished.store_id, finished.state) == (store.store_id, "ready")
+        assert (blob_root / "STORE_ID").read_text() == store.store_id + "\n"
+        assert client.put(f"/{BUCKET}").status_code == 200
+        assert client.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        _assert_object(client, NEW, _md5(NEW))

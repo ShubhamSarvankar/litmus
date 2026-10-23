@@ -43,6 +43,10 @@ class InvalidBlobId(ValueError):
     """A string that is not a blob ID was used where a blob ID is required."""
 
 
+class StoreInUse(RuntimeError):
+    """Another process holds the lock on this blob directory."""
+
+
 class MissingPartBlob(FileNotFoundError):
     """A part blob named for assembly does not exist."""
 
@@ -106,10 +110,9 @@ class BlobStore:
 
     # --- directory tree ---
 
-    def create_tree(self) -> None:
-        """Create blobs/, its 256 fanout directories and tmp/ where missing, and
-        make the new directory entries durable. Idempotent; also completes a tree
-        left half-created by a kill."""
+    def create_root(self) -> None:
+        """Create blobs/ and any missing parent, one level at a time, top down, each
+        new entry made durable in its parent."""
         missing = []
         level = self._root
         while not level.is_dir():
@@ -119,6 +122,12 @@ class BlobStore:
         for directory in reversed(missing):
             directory.mkdir(mode=0o700)
             _fsync_dir(directory.parent)
+
+    def create_tree(self) -> None:
+        """Create blobs/, its 256 fanout directories and tmp/ where missing, and
+        make the new directory entries durable. Idempotent; also completes a tree
+        left half-created by a kill."""
+        self.create_root()
         created = False
         for name in (*FANOUT, TMP_DIR):
             path = self._root / name
@@ -246,6 +255,92 @@ class BlobStore:
         except FileNotFoundError:
             return False
         return True
+
+    # --- startup: lock and store marker (docs/design/storage-layout.md §7) ---
+
+    @property
+    def marker_path(self) -> Path:
+        return self._root / MARKER_NAME
+
+    @property
+    def marker_temp_path(self) -> Path:
+        return self._root / TMP_DIR / f"{MARKER_NAME}.tmp"
+
+    def acquire_lock(self) -> int:
+        """Take an exclusive, non-blocking lock on blobs/LOCK and return its file
+        descriptor; held until release_lock. Raises StoreInUse if another process
+        holds it. blobs/ must exist."""
+        fd = os.open(self._root / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise StoreInUse(f"{self._root} is in use by another server") from None
+        return fd
+
+    @staticmethod
+    def release_lock(fd: int) -> None:
+        os.close(fd)
+
+    def read_marker(self) -> str | None:
+        """The content of blobs/STORE_ID without its trailing newline, or None if the
+        file does not exist."""
+        try:
+            return self.marker_path.read_text().rstrip("\n")
+        except FileNotFoundError:
+            return None
+
+    def write_marker(self, store_id: str) -> None:
+        """Write blobs/STORE_ID: tmp/STORE_ID.tmp, fsync, rename, fsync blobs/."""
+        tmp = self._root / TMP_DIR
+        if not tmp.is_dir():
+            tmp.mkdir(mode=0o700)
+            _fsync_dir(self._root)
+        temp = self.marker_temp_path
+        try:
+            os.unlink(temp)  # left by a start killed while writing it
+        except FileNotFoundError:
+            pass
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(store_id + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.rename(temp, self.marker_path)
+        _fsync_dir(self._root)
+
+    def unexpected_entries(
+        self, tmp_holds_only_marker_temp: bool, marker: str | None
+    ) -> list[Path]:
+        """Entries under blobs/ that mean it has held data: anything but LOCK, the
+        fanout directories (which must be empty) and tmp/. With
+        tmp_holds_only_marker_temp, tmp/ may hold nothing but tmp/STORE_ID.tmp.
+        STORE_ID is expected only if marker is given and the file holds exactly it."""
+        if not self._root.is_dir():
+            return []
+        found = []
+        for entry in sorted(self._root.iterdir()):
+            name = entry.name
+            if name == LOCK_NAME and entry.is_file():
+                continue
+            if name == MARKER_NAME and marker is not None and self.read_marker() == marker:
+                continue
+            if name in FANOUT and entry.is_dir():
+                found += sorted(entry.iterdir())
+                continue
+            if name == TMP_DIR and entry.is_dir():
+                if tmp_holds_only_marker_temp:
+                    found += [e for e in sorted(entry.iterdir()) if e != self.marker_temp_path]
+                continue
+            found.append(entry)
+        return found
 
     # --- for the startup sweep ---
 

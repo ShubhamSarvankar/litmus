@@ -48,6 +48,9 @@ BUCKET_DELETE_AFTER_COMMIT = "bucket-delete-after-commit"
 # Startup sweep (§7): a file of a pending or garbage row is unlinked; its row is not
 # deleted yet.
 SWEEP_AFTER_UNLINK = "sweep-after-unlink"
+# First start (§7 step 6): the store row is committed as 'initializing'; the
+# STORE_ID marker is not written yet.
+STORE_INIT_AFTER_COMMIT = "store-init-after-commit"
 
 CRASH_POINTS = frozenset(
     {
@@ -72,6 +75,7 @@ CRASH_POINTS = frozenset(
         ABORT_AFTER_COMMIT,
         BUCKET_DELETE_AFTER_COMMIT,
         SWEEP_AFTER_UNLINK,
+        STORE_INIT_AFTER_COMMIT,
     }
 )
 
