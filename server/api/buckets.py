@@ -11,6 +11,8 @@ from server.errors.s3errors import (
     NoSuchBucket,
     NotImplementedOperation,
 )
+from server.metadata.base import BucketHasObjects, BucketMissing
+from server.storage.lifecycle import collect_garbage
 
 router = APIRouter()
 
@@ -183,7 +185,10 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         ET.SubElement(e, "Message").text = message
         return e
 
+    # Entries in request order; keys to delete are collected and deleted together in
+    # one transaction after every entry is checked (docs/design/storage-layout.md §6.4).
     entries = []
+    to_delete = []
     for obj in _find("Object"):
         key, version_id = _text(obj, "Key"), _text(obj, "VersionId")
         # Keys and version IDs arrive in the body, so the request guard cannot see them.
@@ -209,13 +214,15 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
                 _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
             )
             continue
-        storage.delete_object(bucket, key)
-        metadata.delete_object_meta(bucket, key)
+        to_delete.append(key)
         d = ET.Element("Deleted")
         ET.SubElement(d, "Key").text = key
         if version_id is not None:
             ET.SubElement(d, "VersionId").text = version_id
         entries.append(d)
+
+    garbage = metadata.delete_objects(bucket, to_delete)
+    collect_garbage(storage, metadata, garbage)
 
     result = ET.Element("DeleteResult")
     for entry in entries:
@@ -250,10 +257,15 @@ async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
 
 @router.delete("/{bucket}")
 async def delete_bucket(bucket: str, request: Request) -> Response:
+    """DeleteBucket (docs/design/storage-layout.md §6.9): open multipart uploads are
+    aborted in the same transaction (decision 7)."""
     metadata = request.app.state.metadata
-    if not metadata.bucket_exists(bucket):
-        raise NoSuchBucket(extra={"BucketName": bucket})
-    if metadata.object_count(bucket) > 0:
-        raise BucketNotEmpty(extra={"BucketName": bucket})
-    metadata.delete_bucket(bucket)
+    storage = request.app.state.storage
+    try:
+        garbage = metadata.delete_bucket(bucket)
+    except BucketMissing:
+        raise NoSuchBucket(extra={"BucketName": bucket}) from None
+    except BucketHasObjects:
+        raise BucketNotEmpty(extra={"BucketName": bucket}) from None
+    collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)

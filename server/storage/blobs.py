@@ -11,6 +11,7 @@ recorded in the metadata registry (the blobs table).
 """
 
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -21,7 +22,8 @@ from pathlib import Path
 from typing import IO
 
 from server.crash_points import crash_point
-from server.storage.filesystem import _contained
+
+logger = logging.getLogger(__name__)
 
 FANOUT = tuple(f"{n:02x}" for n in range(256))
 TMP_DIR = "tmp"
@@ -31,6 +33,10 @@ MARKER_NAME = "STORE_ID"
 
 _ID = re.compile(r"[0-9a-f]{32}")
 _CHUNK = 65536
+
+
+class UnsafePathError(ValueError):
+    """A name would map outside its directory."""
 
 
 class InvalidBlobId(ValueError):
@@ -51,6 +57,18 @@ def new_blob_id() -> str:
 
 def is_blob_id(name: str) -> bool:
     return _ID.fullmatch(name) is not None
+
+
+def _contained(base: Path, *names: str) -> Path:
+    """Join names under base and refuse the result unless it is strictly inside base.
+
+    Lexical check (os.path.normpath), so it does not depend on what exists on disk.
+    """
+    root = os.path.abspath(base)
+    path = os.path.normpath(os.path.join(root, *names))
+    if os.path.commonpath([root, path]) != root or path == root:
+        raise UnsafePathError(f"{'/'.join(names)!r} resolves outside {root}")
+    return Path(path)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -92,9 +110,15 @@ class BlobStore:
         """Create blobs/, its 256 fanout directories and tmp/ where missing, and
         make the new directory entries durable. Idempotent; also completes a tree
         left half-created by a kill."""
-        if not self._root.is_dir():
-            self._root.mkdir(mode=0o700, parents=True)
-            _fsync_dir(self._root.parent)
+        missing = []
+        level = self._root
+        while not level.is_dir():
+            missing.append(level)
+            level = level.parent
+        # One level at a time, top down, each new entry made durable in its parent.
+        for directory in reversed(missing):
+            directory.mkdir(mode=0o700)
+            _fsync_dir(directory.parent)
         created = False
         for name in (*FANOUT, TMP_DIR):
             path = self._root / name
@@ -175,11 +199,18 @@ class BlobStore:
             renamed = True
             _fsync_dir(final.parent)
         except BaseException:
-            for path in (final,) if renamed else (temp,):
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+            leftover = final if renamed else temp
+            try:
+                os.unlink(leftover)
+            except FileNotFoundError:
+                pass
+            except OSError as unlink_error:
+                # The file stays for the startup sweep. The caller sees it through
+                # has_files() and keeps the registry row pending; the original
+                # exception is the one that propagates.
+                logger.warning(
+                    "could not remove %s after a failed write: %s", leftover, unlink_error
+                )
             raise
 
     # --- reading and removing ---
@@ -193,6 +224,19 @@ class BlobStore:
             return os.stat(self.blob_path(blob_id)).st_size
         except FileNotFoundError:
             return None
+
+    def has_files(self, blob_id: str) -> bool:
+        """Whether the blob's temp file or blob file may still exist. A stat that
+        fails for any reason other than ENOENT counts as existing."""
+        for path in (self.temp_path(blob_id), self.blob_path(blob_id)):
+            try:
+                os.stat(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+            return True
+        return False
 
     def remove_blob(self, blob_id: str) -> bool:
         """Unlink a blob. Returns False if it was already gone; other errors

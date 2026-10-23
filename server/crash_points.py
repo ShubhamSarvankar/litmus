@@ -11,13 +11,14 @@ import signal
 
 from server.config import settings
 
-# PUT: object bytes are durable at their final path; metadata not yet committed.
+# PUT: the new blob is durable at its fresh path; the commit that makes it visible
+# has not run.
 PUT_AFTER_BYTES = "put-after-bytes"
-# CompleteMultipartUpload: parts assembled into the final file; object metadata
-# not yet committed.
+# CompleteMultipartUpload: parts assembled into a fresh blob; the commit that makes
+# it visible has not run.
 COMPLETE_AFTER_ASSEMBLE = "complete-after-assemble"
-# CompleteMultipartUpload: object metadata and upload completion committed (one
-# transaction); part files not yet deleted.
+# CompleteMultipartUpload: object row and upload completion committed (one
+# transaction); the part blobs and any replaced object blob are not yet unlinked.
 COMPLETE_AFTER_COMMIT = "complete-after-commit"
 
 CRASH_POINTS = frozenset({PUT_AFTER_BYTES, COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_COMMIT})

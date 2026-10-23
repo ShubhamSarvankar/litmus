@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from server.api.request_guard import BUCKET_SUBRESOURCES, OBJECT_SUBRESOURCES
 from server.app import create_app
 from server.metadata.sqlite import SQLiteMetadataStore
-from server.storage.filesystem import FilesystemBackend
+from server.storage.blobs import BlobStore
 
 BUCKET = "test-bucket"
 KEY = "obj.txt"
@@ -25,7 +25,7 @@ IMPLEMENTED_OBJECT = {("POST", "uploadId"), ("DELETE", "uploadId"), ("POST", "up
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
-    storage = FilesystemBackend(data_dir=tmp_path / "objects", parts_dir=tmp_path / "parts")
+    storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")
     return TestClient(create_app(storage=storage, metadata=metadata), raise_server_exceptions=False)
 

@@ -122,6 +122,22 @@ def test_create_tree_fsyncs_root_parent_and_root(tmp_path, calls):
 
 
 @posix_only
+def test_create_tree_creates_each_missing_level_and_fsyncs_its_parent(tmp_path, calls):
+    """blobs/ two levels below the nearest existing directory: each level is created
+    on its own and made durable in its parent, top down, then blobs/ once for the
+    fanout directories."""
+    s = BlobStore(tmp_path / "a" / "b")
+    s.create_tree()
+    dirs = [ino for kind, *rest in calls if kind == "fsync-dir" for ino in rest]
+    assert dirs == [
+        tmp_path.stat().st_ino,  # after creating a/
+        (tmp_path / "a").stat().st_ino,  # after creating a/b/ (the blob root)
+        s.root.stat().st_ino,  # after creating the fanout directories and tmp/
+    ]
+    assert (s.root / "00").is_dir()
+
+
+@posix_only
 def test_create_tree_on_complete_tree_fsyncs_nothing(store, calls):
     store.create_tree()
     assert calls == []
@@ -198,6 +214,59 @@ def test_failure_after_rename_removes_the_blob(store, monkeypatch):
     with pytest.raises(OSError, match="fsync failed"):
         store.write_blob(blob_id, io.BytesIO(b"x"))
     assert not _files(store.root)
+
+
+def _unlink_fails(monkeypatch, error):
+    def unlink(path, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(os, "unlink", unlink)
+
+
+def test_unlink_failure_other_than_enoent_keeps_file_and_reraises_original(store, monkeypatch):
+    """Cleanup that cannot remove the temp file leaves it for the sweep, reports it
+    through has_files(), and the original exception is the one that propagates."""
+    blob_id = new_blob_id()
+    _unlink_fails(monkeypatch, PermissionError(13, "Permission denied"))
+    with pytest.raises(OSError, match="client went away"):
+        store.write_blob(blob_id, _FailingReader())
+    monkeypatch.undo()
+    assert store.temp_path(blob_id).exists()
+    assert store.has_files(blob_id) is True
+
+
+def test_unlink_failure_after_rename_keeps_blob_and_reraises_original(store, monkeypatch):
+    def broken(directory):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(blobs, "_fsync_dir", broken)
+    _unlink_fails(monkeypatch, PermissionError(13, "Permission denied"))
+    blob_id = new_blob_id()
+    with pytest.raises(OSError, match="fsync failed"):
+        store.write_blob(blob_id, io.BytesIO(b"x"))
+    monkeypatch.undo()
+    assert store.blob_path(blob_id).exists()
+    assert store.has_files(blob_id) is True
+
+
+def test_has_files(store):
+    blob_id = new_blob_id()
+    assert store.has_files(blob_id) is False
+    store.temp_path(blob_id).write_bytes(b"partial")
+    assert store.has_files(blob_id) is True
+    store.temp_path(blob_id).unlink()
+    store.write_blob(blob_id, io.BytesIO(b"x"))
+    assert store.has_files(blob_id) is True
+    store.remove_blob(blob_id)
+    assert store.has_files(blob_id) is False
+
+
+def test_has_files_counts_a_stat_error_as_existing(store, monkeypatch):
+    def stat_fails(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "stat", stat_fails)
+    assert store.has_files(new_blob_id()) is True
 
 
 def test_mid_write_point_fires_after_first_chunk_with_bytes_on_disk(store, monkeypatch):

@@ -1,16 +1,28 @@
 import io
+import os
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from server.crash_points import PUT_AFTER_BYTES, crash_point
-from server.errors.s3errors import InternalError, NoSuchBucket, NoSuchKey, PreconditionFailed
-from server.metadata.base import ObjectMeta
+from server.errors.s3errors import (
+    InternalError,
+    NoSuchBucket,
+    NoSuchKey,
+    PreconditionFailed,
+    SlowDown,
+)
+from server.metadata.base import BucketMissing, ObjectMeta
+from server.storage.lifecycle import collect_garbage, discard_new_blob
 
 router = APIRouter()
 
 _CHUNK = 65536
+# GET re-reads the row when the blob it named was already replaced and unlinked;
+# after this many retries in a row it answers 503 (docs/design/storage-layout.md §8).
+_GET_RETRIES = 3
 
 
 def _parse_range(range_header: str, total: int) -> tuple[int, int]:
@@ -35,16 +47,20 @@ def _parse_range(range_header: str, total: int) -> tuple[int, int]:
     return start, end
 
 
-def _stream_range(path, start: int, end: int):
-    with open(path, "rb") as f:
+def _stream(f, start: int, length: int):
+    """Stream length bytes from offset start of an open blob, closing it at the end
+    (or when the client goes away)."""
+    try:
         f.seek(start)
-        remaining = end - start + 1
+        remaining = length
         while remaining > 0:
             chunk = f.read(min(_CHUNK, remaining))
             if not chunk:
                 break
             remaining -= len(chunk)
             yield chunk
+    finally:
+        f.close()
 
 
 def _http_date(dt: datetime) -> str:
@@ -55,6 +71,7 @@ def _http_date(dt: datetime) -> str:
 
 
 async def _put_object(bucket: str, key: str, request: Request) -> Response:
+    """PutObject, new key or overwrite (docs/design/storage-layout.md §6.2)."""
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
@@ -63,90 +80,121 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
     body = await request.body()
     content_type = request.headers.get("content-type", "binary/octet-stream")
-    etag = storage.write_object(bucket, key, io.BytesIO(body), len(body))
+
+    blob_id = metadata.register_blob("object", bucket, key)
+    try:
+        etag, size = storage.write_blob(blob_id, io.BytesIO(body))
+    except BaseException:
+        discard_new_blob(storage, metadata, blob_id)
+        raise
     crash_point(PUT_AFTER_BYTES)
-    metadata.put_object_meta(
-        bucket,
-        key,
-        ObjectMeta(
-            bucket=bucket,
-            key=key,
-            size=len(body),
-            etag=etag,
-            last_modified=datetime.now(UTC).replace(tzinfo=None),
-            content_type=content_type,
-        ),
+
+    meta = ObjectMeta(
+        bucket=bucket,
+        key=key,
+        size=size,
+        etag=etag,
+        last_modified=datetime.now(UTC).replace(tzinfo=None),
+        content_type=content_type,
+        blob_id=blob_id,
     )
+    try:
+        replaced = metadata.put_object_meta(bucket, key, meta)
+    except BucketMissing:
+        discard_new_blob(storage, metadata, blob_id)
+        raise NoSuchBucket(extra={"BucketName": bucket}) from None
+    except BaseException:
+        discard_new_blob(storage, metadata, blob_id)
+        raise
+    if replaced:
+        collect_garbage(storage, metadata, [replaced])
     return Response(status_code=200, headers={"ETag": etag})
 
 
+def _open_current(metadata, storage, bucket: str, key: str, if_match: str | None):
+    """Read the key's row and open the blob it names (§8 steps 1 to 3). Returns
+    (row, open file); the headers must come from that row."""
+    meta = metadata.get_object_meta(bucket, key)
+    if meta is None:
+        raise NoSuchKey(extra={"Key": key})
+    retries = 0
+    while True:
+        if if_match and if_match != meta.etag:
+            raise PreconditionFailed()
+        try:
+            return meta, storage.open_blob(meta.blob_id)
+        except FileNotFoundError:
+            # Unlinked only after a later commit replaced or deleted the key (I4),
+            # unless the bytes are lost.
+            again = metadata.get_object_meta(bucket, key)
+            if again is None:
+                raise NoSuchKey(extra={"Key": key}) from None
+            if again.blob_id == meta.blob_id:
+                raise InternalError() from None
+            retries += 1
+            if retries > _GET_RETRIES:
+                raise SlowDown() from None
+            meta = again
+
+
 async def _get_object(bucket: str, key: str, request: Request) -> Response:
+    """GetObject (docs/design/storage-layout.md §8)."""
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    meta = metadata.get_object_meta(bucket, key)
-    if meta is None:
-        raise NoSuchKey(extra={"Key": key})
+    meta, f = _open_current(metadata, storage, bucket, key, request.headers.get("if-match"))
+    try:
+        if os.fstat(f.fileno()).st_size != meta.size:
+            # Never send a truncated or padded body under this row's ETag.
+            raise InternalError()
 
-    if_match = request.headers.get("if-match")
-    if if_match and if_match != meta.etag:
-        raise PreconditionFailed()
-
-    if not storage.object_exists(bucket, key):
-        raise InternalError()
-
-    range_header = request.headers.get("range")
-
-    if range_header:
-        try:
-            start, end = _parse_range(range_header, meta.size)
-        except ValueError as e:
-            if "multi-range" in str(e):
-                return Response(status_code=400, content="Multi-range not supported")
-            return Response(
-                status_code=416,
-                headers={"Content-Range": f"bytes */{meta.size}"},
+        range_header = request.headers.get("range")
+        if range_header:
+            try:
+                start, end = _parse_range(range_header, meta.size)
+            except ValueError as e:
+                f.close()
+                if "multi-range" in str(e):
+                    return Response(status_code=400, content="Multi-range not supported")
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{meta.size}"},
+                )
+            length = end - start + 1
+            return StreamingResponse(
+                _stream(f, start, length),
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{meta.size}",
+                    "Content-Length": str(length),
+                    "Accept-Ranges": "bytes",
+                    "ETag": meta.etag,
+                    "Last-Modified": _http_date(meta.last_modified),
+                    "Content-Type": meta.content_type,
+                },
+                media_type=meta.content_type,
+                background=BackgroundTask(f.close),
             )
 
-        length = end - start + 1
-        obj_path = storage._object_path(bucket, key)
         return StreamingResponse(
-            _stream_range(obj_path, start, end),
-            status_code=206,
+            _stream(f, 0, meta.size),
+            status_code=200,
             headers={
-                "Content-Range": f"bytes {start}-{end}/{meta.size}",
-                "Content-Length": str(length),
+                "Content-Length": str(meta.size),
                 "Accept-Ranges": "bytes",
                 "ETag": meta.etag,
                 "Last-Modified": _http_date(meta.last_modified),
                 "Content-Type": meta.content_type,
             },
             media_type=meta.content_type,
+            background=BackgroundTask(f.close),
         )
-
-    def _stream_full():
-        with storage.read_object(bucket, key) as f:
-            while True:
-                chunk = f.read(_CHUNK)
-                if not chunk:
-                    break
-                yield chunk
-
-    return StreamingResponse(
-        _stream_full(),
-        status_code=200,
-        headers={
-            "Content-Length": str(meta.size),
-            "Accept-Ranges": "bytes",
-            "ETag": meta.etag,
-            "Last-Modified": _http_date(meta.last_modified),
-            "Content-Type": meta.content_type,
-        },
-        media_type=meta.content_type,
-    )
+    except BaseException:
+        f.close()
+        raise
 
 
 async def _head_object(bucket: str, key: str, request: Request) -> Response:
@@ -172,14 +220,16 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
 
 
 async def _delete_object(bucket: str, key: str, request: Request) -> Response:
+    """DeleteObject (docs/design/storage-layout.md §6.3): the row goes in one
+    commit, the blob file after it."""
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    storage.delete_object(bucket, key)
-    metadata.delete_object_meta(bucket, key)
+    garbage = metadata.delete_object_meta(bucket, key)
+    collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)
 
 

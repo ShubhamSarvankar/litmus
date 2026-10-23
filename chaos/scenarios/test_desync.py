@@ -16,19 +16,22 @@ from fastapi.testclient import TestClient
 from server.app import create_app
 from server.consistency import OrphanedMetadata, run_consistency_sweep
 from server.metadata.sqlite import SQLiteMetadataStore
-from server.storage.filesystem import FilesystemBackend
+from server.storage.blobs import BlobStore
 
 
 @pytest.fixture
 def s3(tmp_path: Path):
-    storage = FilesystemBackend(
-        data_dir=tmp_path / "objects",
-        parts_dir=tmp_path / "parts",
-    )
+    storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")
     app = create_app(storage=storage, metadata=metadata)
     client = TestClient(app, raise_server_exceptions=False)
     return client, storage, metadata, tmp_path
+
+
+def _object_path(client, bucket: str, key: str):
+    """The blob file of an object, resolved through its metadata row."""
+    state = client.app.state
+    return state.storage.blob_path(state.metadata.get_object_meta(bucket, key).blob_id)
 
 
 def test_missing_file_returns_error_not_crash(s3):
@@ -36,7 +39,7 @@ def test_missing_file_returns_error_not_crash(s3):
     client.put("/bucket")
     client.put("/bucket/key.txt", content=b"data")
 
-    storage._object_path("bucket", "key.txt").unlink()
+    _object_path(client, "bucket", "key.txt").unlink()
 
     resp = client.get("/bucket/key.txt")
     assert resp.status_code in (404, 500)
@@ -46,7 +49,7 @@ def test_missing_file_response_is_not_empty_200(s3):
     client, storage, _, _ = s3
     client.put("/bucket")
     client.put("/bucket/key.txt", content=b"data")
-    storage._object_path("bucket", "key.txt").unlink()
+    _object_path(client, "bucket", "key.txt").unlink()
 
     resp = client.get("/bucket/key.txt")
     assert not (resp.status_code == 200 and resp.content == b"")
@@ -57,7 +60,7 @@ def test_missing_file_head_returns_error(s3):
     client, storage, _, _ = s3
     client.put("/bucket")
     client.put("/bucket/key.txt", content=b"data")
-    storage._object_path("bucket", "key.txt").unlink()
+    _object_path(client, "bucket", "key.txt").unlink()
 
     resp = client.head("/bucket/key.txt")
     # HEAD may still return 200 (metadata is present) — that is acceptable since
@@ -83,7 +86,7 @@ def test_sweep_detects_orphaned_metadata_after_desync(s3):
     client, storage, metadata, _ = s3
     client.put("/bucket")
     client.put("/bucket/key.txt", content=b"data")
-    storage._object_path("bucket", "key.txt").unlink()
+    _object_path(client, "bucket", "key.txt").unlink()
 
     report = run_consistency_sweep(metadata, storage)
     assert any(isinstance(i, OrphanedMetadata) and i.key == "key.txt" for i in report.issues)
@@ -104,8 +107,8 @@ def test_multiple_desyncs_all_reported(s3):
     client.put("/bucket")
     client.put("/bucket/k1.txt", content=b"data1")
     client.put("/bucket/k2.txt", content=b"data2")
-    storage._object_path("bucket", "k1.txt").unlink()
-    storage._object_path("bucket", "k2.txt").unlink()
+    _object_path(client, "bucket", "k1.txt").unlink()
+    _object_path(client, "bucket", "k2.txt").unlink()
 
     report = run_consistency_sweep(metadata, storage)
     orphaned_keys = {i.key for i in report.issues if isinstance(i, OrphanedMetadata)}

@@ -35,7 +35,7 @@ def _complete_xml(parts: list[tuple[int, str]]) -> bytes:
 
 def test_enospc_put_returns_error(tmp_path: Path):
     injector = FaultInjector(
-        method="write_object",
+        method="write_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )
@@ -49,7 +49,7 @@ def test_enospc_put_returns_error(tmp_path: Path):
 def test_enospc_put_leaves_no_partial_object(tmp_path: Path):
     """After ENOSPC on write_object, GET must return 404."""
     injector = FaultInjector(
-        method="write_object",
+        method="write_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )
@@ -64,7 +64,7 @@ def test_enospc_put_leaves_no_partial_object(tmp_path: Path):
 def test_enospc_second_put_succeeds(tmp_path: Path):
     """First write_object call fails; second (different key) succeeds normally."""
     injector = FaultInjector(
-        method="write_object",
+        method="write_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )
@@ -81,7 +81,7 @@ def test_enospc_second_put_succeeds(tmp_path: Path):
 
 def test_enospc_assemble_returns_error(tmp_path: Path):
     injector = FaultInjector(
-        method="assemble_parts",
+        method="assemble_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )
@@ -98,7 +98,7 @@ def test_enospc_assemble_returns_error(tmp_path: Path):
 def test_enospc_assemble_object_not_visible(tmp_path: Path):
     """After failed assembly, object must not appear in GET."""
     injector = FaultInjector(
-        method="assemble_parts",
+        method="assemble_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )
@@ -116,7 +116,7 @@ def test_enospc_assemble_object_not_visible(tmp_path: Path):
 def test_enospc_assemble_parts_still_recorded(tmp_path: Path):
     """After failed assembly, the upload_id must still be incomplete (parts not destroyed)."""
     injector = FaultInjector(
-        method="assemble_parts",
+        method="assemble_blob",
         trigger=CallCountTrigger(fire_on=1),
         fault=RaiseOSError(errno.ENOSPC),
     )

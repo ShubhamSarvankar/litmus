@@ -23,7 +23,7 @@ import uvicorn
 
 from server.app import LitmusApp, create_app
 from server.metadata.sqlite import SQLiteMetadataStore
-from server.storage.filesystem import FilesystemBackend
+from server.storage.blobs import BlobStore
 
 BUCKET = "test-bucket"
 HTTP_IMPLEMENTATIONS = ["httptools", "h11"]
@@ -52,7 +52,7 @@ def _serve(app, http: str):
 
 @pytest.fixture(params=HTTP_IMPLEMENTATIONS)
 def litmus(request, tmp_path: Path):
-    storage = FilesystemBackend(data_dir=tmp_path / "objects", parts_dir=tmp_path / "parts")
+    storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")
     server, thread, port = _serve(create_app(storage=storage, metadata=metadata), request.param)
     with socket.create_connection(("127.0.0.1", port)) as s:

@@ -13,16 +13,18 @@ def _env_int(key: str, default: int) -> int:
 
 @dataclass
 class Settings:
-    data_dir: Path = field(default_factory=lambda: _env_path("S3_DATA_DIR", "data/objects"))
-    parts_dir: Path = field(default_factory=lambda: _env_path("S3_PARTS_DIR", "data/parts"))
+    # Root of the blob tree (docs/design/storage-layout.md §4). S3_DATA_DIR and
+    # S3_PARTS_DIR belonged to the old layout; the server refuses to start if either
+    # is set.
+    blob_dir: Path = field(default_factory=lambda: _env_path("S3_BLOB_DIR", "data/blobs"))
     db_path: Path = field(default_factory=lambda: _env_path("S3_DB_PATH", "data/litmus.db"))
     port: int = field(default_factory=lambda: _env_int("S3_PORT", 8000))
     host: str = "0.0.0.0"
     # crash_model: only process-kill (SIGKILL) durability is guaranteed
     crash_model: str = "process-kill"
     # S3_TEST_WRITE_DELAY_MS: Tier B chaos tests only. One sleep of this many ms in
-    # FilesystemBackend._durable_write (PUT and UploadPart), after the temp file is
-    # created and before any bytes are written to it. The request body is already
+    # BlobStore.write_blob (PUT and UploadPart), after the temp file is created and
+    # before any bytes are written to it. The request body is already
     # fully buffered by then. Not applied per chunk, and not applied to
     # CompleteMultipartUpload assembly.
     test_write_delay_ms: int = field(default_factory=lambda: _env_int("S3_TEST_WRITE_DELAY_MS", 0))

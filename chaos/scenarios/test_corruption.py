@@ -18,19 +18,22 @@ from fastapi.testclient import TestClient
 
 from server.app import create_app
 from server.metadata.sqlite import SQLiteMetadataStore
-from server.storage.filesystem import FilesystemBackend
+from server.storage.blobs import BlobStore
 
 
 @pytest.fixture
 def s3(tmp_path: Path):
-    storage = FilesystemBackend(
-        data_dir=tmp_path / "objects",
-        parts_dir=tmp_path / "parts",
-    )
+    storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")
     app = create_app(storage=storage, metadata=metadata)
     client = TestClient(app, raise_server_exceptions=False)
     return client, storage, tmp_path
+
+
+def _object_path(client, bucket: str, key: str):
+    """The blob file of an object, resolved through its metadata row."""
+    state = client.app.state
+    return state.storage.blob_path(state.metadata.get_object_meta(bucket, key).blob_id)
 
 
 def _md5(data: bytes) -> str:
@@ -45,7 +48,7 @@ def test_corrupted_object_etag_mismatch_or_error(s3):
     client.put("/bucket")
     client.put("/bucket/doc.txt", content=original)
 
-    obj_path = storage._object_path("bucket", "doc.txt")
+    obj_path = _object_path(client, "bucket", "doc.txt")
     data = bytearray(obj_path.read_bytes())
     data[4] ^= 0xFF
     obj_path.write_bytes(bytes(data))
@@ -69,7 +72,7 @@ def test_fully_corrupted_object_is_not_empty(s3):
     client.put("/bucket")
     client.put("/bucket/important.txt", content=original)
 
-    obj_path = storage._object_path("bucket", "important.txt")
+    obj_path = _object_path(client, "bucket", "important.txt")
     obj_path.write_bytes(b"\x00" * len(original))
 
     get_resp = client.get("/bucket/important.txt")
@@ -83,7 +86,7 @@ def test_missing_file_returns_error_not_crash(s3):
 
     client.put("/bucket")
     client.put("/bucket/gone.txt", content=b"data")
-    storage._object_path("bucket", "gone.txt").unlink()
+    _object_path(client, "bucket", "gone.txt").unlink()
 
     resp = client.get("/bucket/gone.txt")
     assert resp.status_code in (404, 500)

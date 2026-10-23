@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,7 +11,7 @@ from server.consistency import run_consistency_sweep
 from server.crash_points import validate_configured_crash_point
 from server.errors.s3errors import S3Error, render_error
 from server.metadata.sqlite import SQLiteMetadataStore
-from server.storage.filesystem import FilesystemBackend
+from server.storage.blobs import BlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -22,42 +23,61 @@ class LitmusApp(FastAPI):
         return CloseConnectionIfContinueNotSent(super().build_middleware_stack())
 
 
-def _default_storage() -> FilesystemBackend:
-    return FilesystemBackend(
-        data_dir=settings.data_dir,
-        parts_dir=settings.parts_dir,
-        write_delay_ms=settings.test_write_delay_ms,
-    )
+# Environment variables of the old storage layout (decision 4 and 6 in
+# docs/design/storage-layout.md): refused, never silently ignored.
+_OLD_LAYOUT_VARIABLES = ("S3_DATA_DIR", "S3_PARTS_DIR")
 
 
-def _default_metadata() -> SQLiteMetadataStore:
-    return SQLiteMetadataStore(db_path=settings.db_path)
+class StartupRefused(RuntimeError):
+    """The server must not start on this configuration or data."""
+
+
+def _refuse_old_environment() -> None:
+    found = [name for name in _OLD_LAYOUT_VARIABLES if name in os.environ]
+    if found:
+        raise StartupRefused(
+            f"{', '.join(found)} belong to the old storage layout and are no longer used; "
+            "unset them and set S3_BLOB_DIR (and S3_DB_PATH) instead. Data written under "
+            "the old layout is not migrated."
+        )
 
 
 def create_app(
-    storage: FilesystemBackend | None = None,
+    storage: BlobStore | None = None,
     metadata: SQLiteMetadataStore | None = None,
 ) -> FastAPI:
+    """Build the app.
+
+    Without stores (the server), nothing is touched here; the startup hook runs the
+    startup sequence of docs/design/storage-layout.md §7 and builds the stores.
+    With stores (in-process tests), the blob tree is created right away, so the app
+    also works when its startup hook never runs; the hook still runs the sweep.
+    """
     validate_configured_crash_point()
     if settings.test_crash_point:
         logger.warning(
             "TEST CRASH POINT ARMED: %s — this server will SIGKILL itself",
             settings.test_crash_point,
         )
-
-    _storage = storage or _default_storage()
-    _metadata = metadata or _default_metadata()
+    if storage is not None:
+        storage.create_tree()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Sweep runs before the server accepts any requests
-        run_consistency_sweep(_metadata, _storage)
+        _refuse_old_environment()
+        app.state.metadata = metadata or SQLiteMetadataStore(db_path=settings.db_path)
+        app.state.storage = storage or BlobStore(
+            settings.blob_dir, write_delay_ms=settings.test_write_delay_ms
+        )
+        app.state.storage.create_tree()
+        # The sweep runs before the server accepts any requests.
+        run_consistency_sweep(app.state.metadata, app.state.storage)
         yield
 
     application = LitmusApp(title="litmus", version="0.1.0", lifespan=lifespan)
 
-    application.state.storage = _storage
-    application.state.metadata = _metadata
+    application.state.storage = storage
+    application.state.metadata = metadata
 
     # Unimplemented S3 operations and unsafe paths are answered before routing,
     # so they can never fall through to a handler that changes state.

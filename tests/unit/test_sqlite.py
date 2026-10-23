@@ -55,7 +55,7 @@ def test_list_buckets_empty(store):
 # --- Objects ---
 
 
-def _obj(bucket="b", key="k", size=10, etag='"abc"', content_type="text/plain"):
+def _obj(bucket="b", key="k", size=10, etag='"abc"', content_type="text/plain", blob_id=None):
     return ObjectMeta(
         bucket=bucket,
         key=key,
@@ -63,12 +63,23 @@ def _obj(bucket="b", key="k", size=10, etag='"abc"', content_type="text/plain"):
         etag=etag,
         last_modified=_NOW,
         content_type=content_type,
+        blob_id=blob_id,
     )
+
+
+def _blob(store, key="k"):
+    """A registered (pending) blob ID for an object row to point at."""
+    return store.register_blob("object", "b", key)
+
+
+def _part_blob(store, part_number, upload_id="uid-1"):
+    """A registered (pending) blob ID for a part row to point at."""
+    return store.register_blob("part", "b", "k", upload_id=upload_id, part_number=part_number)
 
 
 def test_put_and_get_object(store):
     store.create_bucket("b", _NOW)
-    meta = _obj()
+    meta = _obj(blob_id=_blob(store))
     store.put_object_meta("b", "k", meta)
     result = store.get_object_meta("b", "k")
     assert result is not None
@@ -84,8 +95,8 @@ def test_get_object_missing_returns_none(store):
 
 def test_put_object_overwrites(store):
     store.create_bucket("b", _NOW)
-    store.put_object_meta("b", "k", _obj(size=10, etag='"old"'))
-    store.put_object_meta("b", "k", _obj(size=99, etag='"new"'))
+    store.put_object_meta("b", "k", _obj(size=10, etag='"old"', blob_id=_blob(store)))
+    store.put_object_meta("b", "k", _obj(size=99, etag='"new"', blob_id=_blob(store)))
     result = store.get_object_meta("b", "k")
     assert result.size == 99
     assert result.etag == '"new"'
@@ -93,15 +104,15 @@ def test_put_object_overwrites(store):
 
 def test_delete_object_meta(store):
     store.create_bucket("b", _NOW)
-    store.put_object_meta("b", "k", _obj())
+    store.put_object_meta("b", "k", _obj(blob_id=_blob(store)))
     store.delete_object_meta("b", "k")
     assert store.get_object_meta("b", "k") is None
 
 
 def test_list_objects(store):
     store.create_bucket("b", _NOW)
-    store.put_object_meta("b", "key1", _obj(key="key1"))
-    store.put_object_meta("b", "key2", _obj(key="key2"))
+    store.put_object_meta("b", "key1", _obj(key="key1", blob_id=_blob(store, "key1")))
+    store.put_object_meta("b", "key2", _obj(key="key2", blob_id=_blob(store, "key2")))
     objects = store.list_objects("b")
     assert len(objects) == 2
     assert {o.key for o in objects} == {"key1", "key2"}
@@ -109,9 +120,9 @@ def test_list_objects(store):
 
 def test_list_objects_with_prefix(store):
     store.create_bucket("b", _NOW)
-    store.put_object_meta("b", "logs/a", _obj(key="logs/a"))
-    store.put_object_meta("b", "logs/b", _obj(key="logs/b"))
-    store.put_object_meta("b", "data/c", _obj(key="data/c"))
+    store.put_object_meta("b", "logs/a", _obj(key="logs/a", blob_id=_blob(store, "logs/a")))
+    store.put_object_meta("b", "logs/b", _obj(key="logs/b", blob_id=_blob(store, "logs/b")))
+    store.put_object_meta("b", "data/c", _obj(key="data/c", blob_id=_blob(store, "data/c")))
     result = store.list_objects("b", prefix="logs/")
     assert len(result) == 2
     assert all(o.key.startswith("logs/") for o in result)
@@ -138,8 +149,8 @@ def test_upload_exists_false(store):
 def test_record_and_get_parts(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"etag1"', 100))
-    store.record_part("uid-1", PartMeta("uid-1", 2, '"etag2"', 200))
+    store.record_part("uid-1", PartMeta("uid-1", 1, '"etag1"', 100, _part_blob(store, 1)))
+    store.record_part("uid-1", PartMeta("uid-1", 2, '"etag2"', 200, _part_blob(store, 2)))
     parts = store.get_parts("uid-1")
     assert len(parts) == 2
     assert parts[0].part_number == 1
@@ -149,8 +160,8 @@ def test_record_and_get_parts(store):
 def test_record_part_overwrite(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"old-etag"', 100))
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"new-etag"', 200))
+    store.record_part("uid-1", PartMeta("uid-1", 1, '"old-etag"', 100, _part_blob(store, 1)))
+    store.record_part("uid-1", PartMeta("uid-1", 1, '"new-etag"', 200, _part_blob(store, 1)))
     parts = store.get_parts("uid-1")
     assert len(parts) == 1
     assert parts[0].etag == '"new-etag"'
@@ -160,7 +171,7 @@ def test_record_part_overwrite(store):
 def test_complete_upload_removes_from_incomplete(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.complete_upload("uid-1")
+    store.commit_completed_upload("uid-1", _obj(blob_id=_blob(store)))
     assert store.upload_exists("uid-1") is False
     incomplete = store.list_incomplete_uploads()
     assert all(u.upload_id != "uid-1" for u in incomplete)
@@ -169,7 +180,7 @@ def test_complete_upload_removes_from_incomplete(store):
 def test_abort_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"e"', 50))
+    store.record_part("uid-1", PartMeta("uid-1", 1, '"e"', 50, _part_blob(store, 1)))
     store.abort_upload("uid-1")
     assert store.upload_exists("uid-1") is False
     assert store.get_parts("uid-1") == []
@@ -178,35 +189,49 @@ def test_abort_upload(store):
 def test_commit_completed_upload_commits_object_and_closes_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    assert store.commit_completed_upload("uid-1", _obj(etag='"abc-2"')) is True
+    blob_id = _blob(store)
+    assert store.commit_completed_upload("uid-1", _obj(etag='"abc-2"', blob_id=blob_id)) is True
     assert store.get_object_meta("b", "k").etag == '"abc-2"'
     assert store.upload_exists("uid-1") is False
 
 
 def test_commit_completed_upload_rolls_back_both_on_failure(store):
     # The upload row is updated first; the object insert then violates the foreign
-    # key on objects.bucket. The upload must still be open afterwards.
-    store.create_upload("uid-1", "no-such-bucket", "k", _NOW)
+    # key on objects.blob_id (the blob was never registered). The upload must still
+    # be open afterwards.
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
     with pytest.raises(sqlite3.IntegrityError):
-        store.commit_completed_upload("uid-1", _obj(bucket="no-such-bucket"))
+        store.commit_completed_upload("uid-1", _obj(blob_id="0" * 32))
     assert store.upload_exists("uid-1") is True
-    assert store.get_object_meta("no-such-bucket", "k") is None
+    assert store.get_object_meta("b", "k") is None
 
 
 def test_commit_completed_upload_refuses_closed_or_unknown_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.complete_upload("uid-1")
-    assert store.commit_completed_upload("uid-1", _obj()) is False
-    assert store.commit_completed_upload("no-such-upload", _obj()) is False
-    assert store.get_object_meta("b", "k") is None
+    # Close the upload through the real commit and record the row it wrote.
+    assert store.commit_completed_upload("uid-1", _obj(blob_id=_blob(store))) is True
+    recorded = store.get_object_meta("b", "k")
+    # Both refused commits carry object data that differs from that row.
+    to_closed = _obj(size=11, etag='"other-1"', blob_id=_blob(store))
+    to_unknown = _obj(size=12, etag='"other-2"', blob_id=_blob(store))
+    for meta in (to_closed, to_unknown):
+        assert (meta.blob_id, meta.etag, meta.size) != (
+            recorded.blob_id,
+            recorded.etag,
+            recorded.size,
+        )
+    assert store.commit_completed_upload("uid-1", to_closed) is False
+    assert store.commit_completed_upload("no-such-upload", to_unknown) is False
+    assert store.get_object_meta("b", "k") == recorded
 
 
 def test_list_incomplete_uploads_excludes_completed(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-pending", "b", "k1", _NOW)
     store.create_upload("uid-done", "b", "k2", _NOW)
-    store.complete_upload("uid-done")
+    store.commit_completed_upload("uid-done", _obj(key="k2", blob_id=_blob(store, "k2")))
     incomplete = store.list_incomplete_uploads()
     ids = {u.upload_id for u in incomplete}
     assert "uid-pending" in ids
@@ -216,9 +241,9 @@ def test_list_incomplete_uploads_excludes_completed(store):
 def test_get_parts_ordered_by_part_number(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 3, '"e3"', 10))
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"e1"', 10))
-    store.record_part("uid-1", PartMeta("uid-1", 2, '"e2"', 10))
+    store.record_part("uid-1", PartMeta("uid-1", 3, '"e3"', 10, _part_blob(store, 3)))
+    store.record_part("uid-1", PartMeta("uid-1", 1, '"e1"', 10, _part_blob(store, 1)))
+    store.record_part("uid-1", PartMeta("uid-1", 2, '"e2"', 10, _part_blob(store, 2)))
     parts = store.get_parts("uid-1")
     assert [p.part_number for p in parts] == [1, 2, 3]
 
@@ -229,15 +254,26 @@ def test_get_parts_ordered_by_part_number(store):
 def test_write_rollback_on_exception(store, tmp_path):
     """A failure inside a transaction must leave no partial state."""
     store.create_bucket("b", _NOW)
+    # A registered blob, so the only constraint the insert violates is the foreign
+    # key on objects.bucket.
+    blob_id = store.register_blob("object", "no-such-bucket", "k")
     # Directly connect and force a constraint violation inside a transaction
     conn = sqlite3.connect(str(tmp_path / "test.db"))
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         with conn:
             conn.execute(
-                "INSERT INTO objects (bucket, key, size, etag, last_modified, content_type) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("no-such-bucket", "k", 1, '"e"', "2024-01-01T00:00:00.000000", "text/plain"),
+                "INSERT INTO objects (bucket, key, blob_id, size, etag, last_modified, "
+                "content_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "no-such-bucket",
+                    "k",
+                    blob_id,
+                    1,
+                    '"e"',
+                    "2024-01-01T00:00:00.000000",
+                    "text/plain",
+                ),
             )
     except sqlite3.IntegrityError:
         pass

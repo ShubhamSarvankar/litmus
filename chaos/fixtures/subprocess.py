@@ -57,9 +57,12 @@ class ServerProcess:
     def start(self) -> None:
         env = os.environ.copy()
         # Pass config via environment — config.py reads these if present
-        env["S3_DATA_DIR"] = str(self._data_dir / "objects")
-        env["S3_PARTS_DIR"] = str(self._data_dir / "parts")
+        env["S3_BLOB_DIR"] = str(self._data_dir / "blobs")
         env["S3_DB_PATH"] = str(self._db_path)
+        # Variables of the old layout make the server refuse to start; never let one
+        # leak in from the test runner's environment.
+        env.pop("S3_DATA_DIR", None)
+        env.pop("S3_PARTS_DIR", None)
         env["S3_PORT"] = str(self._port)
         env["S3_TEST_WRITE_DELAY_MS"] = str(self._write_delay_ms)
         # Set or clear explicitly so a value inherited from the test runner's

@@ -6,8 +6,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.errors.s3errors import InvalidPart, NoSuchBucket, NoSuchUpload
-from server.metadata.base import PartMeta
+from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
 from server.multipart.state_machine import complete_multipart_upload
+from server.storage.lifecycle import collect_garbage, discard_new_blob
 
 router = APIRouter()
 
@@ -115,7 +116,10 @@ async def _initiate(bucket: str, key: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
     upload_id = uuid.uuid4().hex
-    metadata.create_upload(upload_id, bucket, key, datetime.now(UTC).replace(tzinfo=None))
+    try:
+        metadata.create_upload(upload_id, bucket, key, datetime.now(UTC).replace(tzinfo=None))
+    except BucketMissing:
+        raise NoSuchBucket(extra={"BucketName": bucket}) from None
     return Response(
         content=_initiate_xml(bucket, key, upload_id),
         status_code=200,
@@ -142,11 +146,29 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     import io
 
     body = await request.body()
-    part_etag = storage.write_part(upload_id, part_number, io.BytesIO(body))
-    metadata.record_part(
-        upload_id,
-        PartMeta(upload_id=upload_id, part_number=part_number, etag=part_etag, size=len(body)),
+    # docs/design/storage-layout.md §6.6: a fresh blob per attempt; the previous
+    # part stays recorded and intact until the commit that replaces it.
+    blob_id = metadata.register_blob(
+        "part", bucket, key, upload_id=upload_id, part_number=part_number
     )
+    try:
+        part_etag, size = storage.write_blob(blob_id, io.BytesIO(body))
+    except BaseException:
+        discard_new_blob(storage, metadata, blob_id)
+        raise
+    part = PartMeta(
+        upload_id=upload_id, part_number=part_number, etag=part_etag, size=size, blob_id=blob_id
+    )
+    try:
+        replaced = metadata.record_part(upload_id, part)
+    except UploadNotOpen:
+        discard_new_blob(storage, metadata, blob_id)
+        raise NoSuchUpload(extra={"UploadId": upload_id}) from None
+    except BaseException:
+        discard_new_blob(storage, metadata, blob_id)
+        raise
+    if replaced:
+        collect_garbage(storage, metadata, [replaced])
     return Response(status_code=200, headers={"ETag": part_etag})
 
 
@@ -184,6 +206,10 @@ async def _abort(bucket: str, key: str, upload_id: str, request: Request) -> Res
     if not metadata.upload_exists(upload_id):
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
-    storage.delete_parts(upload_id)
-    metadata.abort_upload(upload_id)
+    # docs/design/storage-layout.md §6.8: the rows go in one commit, the part blobs
+    # after it.
+    garbage = metadata.abort_upload(upload_id)
+    if garbage is None:
+        raise NoSuchUpload(extra={"UploadId": upload_id})
+    collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)

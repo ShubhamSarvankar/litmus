@@ -85,6 +85,12 @@ class InternalError(S3Error):
     message = "We encountered an internal error. Please try again."
 
 
+class SlowDown(S3Error):
+    status_code = 503
+    code = "SlowDown"
+    message = "Please reduce your request rate."
+
+
 # Counter for generating sequential request IDs within a process lifetime
 _request_counter = 0
 

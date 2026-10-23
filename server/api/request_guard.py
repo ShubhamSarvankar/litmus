@@ -13,8 +13,9 @@ Two layers:
      implements. A subresource missing from the lists above still cannot reach a
      mutating handler.
 
-The same guard rejects bucket names and keys that are path traversal ("." or ".."
-segments), since those map outside their directory in the current on-disk layout.
+The same guard rejects bucket names and keys with "." or ".." segments. Paths no
+longer derive from keys (docs/design/storage-layout.md), so this is a leftover
+deviation from S3 that step (b) of that design removes.
 """
 
 from fastapi import Request
@@ -132,10 +133,9 @@ CONDITIONAL_DELETE_HEADERS = (
 # If-None-Match and x-amz-write-offset-bytes (append at an offset that must equal the
 # current size); CompleteMultipartUpload takes If-Match and If-None-Match. Litmus does
 # not evaluate them, and ignoring one would overwrite an object the client asked to
-# keep (or replace it with only the appended bytes). They also cannot be supported
-# safely yet: in the current layout the new bytes replace the old file before the
-# metadata commit, so a precondition that fails at commit time would already have
-# overwritten the object. Real support waits for the storage layout redesign.
+# keep (or replace it with only the appended bytes). The storage layout now writes new
+# bytes to a fresh path and checks nothing in the commit yet; evaluating preconditions
+# in that commit (docs/design/storage-layout.md §10) is later work.
 CONDITIONAL_PUT_OBJECT_HEADERS = ("if-match", "if-none-match", "x-amz-write-offset-bytes")
 CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
 
@@ -147,8 +147,8 @@ _DOT_SEGMENTS = frozenset({".", ".."})
 
 
 def unsafe_key(key: str) -> bool:
-    """A key with a "." or ".." path segment maps outside, or onto another path
-    inside, its bucket directory in the current filesystem layout."""
+    """A key with a "." or ".." path segment. Still rejected until step (b) of
+    docs/design/storage-layout.md; no key is part of a path any more."""
     return any(segment in _DOT_SEGMENTS for segment in key.split("/"))
 
 
