@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from server.api.request_guard import unsafe_key
+from server.api.request_guard import NULL_VERSION_ID, unsafe_key
 from server.errors.s3errors import (
     BucketAlreadyExists,
     BucketNotEmpty,
@@ -163,24 +163,44 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         results = root.findall(f"{{{ns}}}{tag}")
         return results if results else root.findall(tag)
 
-    keys_to_delete = [
-        obj.findtext(f"{{{ns}}}Key") or obj.findtext("Key") for obj in _find("Object")
-    ]
+    def _text(obj, tag):
+        # "is not None", not "or": an empty element (e.g. <VersionId/>) must stay "".
+        value = obj.findtext(f"{{{ns}}}{tag}")
+        return value if value is not None else obj.findtext(tag)
+
+    def _error(key, version_id, code, message):
+        e = ET.Element("Error")
+        ET.SubElement(e, "Key").text = key
+        if version_id is not None:
+            ET.SubElement(e, "VersionId").text = version_id
+        ET.SubElement(e, "Code").text = code
+        ET.SubElement(e, "Message").text = message
+        return e
 
     entries = []
-    for key in keys_to_delete:
-        # Keys arrive in the body, so the request guard cannot see them.
+    for obj in _find("Object"):
+        key, version_id = _text(obj, "Key"), _text(obj, "VersionId")
+        # Keys and version IDs arrive in the body, so the request guard cannot see them.
         if unsafe_key(key):
-            e = ET.Element("Error")
-            ET.SubElement(e, "Key").text = key
-            ET.SubElement(e, "Code").text = "InvalidArgument"
-            ET.SubElement(e, "Message").text = "Key contains a '.' or '..' path segment"
-            entries.append(e)
+            entries.append(
+                _error(
+                    key, version_id, "InvalidArgument", "Key contains a '.' or '..' path segment"
+                )
+            )
+            continue
+        # Same rule as DELETE /{bucket}/{key}?versionId=: every bucket is unversioned,
+        # so "null" is the current object and any other version ID is not implemented.
+        if version_id is not None and version_id != NULL_VERSION_ID:
+            entries.append(
+                _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
+            )
             continue
         storage.delete_object(bucket, key)
         metadata.delete_object_meta(bucket, key)
         d = ET.Element("Deleted")
         ET.SubElement(d, "Key").text = key
+        if version_id is not None:
+            ET.SubElement(d, "VersionId").text = version_id
         entries.append(d)
 
     result = ET.Element("DeleteResult")

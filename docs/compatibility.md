@@ -140,8 +140,36 @@ Litmus implements ListObjects V1 only. This means `aws s3 ls` will fail against 
 server unless `--no-sign-request` and explicit path-style are used with a boto3 client
 configured for V1. Adding V2 is straightforward and is a known gap.
 
-**No object copy.** `PUT /{bucket}/{key}` with `x-amz-copy-source` is not implemented.
-The handler ignores the header and treats it as a zero-byte PUT.
+**No object copy.** `PUT /{bucket}/{key}` with `x-amz-copy-source` (CopyObject and
+UploadPartCopy) is not implemented and returns 501 NotImplemented without changing
+anything. (It used to be treated as a zero-byte PUT that overwrote the destination.)
+
+**Keys with "." or ".." path segments are rejected (temporary deviation from S3).**
+S3 keys are opaque strings, so `a/../b`, `../x` and `.` are valid keys on S3. Litmus
+currently stores each object at a path derived from its key, where such segments would
+resolve outside the bucket's directory or onto another key's file. Until the storage
+layout stops deriving paths from keys (`docs/design/storage-layout.md`), any request
+whose key has a `.` or `..` segment gets 400 InvalidArgument, a DeleteObjects entry for
+such a key gets a per-key InvalidArgument error, and bucket names `.` and `..` get 400
+InvalidBucketName. Keys that merely contain dots (`a.b`, `..hidden`, `x/.../y`) work.
+
+**No versioning; every bucket is unversioned.** Bucket versioning configuration
+requests return 501 NotImplemented. S3 gives every object in an unversioned bucket the
+version ID `null`, and Litmus follows that:
+
+- `GET /{bucket}?versions` (ListObjectVersions) lists every object as its single `null`
+  version, marked latest. Its parameters have the same gaps as ListObjects: `max-keys`,
+  `key-marker`, `version-id-marker`, `delimiter` and `encoding-type` are ignored, it never
+  truncates, and the `Prefix` element is always empty. These are fixed together with the
+  ListObjects parameters.
+- `versionId=null` names the current object: GET, HEAD and DELETE treat it as if it were
+  absent. In a DeleteObjects body, `<VersionId>null</VersionId>` deletes the object and
+  the `Deleted` entry echoes the version ID.
+- Any other version ID gets 501 NotImplemented on GET, HEAD and DELETE, and changes
+  nothing; in a DeleteObjects body it gets a per-key `NotImplemented` error and the object
+  is kept. The S3 API reference does not say which error S3 returns for a non-null
+  version ID on an unversioned bucket, so Litmus does not guess.
+- `versionId` on PUT or POST returns 501.
 
 **No ListParts / ListMultipartUploads.** These are `GET` requests with query parameters
 (`?partNumber` / `?uploads`) that are structurally similar to the implemented routes

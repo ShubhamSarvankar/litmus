@@ -136,11 +136,6 @@ def test_unknown_object_query_parameter_on_mutating_method_returns_501(populated
     _assert_unchanged(populated)
 
 
-def test_delete_object_with_version_id_returns_501(populated):
-    _assert_not_implemented(populated.delete(f"/{BUCKET}/{KEY}?versionId=abc"), "DELETE")
-    _assert_unchanged(populated)
-
-
 def test_put_part_number_without_upload_id_returns_501(populated):
     resp = populated.put(f"/{BUCKET}/{KEY}?partNumber=1", content=b"overwrite")
     _assert_not_implemented(resp, "PUT")

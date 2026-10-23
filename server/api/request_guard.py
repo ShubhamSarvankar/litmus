@@ -101,6 +101,16 @@ _ALLOWED_MUTATING_OBJECT = {
     "DELETE": [frozenset(), frozenset({"uploadId"})],
 }
 
+# versionId. Litmus has no versioning, so every bucket is unversioned, and S3 gives
+# every object in an unversioned bucket the version ID "null" (S3 User Guide, "How S3
+# Versioning works": "If S3 Versioning is not enabled, Amazon S3 sets the value of the
+# version ID to null"). versionId=null therefore names the current object, and GET,
+# HEAD and DELETE accept it as if it were absent. Any other version ID cannot name an
+# existing version; the API reference does not say which error S3 returns for it on
+# an unversioned bucket, so it gets 501, as does versionId on any other method.
+NULL_VERSION_ID = "null"
+_NULL_VERSION_METHODS = frozenset({"GET", "HEAD", "DELETE"})
+
 # Headers that select an operation Litmus does not implement on an otherwise
 # supported request: CopyObject and UploadPartCopy.
 _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
@@ -114,7 +124,8 @@ def unsafe_key(key: str) -> bool:
     return any(segment in _DOT_SEGMENTS for segment in key.split("/"))
 
 
-def _check(method: str, path: str, query_keys: set[str], headers) -> None:
+def _check(method: str, path: str, query, headers) -> None:
+    query_keys = set(query.keys())
     if path in ("", "/") or path == "/health":
         return
     bucket, _, key = path.lstrip("/").partition("/")
@@ -131,6 +142,12 @@ def _check(method: str, path: str, query_keys: set[str], headers) -> None:
         )
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
+        if "versionId" in query_keys:
+            if method not in _NULL_VERSION_METHODS or any(
+                v != NULL_VERSION_ID for v in query.getlist("versionId")
+            ):
+                raise NotImplementedOperation(extra={"Parameter": "versionId", "Method": method})
+            query_keys.discard("versionId")
     else:
         subresources, implemented, allowed = (
             BUCKET_SUBRESOURCES,
@@ -154,7 +171,7 @@ async def reject_unimplemented(request: Request, call_next):
         _check(
             request.method,
             request.url.path,
-            set(request.query_params.keys()),
+            request.query_params,
             request.headers,
         )
     except S3Error as exc:
