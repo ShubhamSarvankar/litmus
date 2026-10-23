@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from server.errors.s3errors import BucketAlreadyExists, BucketNotEmpty, NoSuchBucket
+from server.api.request_guard import unsafe_key
+from server.errors.s3errors import (
+    BucketAlreadyExists,
+    BucketNotEmpty,
+    NoSuchBucket,
+    NotImplementedOperation,
+)
 
 router = APIRouter()
 
@@ -134,7 +140,9 @@ async def post_bucket(bucket: str, request: Request) -> Response:
     params = dict(request.query_params)
     if "delete" in params:
         return await _delete_objects(bucket, request)
-    return Response(status_code=400)
+    # Unreachable through the request guard; kept so this handler can never act
+    # on a POST it does not implement (e.g. browser-form POST Object).
+    raise NotImplementedOperation(extra={"Method": "POST"})
 
 
 async def _delete_objects(bucket: str, request: Request) -> Response:
@@ -159,17 +167,25 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         obj.findtext(f"{{{ns}}}Key") or obj.findtext("Key") for obj in _find("Object")
     ]
 
-    deleted = []
+    entries = []
     for key in keys_to_delete:
+        # Keys arrive in the body, so the request guard cannot see them.
+        if unsafe_key(key):
+            e = ET.Element("Error")
+            ET.SubElement(e, "Key").text = key
+            ET.SubElement(e, "Code").text = "InvalidArgument"
+            ET.SubElement(e, "Message").text = "Key contains a '.' or '..' path segment"
+            entries.append(e)
+            continue
         storage.delete_object(bucket, key)
         metadata.delete_object_meta(bucket, key)
         d = ET.Element("Deleted")
         ET.SubElement(d, "Key").text = key
-        deleted.append(d)
+        entries.append(d)
 
     result = ET.Element("DeleteResult")
-    for d in deleted:
-        result.append(d)
+    for entry in entries:
+        result.append(entry)
 
     return Response(
         content=ET.tostring(result, encoding="unicode", xml_declaration=True),
@@ -189,35 +205,9 @@ async def head_bucket(bucket: str, request: Request) -> Response:
 @router.put("/{bucket}")
 async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
     metadata = request.app.state.metadata
-    params = dict(request.query_params)
 
-    # Sub-resource configuration PUTs (versioning, ownership, etc.) — accept silently
-    # since these features are out of scope. Return 200 if bucket exists, 404 if not.
-    sub_resources = {
-        "versioning",
-        "ownershipControls",
-        "accelerate",
-        "cors",
-        "lifecycle",
-        "logging",
-        "metrics",
-        "notification",
-        "policy",
-        "replication",
-        "requestPayment",
-        "website",
-        "encryption",
-        "publicAccessBlock",
-        "intelligentTieringConfiguration",
-        "inventoryConfiguration",
-        "analyticsConfiguration",
-    }
-    if any(k in params for k in sub_resources):
-        if not metadata.bucket_exists(bucket):
-            raise NoSuchBucket(extra={"BucketName": bucket})
-        return Response(status_code=200)
-
-    # Plain bucket creation
+    # Configuration subresources (?versioning, ?cors, ...) never reach this handler:
+    # server/api/request_guard.py answers them with 501 NotImplemented.
     if metadata.bucket_exists(bucket):
         raise BucketAlreadyExists(extra={"BucketName": bucket})
     metadata.create_bucket(bucket, datetime.now(UTC).replace(tzinfo=None))

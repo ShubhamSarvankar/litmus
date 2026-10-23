@@ -51,6 +51,12 @@ def create_app(
     application.state.storage = _storage
     application.state.metadata = _metadata
 
+    # Unimplemented S3 operations and unsafe paths are answered before routing,
+    # so they can never fall through to a handler that changes state.
+    from server.api.request_guard import reject_unimplemented
+
+    application.middleware("http")(reject_unimplemented)
+
     @application.exception_handler(S3Error)
     async def s3_error_handler(request: Request, exc: S3Error) -> Response:
         return Response(

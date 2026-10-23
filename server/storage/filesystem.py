@@ -9,6 +9,22 @@ from typing import IO
 from server.storage.base import PartSpec
 
 
+class UnsafePathError(ValueError):
+    """A bucket, key or upload ID would map outside its directory."""
+
+
+def _contained(base: Path, *names: str) -> Path:
+    """Join names under base and refuse the result unless it is strictly inside base.
+
+    Lexical check (os.path.normpath), so it does not depend on what exists on disk.
+    """
+    root = os.path.abspath(base)
+    path = os.path.normpath(os.path.join(root, *names))
+    if os.path.commonpath([root, path]) != root or path == root:
+        raise UnsafePathError(f"{'/'.join(names)!r} resolves outside {root}")
+    return Path(path)
+
+
 class FilesystemBackend:
     def __init__(self, data_dir: Path, parts_dir: Path, write_delay_ms: int = 0):
         self._objects = data_dir
@@ -20,10 +36,15 @@ class FilesystemBackend:
     # --- internal helpers ---
 
     def _object_path(self, bucket: str, key: str) -> Path:
-        return self._objects / bucket / key
+        # The key must stay inside its own bucket directory, and the bucket inside
+        # the objects directory: never another bucket, the data dir, or beyond.
+        return _contained(_contained(self._objects, bucket), key)
+
+    def _upload_dir(self, upload_id: str) -> Path:
+        return _contained(self._parts, upload_id)
 
     def _part_path(self, upload_id: str, part_number: int) -> Path:
-        return self._parts / upload_id / str(part_number)
+        return _contained(self._upload_dir(upload_id), str(part_number))
 
     def _durable_write(self, src: IO[bytes], final_path: Path) -> str:
         """Stream src to a temp file in the same directory as final_path,
@@ -84,7 +105,13 @@ class FilesystemBackend:
             pass
 
     def object_exists(self, bucket: str, key: str) -> bool:
-        return self._object_path(bucket, key).exists()
+        # Used by the startup sweep over every metadata row. A row written before keys
+        # were checked may name an unsafe path; there is no object file for it inside
+        # storage, and it must not stop the server from starting.
+        try:
+            return self._object_path(bucket, key).exists()
+        except UnsafePathError:
+            return False
 
     def write_part(self, upload_id: str, part_number: int, data: IO[bytes]) -> str:
         return self._durable_write(data, self._part_path(upload_id, part_number))
@@ -120,12 +147,12 @@ class FilesystemBackend:
         return composite_etag
 
     def delete_parts(self, upload_id: str) -> None:
-        part_dir = self._parts / upload_id
+        part_dir = self._upload_dir(upload_id)
         if part_dir.exists():
             shutil.rmtree(part_dir)
 
     def list_part_files(self, upload_id: str) -> list[str]:
-        part_dir = self._parts / upload_id
+        part_dir = self._upload_dir(upload_id)
         if not part_dir.exists():
             return []
         return [str(p) for p in part_dir.iterdir()]

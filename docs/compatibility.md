@@ -43,8 +43,9 @@ bash scripts/run_ceph_s3tests.sh
 
 ## ceph/s3-tests results by category
 
-> **Baseline: 116 of 330 selected tests pass.** 207 failed, 7 skipped, 0 errors;
-> 508 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`.
+> **Current: 103 of 330 selected tests pass.** 220 failed, 7 skipped, 0 errors;
+> 508 deselected by the `-k` filter in `scripts/run_ceph_s3tests.sh`. The drop from 116
+> is expected: see "Unsupported requests now return 501" below.
 >
 > - ceph/s3-tests pinned at `5b3987116eca0b4b8fa57d6b10f3db57bab196b6` (2026-10-12).
 >   The script checks out exactly this commit; it never pulls.
@@ -71,11 +72,31 @@ bash scripts/run_ceph_s3tests.sh
 >
 > - `test_copy_object_ifmatch_failed`: CopyObject with a non-matching
 >   `x-amz-copy-source-if-match` must return 412 PreconditionFailed. Litmus does not
->   implement CopyObject; it treats the request as a zero-byte PUT and returns 200.
+>   implement CopyObject (at the time it treated the request as a zero-byte PUT and
+>   returned 200; it now returns 501).
 > - `test_multipart_upload_empty`: CompleteMultipartUpload with no request body must
 >   return 400 MalformedXML. Litmus fails to parse the empty body and returns 500.
 >
-> Neither hangs or crashes the server. No other outcome changed.
+> Neither hangs or crashes the server. No other outcome changed. That gave 116 of 330.
+>
+> **Unsupported requests now return 501 (116 → 103 of 330).** Requests for S3 operations
+> Litmus does not implement used to fall through to a plain handler and could destroy
+> data (`PUT ?acl` emptied the object, `DELETE ?cors` deleted the bucket, CopyObject
+> overwrote the destination with zero bytes). They now return 501 NotImplemented and
+> change nothing. 14 tests that passed only because of the old behavior now fail, and
+> 1 now passes:
+>
+> - 12 `test_post_object_*` tests expect 400 for a malformed browser-form POST; they
+>   passed because every bucket POST other than `?delete` returned a bare 400. POST
+>   Object is not implemented, so they now get 501.
+> - `test_bucket_create_special_key_names` calls `put_object_acl`, which used to be a
+>   zero-byte PutObject returning 200; it now gets 501.
+> - `test_object_copy_zero_size` passed because CopyObject was a zero-byte PUT and its
+>   source happened to be empty; CopyObject now gets 501.
+> - `test_upload_part_copy_percent_encoded_key` now passes: it expects UploadPartCopy
+>   to fail and the target to be unchanged, and gets 501. It passes for the wrong
+>   reason (the expected error is a missing source key), so a real UploadPartCopy
+>   implementation must keep it passing by returning that error.
 
 | Test category | Result | Notes |
 |---|---|---|

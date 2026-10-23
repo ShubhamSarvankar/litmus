@@ -60,6 +60,25 @@ class PreconditionFailed(S3Error):
     message = "At least one of the pre-conditions you specified did not hold"
 
 
+class InvalidArgument(S3Error):
+    status_code = 400
+    code = "InvalidArgument"
+    message = "Invalid Argument"
+
+
+class InvalidBucketName(S3Error):
+    status_code = 400
+    code = "InvalidBucketName"
+    message = "The specified bucket is not valid."
+
+
+class NotImplementedOperation(S3Error):
+    # Named to avoid shadowing the NotImplemented builtin; the S3 code is NotImplemented.
+    status_code = 501
+    code = "NotImplemented"
+    message = "A header you provided implies functionality that is not implemented"
+
+
 class InternalError(S3Error):
     status_code = 500
     code = "InternalError"
