@@ -7,8 +7,8 @@ asserts the exact state left behind: what clients see, what is on disk, what is 
 metadata, and what the consistency sweep reports. It then checks that the client's
 natural retry recovers.
 
-The per-point tests assert only correct behaviour. Where the current code breaks an
-invariant at a crash point, the correct behaviour is asserted in a separate
+The per-point tests assert only correct behavior. Where the current code breaks an
+invariant at a crash point, the correct behavior is asserted in a separate
 test_gap_* test marked xfail(strict=True, raises=AssertionError): it fails today,
 and as soon as the gap is fixed it XPASSes and turns the run red until the marker
 is removed. Setup problems in those tests use pytest.fail, so they surface as real
@@ -27,10 +27,10 @@ import httpx
 import pytest
 
 from chaos.fixtures.subprocess import ServerProcess, _find_free_port
-from server.consistency import OrphanedMetadata, run_consistency_sweep
+from server.consistency import MissingPart, OrphanedMetadata, run_consistency_sweep
 from server.crash_points import (
     COMPLETE_AFTER_ASSEMBLE,
-    COMPLETE_AFTER_OBJECT_META,
+    COMPLETE_AFTER_COMMIT,
     PUT_AFTER_BYTES,
 )
 from server.metadata.sqlite import SQLiteMetadataStore
@@ -214,14 +214,16 @@ def test_complete_killed_after_assemble_before_metadata(tmp_path: Path):
         server2.stop()
 
 
-def test_complete_killed_after_object_metadata_before_upload_marked(tmp_path: Path):
-    """Complete committed object metadata, upload not yet marked complete.
+def test_complete_killed_after_commit_before_part_cleanup(tmp_path: Path):
+    """Complete committed the object metadata and the upload completion in one
+    transaction; part files not yet deleted.
 
-    Expected: the object is visible with the full body and composite ETag. What
-    happens to the upload at this point is a gap; see
-    test_gap_no_open_upload_once_object_committed.
+    Expected: the object is visible with the full body and composite ETag; the
+    upload is closed; its part files are still on disk, because cleanup runs after
+    the commit. Whether the sweep notices those part files is a gap; see
+    test_gap_sweep_reports_part_files_of_completed_upload.
     """
-    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_OBJECT_META)
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_COMMIT)
     upload_id, parts, etags = _prepare_upload(client)
     body, etag = b"".join(parts), _multipart_etag(parts)
     _complete_into_crash(server, client, upload_id, etags)
@@ -234,14 +236,38 @@ def test_complete_killed_after_object_metadata_before_upload_marked(tmp_path: Pa
         assert resp.status_code == 200
         assert resp.content == body
         assert resp.headers["etag"] == etag
-        meta = _store(tmp_path).get_object_meta(BUCKET, KEY)
+        store = _store(tmp_path)
+        meta = store.get_object_meta(BUCKET, KEY)
         assert (meta.size, meta.etag) == (len(body), etag)
+
+        # Upload closed; the assembled file is the only object file; the part
+        # files remain because the kill came before cleanup.
+        assert not store.upload_exists(upload_id)
+        assert all(u.upload_id != upload_id for u in store.list_incomplete_uploads())
+        assert sorted(os.listdir(_object_dir(tmp_path))) == [KEY]
+        assert sorted(os.listdir(_part_dir(tmp_path, upload_id))) == ["1", "2", "3"]
     finally:
         client2.close()
         server2.stop()
 
 
-# --- known gaps: correct behaviour, expected to fail until fixed ---
+def test_no_open_upload_once_object_committed(tmp_path: Path):
+    """A kill anywhere after the Complete commit must not leave the upload open
+    while its object is committed. The commit is one transaction, so the last
+    post-commit crash point sees both or neither."""
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_COMMIT)
+    upload_id, _parts, etags = _prepare_upload(client)
+    _complete_into_crash(server, client, upload_id, etags)
+    client.close()
+
+    store = _store(tmp_path)
+    assert store.get_object_meta(BUCKET, KEY) is not None
+    assert not store.upload_exists(upload_id), (
+        "object is committed but its multipart upload is still open"
+    )
+
+
+# --- known gaps: correct behavior, expected to fail until fixed ---
 
 
 @pytest.mark.xfail(
@@ -279,22 +305,27 @@ def test_gap_sweep_reports_orphaned_file_after_put_crash(tmp_path: Path):
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="gap: Complete commits the object metadata and marks the upload complete "
-    "in separate SQLite transactions, so a kill between them leaves the upload open "
-    "after its object is committed",
+    reason="gap: the consistency sweep does not detect part files left on disk for a "
+    "completed upload (left by a kill between the Complete commit and part cleanup)",
 )
-def test_gap_no_open_upload_once_object_committed(tmp_path: Path):
-    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_OBJECT_META)
+def test_gap_sweep_reports_part_files_of_completed_upload(tmp_path: Path):
+    server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_COMMIT)
     upload_id, _parts, etags = _prepare_upload(client)
     try:
         _complete_into_crash(server, client, upload_id, etags)
     except AssertionError as e:
         pytest.fail(f"setup: server did not die at the crash point: {e}")
     client.close()
-
     store = _store(tmp_path)
-    if store.get_object_meta(BUCKET, KEY) is None:
-        pytest.fail("setup: object metadata not committed at this crash point")
-    assert not store.upload_exists(upload_id), (
-        "object is committed but its multipart upload is still open"
-    )
+    if store.upload_exists(upload_id):
+        pytest.fail("setup: upload still open, so its parts are not leftovers")
+    if not _part_dir(tmp_path, upload_id).exists():
+        pytest.fail("setup: no part files on disk, so nothing is left over")
+
+    report = _sweep(tmp_path)
+    reported = [
+        i
+        for i in report.issues
+        if not isinstance(i, MissingPart) and getattr(i, "upload_id", None) == upload_id
+    ]
+    assert reported, f"sweep did not report the leftover part files; issues: {report.issues}"

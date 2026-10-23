@@ -25,7 +25,7 @@ def test_inert_when_unset(monkeypatch, kills, name):
 def test_only_the_named_point_fires(monkeypatch, kills):
     monkeypatch.setattr(settings, "test_crash_point", crash_points.COMPLETE_AFTER_ASSEMBLE)
     crash_points.crash_point(crash_points.PUT_AFTER_BYTES)
-    crash_points.crash_point(crash_points.COMPLETE_AFTER_OBJECT_META)
+    crash_points.crash_point(crash_points.COMPLETE_AFTER_COMMIT)
     assert kills == []
     crash_points.crash_point(crash_points.COMPLETE_AFTER_ASSEMBLE)
     assert kills == [(os.getpid(), signal.SIGKILL)]

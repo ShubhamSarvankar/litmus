@@ -110,26 +110,30 @@ class SQLiteMetadataStore:
 
     # --- Objects ---
 
+    @staticmethod
+    def _upsert_object(conn: sqlite3.Connection, meta: ObjectMeta) -> None:
+        conn.execute(
+            """INSERT INTO objects (bucket, key, size, etag, last_modified, content_type)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(bucket, key) DO UPDATE SET
+                   size         = excluded.size,
+                   etag         = excluded.etag,
+                   last_modified = excluded.last_modified,
+                   content_type = excluded.content_type""",
+            (
+                meta.bucket,
+                meta.key,
+                meta.size,
+                meta.etag,
+                _dt_to_str(meta.last_modified),
+                meta.content_type,
+            ),
+        )
+
     def put_object_meta(self, bucket: str, key: str, meta: ObjectMeta) -> None:
         conn = self._connect()
         with conn:
-            conn.execute(
-                """INSERT INTO objects (bucket, key, size, etag, last_modified, content_type)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(bucket, key) DO UPDATE SET
-                       size         = excluded.size,
-                       etag         = excluded.etag,
-                       last_modified = excluded.last_modified,
-                       content_type = excluded.content_type""",
-                (
-                    meta.bucket,
-                    meta.key,
-                    meta.size,
-                    meta.etag,
-                    _dt_to_str(meta.last_modified),
-                    meta.content_type,
-                ),
-            )
+            self._upsert_object(conn, meta)
         conn.close()
 
     def get_object_meta(self, bucket: str, key: str) -> ObjectMeta | None:
@@ -226,6 +230,27 @@ class SQLiteMetadataStore:
             )
             for r in rows
         ]
+
+    def commit_completed_upload(self, upload_id: str, meta: ObjectMeta) -> bool:
+        """Mark an open upload complete and commit its object row in one transaction,
+        so a crash or error leaves either both or neither.
+
+        Returns False, changing nothing, if the upload is not open.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE multipart_uploads SET completed = 1 "
+                    "WHERE upload_id = ? AND completed = 0",
+                    (upload_id,),
+                )
+                if cur.rowcount != 1:
+                    return False
+                self._upsert_object(conn, meta)
+        finally:
+            conn.close()
+        return True
 
     def complete_upload(self, upload_id: str) -> None:
         conn = self._connect()

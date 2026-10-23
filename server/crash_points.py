@@ -16,10 +16,11 @@ PUT_AFTER_BYTES = "put-after-bytes"
 # CompleteMultipartUpload: parts assembled into the final file; object metadata
 # not yet committed.
 COMPLETE_AFTER_ASSEMBLE = "complete-after-assemble"
-# CompleteMultipartUpload: object metadata committed; upload not yet marked complete.
-COMPLETE_AFTER_OBJECT_META = "complete-after-object-meta"
+# CompleteMultipartUpload: object metadata and upload completion committed (one
+# transaction); part files not yet deleted.
+COMPLETE_AFTER_COMMIT = "complete-after-commit"
 
-CRASH_POINTS = frozenset({PUT_AFTER_BYTES, COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_OBJECT_META})
+CRASH_POINTS = frozenset({PUT_AFTER_BYTES, COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_COMMIT})
 
 
 def validate_configured_crash_point() -> None:

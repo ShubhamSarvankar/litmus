@@ -175,6 +175,33 @@ def test_abort_upload(store):
     assert store.get_parts("uid-1") == []
 
 
+def test_commit_completed_upload_commits_object_and_closes_upload(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    assert store.commit_completed_upload("uid-1", _obj(etag='"abc-2"')) is True
+    assert store.get_object_meta("b", "k").etag == '"abc-2"'
+    assert store.upload_exists("uid-1") is False
+
+
+def test_commit_completed_upload_rolls_back_both_on_failure(store):
+    # The upload row is updated first; the object insert then violates the foreign
+    # key on objects.bucket. The upload must still be open afterwards.
+    store.create_upload("uid-1", "no-such-bucket", "k", _NOW)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.commit_completed_upload("uid-1", _obj(bucket="no-such-bucket"))
+    assert store.upload_exists("uid-1") is True
+    assert store.get_object_meta("no-such-bucket", "k") is None
+
+
+def test_commit_completed_upload_refuses_closed_or_unknown_upload(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    store.complete_upload("uid-1")
+    assert store.commit_completed_upload("uid-1", _obj()) is False
+    assert store.commit_completed_upload("no-such-upload", _obj()) is False
+    assert store.get_object_meta("b", "k") is None
+
+
 def test_list_incomplete_uploads_excludes_completed(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-pending", "b", "k1", _NOW)

@@ -1,7 +1,7 @@
 from datetime import UTC
 
-from server.crash_points import COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_OBJECT_META, crash_point
-from server.errors.s3errors import InvalidPart
+from server.crash_points import COMPLETE_AFTER_ASSEMBLE, COMPLETE_AFTER_COMMIT, crash_point
+from server.errors.s3errors import InvalidPart, NoSuchUpload
 from server.metadata.base import ObjectMeta
 from server.storage.base import PartSpec
 
@@ -17,8 +17,9 @@ def complete_multipart_upload(
 ) -> str:
     """Execute the COMPLETING transition atomically.
 
-    Validates parts, assembles the file, commits object metadata, marks upload
-    complete, and cleans up part files. Returns the composite ETag.
+    Validates parts, assembles the file, commits the object metadata and the upload
+    completion in a single SQLite transaction, then cleans up part files. Returns
+    the composite ETag.
 
     Raises InvalidPart if any listed part is missing or has a mismatched ETag.
     """
@@ -51,10 +52,10 @@ def complete_multipart_upload(
 
     from datetime import datetime
 
-    # 3. Commit object metadata — bytes are already on disk
-    metadata.put_object_meta(
-        bucket,
-        key,
+    # 3. Commit object metadata and mark the upload complete in one SQLite
+    # transaction — bytes are already on disk
+    committed = metadata.commit_completed_upload(
+        upload_id,
         ObjectMeta(
             bucket=bucket,
             key=key,
@@ -64,13 +65,12 @@ def complete_multipart_upload(
             content_type=content_type,
         ),
     )
+    if not committed:
+        raise NoSuchUpload(extra={"UploadId": upload_id})
 
-    crash_point(COMPLETE_AFTER_OBJECT_META)
+    crash_point(COMPLETE_AFTER_COMMIT)
 
-    # 4. Mark upload complete
-    metadata.complete_upload(upload_id)
-
-    # 5. Delete part files
+    # 4. Delete part files
     storage.delete_parts(upload_id)
 
     return composite_etag
