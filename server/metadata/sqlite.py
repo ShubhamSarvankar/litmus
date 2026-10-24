@@ -103,6 +103,54 @@ def _now() -> str:
     return _dt_to_str(datetime.now(UTC).replace(tzinfo=None))
 
 
+_MAX_CODE_POINT = 0x10FFFF
+_SURROGATES = range(0xD800, 0xE000)
+
+
+def key_successor(prefix: str) -> str | None:
+    """The least string greater than every string that starts with prefix, or None
+    when there is none (the empty prefix, or one made only of U+10FFFF).
+
+    BINARY collation compares UTF-8 bytes, which orders keys by code point
+    (docs/design/storage-layout.md §13). The successor drops trailing U+10FFFF
+    characters and increments the last remaining one, skipping the surrogates, which
+    UTF-8 cannot encode.
+    """
+    chars = list(prefix)
+    while chars:
+        last = ord(chars.pop())
+        if last < _MAX_CODE_POINT:
+            nxt = last + 1
+            if nxt in _SURROGATES:
+                nxt = _SURROGATES.stop
+            return "".join(chars) + chr(nxt)
+    return None
+
+
+def key_range_query(
+    bucket: str, prefix: str, start_after: str | None, limit: int | None
+) -> tuple[str, tuple]:
+    """SELECT for the objects of bucket whose key starts with prefix and sorts after
+    start_after, in key order: a range on the (bucket, key) primary key, never LIKE
+    (whose _ and % are wildcards and which ignores ASCII case)."""
+    where, params = ["bucket = ?"], [bucket]
+    if start_after is not None and start_after >= prefix:
+        where.append("key > ?")
+        params.append(start_after)
+    else:
+        where.append("key >= ?")
+        params.append(prefix)
+    upper = key_successor(prefix)
+    if upper is not None:
+        where.append("key < ?")
+        params.append(upper)
+    sql = f"SELECT * FROM objects WHERE {' AND '.join(where)} ORDER BY key"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return sql, tuple(params)
+
+
 class SchemaVersionError(RuntimeError):
     """The database was written by another schema version."""
 
@@ -166,6 +214,20 @@ class SQLiteMetadataStore:
                     conn.execute("ROLLBACK")
                 raise
             conn.execute("COMMIT")
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _snapshot(self) -> Iterator[sqlite3.Connection]:
+        """One read transaction: every query inside it sees the same committed state."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            try:
+                yield conn
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
         finally:
             conn.close()
 
@@ -447,15 +509,19 @@ class SQLiteMetadataStore:
                 garbage.append(self._retire_object(conn, old))
         return garbage
 
-    def list_objects(self, bucket: str, prefix: str | None = None) -> list[ObjectMeta]:
-        if prefix:
-            rows = self._read(
-                "SELECT * FROM objects WHERE bucket = ? AND key LIKE ? ORDER BY key",
-                (bucket, prefix + "%"),
-            )
-        else:
-            rows = self._read("SELECT * FROM objects WHERE bucket = ? ORDER BY key", (bucket,))
-        return [_object(r) for r in rows]
+    def list_objects(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        start_after: str | None = None,
+        limit: int | None = None,
+    ) -> list[ObjectMeta]:
+        """Objects whose key starts with prefix (an exact, case sensitive prefix) and
+        sorts after start_after, in key order, at most limit of them; one indexed
+        range read in one read transaction."""
+        sql, params = key_range_query(bucket, prefix or "", start_after, limit)
+        with self._snapshot() as conn:
+            return [_object(r) for r in conn.execute(sql, params).fetchall()]
 
     # --- Multipart uploads ---
 

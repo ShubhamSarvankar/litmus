@@ -190,8 +190,14 @@ InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 with a plain-text 400 before the request reaches the application. With
 `--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
 
-**Listing parameters.** ListObjects and ListObjectsV2 apply `prefix` and ignore the
-other listing parameters. Results are never truncated.
+**Listing parameters.** ListObjects, ListObjectsV2 and ListObjectVersions apply
+`prefix` and ignore the other listing parameters. Results are never truncated. The
+prefix is an exact, case sensitive prefix of the key (`_` and `%` are ordinary
+characters), read as an indexed key range, and keys are listed in UTF-8 byte order.
+
+**Keys that are not XML characters.** Listings write keys into the XML as they are.
+A key containing a character XML 1.0 does not allow, such as U+FFFF, makes the
+listing unparseable.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
 keys with `.` or `..` segments. Clients that resolve dot segments before sending

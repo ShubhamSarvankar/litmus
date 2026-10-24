@@ -40,7 +40,7 @@ parameters as follows.
 | PUT | `/{bucket}` | CreateBucket |
 | HEAD | `/{bucket}` | HeadBucket |
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
-| GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Only `prefix` is applied. |
+| GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order. Only `prefix` is applied, as an exact, case sensitive prefix. |
 | POST | `/{bucket}?delete` | DeleteObjects |
 | PUT | `/{bucket}/{key}` | PutObject. With `partNumber` and `uploadId`: UploadPart. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |

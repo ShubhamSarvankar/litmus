@@ -1,3 +1,4 @@
+import random
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from server.metadata.base import ObjectMeta, PartMeta
-from server.metadata.sqlite import SQLiteMetadataStore
+from server.metadata.sqlite import SQLiteMetadataStore, key_range_query, key_successor
 
 _NOW = datetime(2024, 1, 1, 12, 0, 0, 0)
 
@@ -131,6 +132,186 @@ def test_list_objects_with_prefix(store):
 def test_list_objects_empty_bucket(store):
     store.create_bucket("b", _NOW)
     assert store.list_objects("b") == []
+
+
+# --- Listing: prefix as a key range (docs/design/storage-layout.md §13) ---
+
+
+def _put_keys(store, keys, bucket="b"):
+    if not store.bucket_exists(bucket):
+        store.create_bucket(bucket, _NOW)
+    for key in keys:
+        blob_id = store.register_blob("object", bucket, key)
+        store.put_object_meta(bucket, key, _obj(bucket=bucket, key=key, blob_id=blob_id))
+
+
+def _keys(objects):
+    return [o.key for o in objects]
+
+
+def _utf8_sorted(keys):
+    return sorted(keys, key=lambda k: k.encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("prefix", "successor"),
+    [
+        ("", None),
+        ("a", "b"),
+        ("abc", "abd"),
+        ("a/", "a0"),
+        ("\x00", "\x01"),
+        ("\x7f", "\x80"),
+        ("é", "ê"),
+        ("日本", "日本"[:-1] + chr(ord("本") + 1)),
+        ("\uffff", "\U00010000"),
+        ("x\U0001f600", "x\U0001f601"),
+        # The next code point is a surrogate: skip to U+E000.
+        ("\ud7ff", "\ue000"),
+        ("ab\ud7ff", "ab\ue000"),
+        # Trailing U+10FFFF has no next code point: drop it and increment before it.
+        ("a\U0010ffff", "b"),
+        ("ab\U0010ffff\U0010ffff", "ac"),
+        ("\ud7ff\U0010ffff", "\ue000"),
+        # Nothing but U+10FFFF: no upper bound.
+        ("\U0010ffff", None),
+        ("\U0010ffff\U0010ffff", None),
+    ],
+)
+def test_key_successor(prefix, successor):
+    assert key_successor(prefix) == successor
+
+
+def test_key_successor_bounds_every_extension():
+    # Every key that starts with the prefix sorts below the successor, in UTF-8 bytes,
+    # and the successor itself does not start with the prefix.
+    extensions = ["", "\x00", "a", "\x7f", "\uffff", "\U0010ffff", "\U0010ffff" * 3]
+    for prefix in ["a", "é", "\ud7ff", "a\U0010ffff", "日\U0010ffff\U0010ffff"]:
+        upper = key_successor(prefix)
+        assert not upper.startswith(prefix)
+        assert upper.encode("utf-8") > prefix.encode("utf-8")
+        for ext in extensions:
+            assert (prefix + ext).encode("utf-8") < upper.encode("utf-8")
+
+
+def test_database_is_utf8_and_key_is_binary(store, tmp_path):
+    conn = sqlite3.connect(tmp_path / "test.db")
+    try:
+        assert conn.execute("PRAGMA encoding").fetchone()[0] == "UTF-8"
+        (pk,) = [r[1] for r in conn.execute("PRAGMA index_list('objects')") if r[3] == "pk"]
+        columns = {r[2]: r[4] for r in conn.execute(f"PRAGMA index_xinfo('{pk}')") if r[5]}
+        assert columns == {"bucket": "BINARY", "key": "BINARY"}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "start_after", "limit", "search"),
+    [
+        ("", None, None, "(bucket=? AND key>?)"),
+        ("logs/", None, None, "(bucket=? AND key>? AND key<?)"),
+        ("logs/", "logs/a", 10, "(bucket=? AND key>? AND key<?)"),
+        ("\U0010ffff", None, 1, "(bucket=? AND key>?)"),
+    ],
+)
+def test_key_range_query_uses_primary_key(store, tmp_path, prefix, start_after, limit, search):
+    sql, params = key_range_query("b", prefix, start_after, limit)
+    assert "LIKE" not in sql
+    conn = sqlite3.connect(tmp_path / "test.db")
+    try:
+        plan = [r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        conn.close()
+    # SQLite prints key>=? as key>?. No temp b-tree: rows come out in index order.
+    assert plan == [f"SEARCH objects USING PRIMARY KEY {search}"]
+
+
+def test_list_prefix_is_not_a_wildcard(store):
+    _put_keys(store, ["a_c", "abc", "a%c", "aXc", "a%", "a_"])
+    assert _keys(store.list_objects("b", prefix="a_")) == ["a_", "a_c"]
+    assert _keys(store.list_objects("b", prefix="a%")) == ["a%", "a%c"]
+
+
+def test_list_prefix_is_case_sensitive(store):
+    _put_keys(store, ["Foo/1", "foo/2", "FOO/3", "fOo/4"])
+    assert _keys(store.list_objects("b", prefix="foo/")) == ["foo/2"]
+    assert _keys(store.list_objects("b", prefix="F")) == ["FOO/3", "Foo/1"]
+
+
+def test_list_prefix_non_ascii(store):
+    keys = ["é/1", "é/2", "e/3", "ê", "日本/x", "日本語", "日", "\U0001f600a", "\U0001f601"]
+    _put_keys(store, keys)
+    assert _keys(store.list_objects("b", prefix="é")) == ["é/1", "é/2"]
+    assert _keys(store.list_objects("b", prefix="日本")) == ["日本/x", "日本語"]
+    assert _keys(store.list_objects("b", prefix="\U0001f600")) == ["\U0001f600a"]
+
+
+def test_list_prefix_at_code_point_edges(store):
+    keys = ["\ud7ff", "\ud7ffz", "\ue000", "\uffff", "\U00010000", "a\U0010ffff", "b"]
+    keys += ["a\U0010ffff\U0010ffff", "\U0010ffff", "\U0010ffffz"]
+    _put_keys(store, keys)
+    assert _keys(store.list_objects("b", prefix="\ud7ff")) == ["\ud7ff", "\ud7ffz"]
+    assert _keys(store.list_objects("b", prefix="a\U0010ffff")) == [
+        "a\U0010ffff",
+        "a\U0010ffff\U0010ffff",
+    ]
+    assert _keys(store.list_objects("b", prefix="\U0010ffff")) == ["\U0010ffff", "\U0010ffffz"]
+    assert _keys(store.list_objects("b", prefix="\uffff")) == ["\uffff"]
+
+
+def test_list_order_is_utf8_byte_order(store):
+    keys = ["b", "B", "a", "_", "%", "é", "\uffff", "\U00010000", "\ue000", "\x7f", "~"]
+    _put_keys(store, keys)
+    assert _keys(store.list_objects("b")) == _utf8_sorted(keys)
+
+
+def test_list_prefix_stays_in_bucket(store):
+    _put_keys(store, ["x/1", "x/2"], bucket="a")
+    _put_keys(store, ["x/3"], bucket="b")
+    _put_keys(store, ["x/4"], bucket="c")
+    assert _keys(store.list_objects("b", prefix="x/")) == ["x/3"]
+    assert _keys(store.list_objects("b")) == ["x/3"]
+
+
+def test_list_start_after_and_limit(store):
+    _put_keys(store, ["a", "b/1", "b/2", "b/3", "c"])
+    assert _keys(store.list_objects("b", start_after="b/1")) == ["b/2", "b/3", "c"]
+    assert _keys(store.list_objects("b", start_after="b/0", limit=2)) == ["b/1", "b/2"]
+    assert _keys(store.list_objects("b", prefix="b/", start_after="a")) == ["b/1", "b/2", "b/3"]
+    assert _keys(store.list_objects("b", prefix="b/", start_after="b/2")) == ["b/3"]
+    assert _keys(store.list_objects("b", prefix="b/", start_after="c")) == []
+    assert _keys(store.list_objects("b", limit=0)) == []
+    # start_after need not be a key.
+    assert _keys(store.list_objects("b", start_after="b/10")) == ["b/2", "b/3", "c"]
+
+
+def test_list_prefix_matches_startswith_on_random_keys(store):
+    rng = random.Random(1311)
+    alphabet = ["a", "b", "A", "_", "%", "/", "é", "日", "\ud7ff", "\ue000", "\uffff"]
+    alphabet += ["\U00010000", "\U0010ffff", "\x00", "\x7f"]
+    keys = sorted({"".join(rng.choices(alphabet, k=rng.randint(1, 5))) for _ in range(400)})
+    _put_keys(store, keys)
+    prefixes = {""} | {k[: rng.randint(0, len(k))] for k in keys}
+    prefixes |= {"".join(rng.choices(alphabet, k=rng.randint(1, 3))) for _ in range(100)}
+    for prefix in sorted(prefixes):
+        expected = _utf8_sorted(k for k in keys if k.startswith(prefix))
+        assert _keys(store.list_objects("b", prefix=prefix)) == expected, prefix
+        after = rng.choice(keys)
+        expected_after = [k for k in expected if k.encode("utf-8") > after.encode("utf-8")]
+        got = store.list_objects("b", prefix=prefix, start_after=after, limit=3)
+        assert _keys(got) == expected_after[:3], (prefix, after)
+
+
+def test_snapshot_reads_one_committed_state(store):
+    _put_keys(store, ["a", "c"])
+    with store._snapshot() as conn:
+        sql, params = key_range_query("b", "", None, None)
+        first = [r["key"] for r in conn.execute(sql, params)]
+        _put_keys(store, ["b"])
+        store.delete_objects("b", ["c"])
+        second = [r["key"] for r in conn.execute(sql, params)]
+    assert first == second == ["a", "c"]
+    assert _keys(store.list_objects("b")) == ["a", "b"]
 
 
 # --- Multipart uploads ---

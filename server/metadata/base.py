@@ -127,7 +127,16 @@ class MetadataStore(Protocol):
 
     def delete_objects(self, bucket: str, keys: list[str]) -> list[str]: ...
 
-    def list_objects(self, bucket: str, prefix: str | None = None) -> list[ObjectMeta]: ...
+    def list_objects(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        start_after: str | None = None,
+        limit: int | None = None,
+    ) -> list[ObjectMeta]: ...
+
+    # Keys that start with prefix (exact bytes, case sensitive) and sort after
+    # start_after, in key order, at most limit of them.
 
     def create_upload(self, upload_id: str, bucket: str, key: str, initiated: datetime) -> None: ...
 

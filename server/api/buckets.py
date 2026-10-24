@@ -82,11 +82,11 @@ def _list_objects_v2_xml(bucket: str, objects: list, prefix: str = "") -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _list_versions_xml(bucket: str, objects: list) -> str:
+def _list_versions_xml(bucket: str, objects: list, prefix: str = "") -> str:
     """Versioning not implemented — return objects as Version elements so cleanup can delete them."""
     root = ET.Element("ListVersionsResult")
     ET.SubElement(root, "Name").text = bucket
-    ET.SubElement(root, "Prefix").text = ""
+    ET.SubElement(root, "Prefix").text = prefix
     ET.SubElement(root, "MaxKeys").text = "1000"
     ET.SubElement(root, "IsTruncated").text = "false"
     for obj in objects:
@@ -128,7 +128,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
         prefix = params.get("prefix", "")
         objects = metadata.list_objects(bucket, prefix=prefix or None)
         return Response(
-            content=_list_versions_xml(bucket, objects),
+            content=_list_versions_xml(bucket, objects, prefix),
             status_code=200,
             media_type="application/xml",
         )
