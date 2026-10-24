@@ -238,3 +238,134 @@ def test_trailer_checksum_is_base64():
     _, _, body = _botocore_https_request("put_object", Bucket=BUCKET, Key="k", Body=BODY)
     trailer = body.split(b"x-amz-checksum-crc32:", 1)[1].split(b"\r\n", 1)[0].strip()
     assert len(base64.b64decode(trailer)) == 4
+
+
+# --- the connection after a refused framed body ---
+
+
+class _Closed(Exception):
+    pass
+
+
+def _read_one_response(sock: socket.socket, buffered: bytes = b""):
+    """Read exactly one response from a kept-alive socket; return (status, headers,
+    body, bytes left over). Raises _Closed if the server closed the connection."""
+    data = buffered
+    while b"\r\n\r\n" not in data:
+        try:
+            chunk = sock.recv(65536)
+        except (ConnectionResetError, BrokenPipeError) as e:
+            raise _Closed() from e
+        if not chunk:
+            raise _Closed()
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split()[1])
+    headers = {k.strip().lower(): v.strip() for k, v in (h.split(":", 1) for h in lines[1:])}
+
+    def more():
+        chunk = sock.recv(65536)
+        if not chunk:
+            raise _Closed()
+        return chunk
+
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        body = b""
+        while True:
+            while b"\r\n" not in rest:
+                rest += more()
+            size_line, _, rest = rest.partition(b"\r\n")
+            size = int(size_line.split(b";")[0], 16)
+            while len(rest) < size + 2:
+                rest += more()
+            body, rest = body + rest[:size], rest[size + 2 :]
+            if size == 0:
+                return status, headers, body, rest
+    length = int(headers.get("content-length", "0"))
+    while len(rest) < length:
+        rest += more()
+    return status, headers, rest[:length], rest[length:]
+
+
+def _framed_put(port, metadata, expect: bool):
+    """botocore's framed PutObject for an existing bucket: (head bytes, body bytes)."""
+    path, headers, body = _botocore_https_request("put_object", Bucket=BUCKET, Key="k", Body=BODY)
+    assert headers.get("Expect") == "100-continue"  # botocore always asks
+    if not expect:
+        del headers["Expect"]
+    assert headers["Transfer-Encoding"] == "chunked"
+    head = f"PUT {path} HTTP/1.1\r\nHost: x\r\n"
+    head += "".join(f"{k}: {v}\r\n" for k, v in headers.items() if k.lower() != "host")
+    wire_body = f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n"
+    return (head + "\r\n").encode("latin-1"), wire_body
+
+
+def _seed_and_get_request(port) -> bytes:
+    assert _send(port, "PUT", f"/{BUCKET}/other", {}, b"other body")[0] == 200
+    return f"GET /{BUCKET}/other HTTP/1.1\r\nHost: x\r\n\r\n".encode()
+
+
+def test_refused_framed_put_keeps_connection_usable(server):
+    # botocore's framed request without Expect: the body follows the headers at once.
+    # The 501 comes before the body is read; uvicorn must discard the unread body so
+    # the next request on the same connection gets its own response.
+    port, metadata, blob_dir = server
+    get_request = _seed_and_get_request(port)
+    head, body = _framed_put(port, metadata, expect=False)
+    with socket.create_connection(("127.0.0.1", port)) as s:
+        s.settimeout(5)
+        s.sendall(head + body)
+        status, headers, payload, left = _read_one_response(s)
+        assert status == 501
+        assert ET.fromstring(payload).findtext("Code") == "NotImplemented"
+        assert headers.get("connection", "").lower() != "close"
+        s.sendall(get_request)
+        status, headers, payload, left = _read_one_response(s, left)
+        assert (status, payload, left) == (200, b"other body", b"")
+    assert metadata.list_blob_records()[0].key == "other"
+    assert len(metadata.list_blob_records()) == 1
+
+
+def test_refused_framed_put_with_expect_continue_closes(server):
+    # The exact botocore request, Expect: 100-continue included. The client waits for
+    # 100 Continue and withholds the body; Litmus answers 501 without asking for the
+    # body, so no 100 is sent and the response closes the connection: the next
+    # request on it must not be read as the withheld body.
+    port, metadata, blob_dir = server
+    get_request = _seed_and_get_request(port)
+    head, _ = _framed_put(port, metadata, expect=True)
+    with socket.create_connection(("127.0.0.1", port)) as s:
+        s.settimeout(5)
+        s.sendall(head)
+        status, headers, payload, left = _read_one_response(s)
+        assert status == 501  # not 100: the body was never asked for
+        assert ET.fromstring(payload).findtext("Code") == "NotImplemented"
+        assert headers.get("connection", "").lower() == "close"
+        with pytest.raises((_Closed, BrokenPipeError, ConnectionResetError)):
+            s.sendall(get_request)
+            _read_one_response(s, left)
+    with socket.create_connection(("127.0.0.1", port)) as s:
+        s.settimeout(5)
+        s.sendall(get_request)
+        assert _read_one_response(s)[:3:2] == (200, b"other body")
+    assert len(metadata.list_blob_records()) == 1
+
+
+def test_refused_framed_put_with_expect_and_body_sent_anyway_closes(server):
+    # A client that sends the body without waiting for 100 Continue (botocore does
+    # after its Expect timeout), followed at once by another request.
+    port, metadata, blob_dir = server
+    get_request = _seed_and_get_request(port)
+    head, body = _framed_put(port, metadata, expect=True)
+    with socket.create_connection(("127.0.0.1", port)) as s:
+        s.settimeout(5)
+        s.sendall(head + body + get_request)
+        status, headers, payload, left = _read_one_response(s)
+        assert status == 501
+        assert headers.get("connection", "").lower() == "close"
+        # The GET is not answered on this connection, and nothing was misparsed:
+        # the connection ends after the 501.
+        with pytest.raises(_Closed):
+            _read_one_response(s, left)
+    assert len(metadata.list_blob_records()) == 1
