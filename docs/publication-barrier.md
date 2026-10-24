@@ -1,111 +1,106 @@
-# Publication Barrier
+# Publication barrier
 
-## The invariant
+## The rule
 
-After returning `200 OK` on a `PUT /{bucket}/{key}` or `CompleteMultipartUpload`, a
-subsequent `GET` will return the correct bytes — even if the process is killed
-immediately after the `200` is sent.
+New bytes are durable before the commit that makes them visible. A client is told
+200 only after that commit.
 
-This is not obvious. It requires a specific ordering of operations and a specific
-set of fsync calls. This document formalizes that sequence.
+## How objects are stored
 
----
+Each object version and each uploaded part is one file, `blobs/<xx>/<id>`, where
+`<id>` is 32 random hex characters and `<xx>` is its first two. No bucket name, key,
+upload ID or part number is ever part of a path, so every key is stored as the exact
+string the client sent, including keys such as `k` and `k/`, or keys with `.` and
+`..` segments. A blob file is written once and never modified; it is only read and,
+at the end, unlinked.
 
-## The durable write sequence (single-part PUT)
+The SQLite database maps each key to the ID of its blob. A registry table records
+every blob from before its file is created until after the file is unlinked:
+`pending` while it is being written, `live` once an object or part refers to it, and
+`garbage` once nothing does.
 
-```
-1. Stream body to a temp file in the same directory as the final path
-2. Compute MD5 incrementally while streaming (no second read)
-3. fsync(temp_file_fd)          — data is durable on disk
-4. close(temp_file_fd)
-5. rename(temp_path, final_path) — atomic at the POSIX layer
-6. fsync(parent_dir_fd)         — directory entry is durable
-7. Commit object metadata to SQLite (WAL + synchronous=FULL)
-8. Return 200 OK
-```
+## The registration commit
 
-Steps 1–6 write the bytes. Step 7 makes the object *visible*. Step 8 tells the client.
+Before any byte is written, the new blob ID is committed to the registry as
+`pending`. This commit makes nothing visible. It records which file belongs to which
+write, so that the startup sweep can remove the leftovers of a write that died, and
+report the bucket and key it was for.
 
-### Why each step matters
+## PutObject, new key or overwrite
 
-**Step 1 — temp file in the same directory:** `rename` is only guaranteed atomic
-when source and destination are on the same filesystem. Writing to the same directory
-ensures this.
+1. Commit the new blob ID as `pending`.
+2. Write the body to `blobs/tmp/<id>.tmp`, computing its MD5, and fsync the file.
+3. Rename it to `blobs/<xx>/<id>` and fsync `blobs/<xx>`.
+4. In one transaction: point the key's row at the new blob, mark the new blob `live`,
+   and mark the blob it replaces `garbage`.
+5. Unlink the replaced blob and remove its registry row.
+6. Answer 200 with the ETag.
 
-**Step 3 — fsync the file fd:** Without this, the OS may not have flushed the write
-buffer to the storage device before the rename. A crash after rename but before flush
-would produce a visible object with corrupt or zero bytes.
+The old object's file is never touched before step 4, because the new bytes always go
+to a fresh file. A kill before step 4 leaves the previous object (or no object)
+visible, and the sweep removes the new blob. A kill after step 4 leaves the new
+object visible, and the sweep removes the old file if step 5 did not finish.
 
-**Step 5 — rename instead of write-in-place:** If we wrote directly to the final path
-and crashed mid-write, the object would be partially written. `rename` is atomic — the
-final path either points to the old file or the new complete file, never to a partial one.
+## DeleteObject and DeleteObjects
 
-**Step 6 — fsync the parent directory:** On Linux, a crash after `rename` but before
-the directory entry is flushed can leave the directory pointing to neither the old nor
-the new file. `fsync`-ing the directory fd makes the rename durable. (Skipped on
-Windows where directory fsync is not supported — see `docs/crash-model.md`.)
+One transaction deletes the object row and marks its blob `garbage`; the file is
+unlinked after that commit. A row never points at a missing file: a kill before the
+commit leaves the object and its bytes in place, and a kill after it leaves the file
+for the sweep. DeleteObjects deletes every listed key in one transaction.
 
-**Step 7 — metadata after bytes:** If the process is killed after step 6 but before
-step 7, the file exists on disk but has no metadata row. The startup consistency sweep
-will detect this as an orphaned file. The object is not visible to clients — a `GET`
-returns `404`. This is the correct behavior: the `200` was never sent, so the client
-will retry.
+## UploadPart, including re-uploading a part number
 
-If the process is killed after step 7 but before step 8 (the `200`), the object is
-visible and correct. The client may not have received the `200` and may retry — a
-second `PUT` of the same key is handled correctly (idempotent overwrite).
+UploadPart writes a new blob exactly as PutObject does, then commits it as the
+part's blob, provided the upload is still open; otherwise it answers NoSuchUpload.
+Re-uploading a part number writes another new blob. The previous part stays recorded
+and intact until the commit that replaces it.
 
----
+## CompleteMultipartUpload
 
-## The durable write sequence (CompleteMultipartUpload)
+1. Check that every listed part is recorded with a matching ETag.
+2. Commit a new blob ID as `pending`.
+3. Concatenate the part blobs into it, with the same fsync, rename and directory
+   fsync as PutObject.
+4. In one transaction:
+   - mark the upload completed, which is refused (NoSuchUpload) if the upload is no
+     longer open;
+   - check that each listed part still names the blob that was assembled, which is
+     refused (InvalidPart) if a part was re-uploaded during assembly;
+   - point the key's row at the assembled blob and mark it `live`;
+   - mark the part blobs, and any object blob it replaces, `garbage`.
+5. Unlink the blobs marked `garbage`.
+6. Answer 200 with the composite ETag.
 
-```
-1. Validate all listed parts exist with matching ETags
-2. Concatenate part files into a temp file (same durable write sequence as above)
-3. fsync(temp_file_fd)
-4. close(temp_file_fd)
-5. rename(temp_path, final_path)
-6. fsync(parent_dir_fd)
-7. Commit object metadata to SQLite
-8. Mark upload as complete in SQLite  } single transaction
-9. Delete part files
-10. Return 200 OK
-```
+Complete writes nothing outside its own new blob before its commit, so a refused or
+failed Complete leaves an existing object at the key untouched. The rows of the
+listed parts keep their ETag and size after completion.
 
-Steps 7 and 8 are committed in a single SQLite transaction. If the process is killed
-between step 6 and step 7, the assembled file exists on disk but the object is not
-visible (no metadata row). The startup sweep detects the incomplete upload.
+## AbortMultipartUpload and DeleteBucket
 
-If killed between steps 9 and 10, the part files may linger on disk. The startup sweep
-detects and logs this as `MissingPart` issues. The assembled object is already visible
-and correct — the cleanup is cosmetic.
+AbortMultipartUpload deletes the upload and its part rows and marks the part blobs
+`garbage` in one transaction, then unlinks them. DeleteBucket refuses a bucket that
+still has objects; otherwise it aborts the bucket's open uploads in the same
+transaction that deletes the bucket.
 
----
+## GET
 
-## SQLite configuration
+1. Read the key's row: its blob ID, size and ETag.
+2. Open that blob.
+3. If the blob was already unlinked, a later commit replaced or deleted the key: read
+   the row again and go back to step 2 with the new blob, or answer 404 if the key is
+   gone. Three such retries are allowed; the fourth failed open answers 503 SlowDown,
+   so one GET opens at most four times.
+4. Send the size and ETag from the row that named the opened blob, then stream from
+   the open file.
 
-Every connection applies:
+An open file keeps its bytes after it is unlinked, so a GET that has opened a blob
+sends that whole version even if an overwrite and its cleanup finish while it is
+streaming. A range GET follows the same steps.
 
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-PRAGMA foreign_keys = ON;
-```
+## Concurrent writers
 
-`WAL` mode means writers don't block readers and a crash during a write leaves the
-database in a consistent state (the in-progress transaction is simply lost).
-`synchronous=FULL` means the WAL file is flushed to disk before each transaction
-commits — this is the setting that provides process-kill durability.
-
----
-
-## What this does NOT protect against
-
-- **OS crash / kernel panic:** The fsync calls ensure data is ordered for the storage
-  device's write queue, but a kernel panic can discard in-flight I/O. This would require
-  `O_DIRECT` or battery-backed write caches, which are out of scope.
-- **Storage hardware failure / bit rot:** Not addressed.
-- **Concurrent writers:** Two simultaneous PUTs to the same key will result in one
-  winning — the last `rename` wins at the filesystem level, and the last metadata commit
-  wins at the SQLite level. The GET will return a consistent object (one of the two
-  bodies, never a mix), but which one wins is not deterministic.
+Two PUTs to the same key each write their own blob. Their commits run one at a time
+under SQLite's write lock, and each commit reads the current row under that lock. The
+last commit wins, both clients receive 200, and the blob of the earlier commit is
+removed. The test for this runs the two requests on separate threads and holds the
+first commit until the second has started its own.

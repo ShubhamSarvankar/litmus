@@ -1,8 +1,9 @@
 # Litmus
 
-An S3-compatible object storage server built for **correctness**, not scale.
-AWS CLI and boto3 work against it unmodified. A chaos suite proves storage
-invariants hold across process kills and injected faults.
+A server for a subset of the S3 REST API, written to test storage correctness rather
+than to scale. Objects are files on the local filesystem; metadata is in SQLite. A
+chaos suite kills the server at named steps of every write path and checks what is
+left on disk, in the database and visible to clients after a restart.
 
 [![CI](https://github.com/shubhamsarvankar/litmus/actions/workflows/ci.yml/badge.svg)](https://github.com/shubhamsarvankar/litmus/actions/workflows/ci.yml)
 [![Chaos](https://github.com/shubhamsarvankar/litmus/actions/workflows/chaos.yml/badge.svg)](https://github.com/shubhamsarvankar/litmus/actions/workflows/chaos.yml)
@@ -10,198 +11,167 @@ invariants hold across process kills and injected faults.
 
 ---
 
-## What this demonstrates
+## What is tested
 
-- **S3 REST API at the protocol level** — real AWS CLI and boto3 work without
-  modification, including multipart uploads, range GETs, and conditional headers.
-- **Correctness defined operationally, not by documentation** — a passing test means
-  a real S3 client got a real valid response. 115/325 ceph/s3-tests categories pass;
-  every failure is documented with an explicit reason.
-- **`CompleteMultipartUpload` as a transactional commit** — assembly, metadata commit,
-  and cleanup are sequenced so a process kill at any point leaves either a complete
-  visible object or no object at all.
-- **Crash invariants tested explicitly** — the chaos suite proves storage guarantees
-  hold across SIGKILL and injected OSErrors, not just happy-path scenarios.
-- **Two-tier fault injection** — Tier A injects faults at the Python layer (fast,
-  in-process); Tier B kills the real process mid-operation and verifies state after
-  restart.
+- **Crash behavior.** Tier B tests start a real server, make it kill itself with
+  SIGKILL at a named step of PutObject, DeleteObject, DeleteObjects, UploadPart,
+  CompleteMultipartUpload, AbortMultipartUpload, DeleteBucket, the startup sweep or
+  the first start, and check the state after a restart. Tier A tests inject faults in
+  process (raised OSErrors, corrupted or missing files, deterministic races).
+- **Write ordering.** Barrier order tests check that PutObject, UploadPart and
+  CompleteMultipartUpload fsync the new file, rename it into place and fsync its
+  directory before the commit that makes it visible.
+- **Protocol conformance.** Conformance tests cover the implemented operations.
+  Against ceph/s3-tests, 99 of 330 selected tests pass; every failure is explained in
+  [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
 
-## Architecture
+## API
 
-```
-litmus/
-├── server/
-│   ├── api/
-│   │   ├── buckets.py       # PUT/DELETE/GET / bucket routes + ListObjects + DeleteObjects
-│   │   ├── objects.py       # PUT/GET/DELETE/HEAD object routes
-│   │   └── multipart.py     # CreateMPU, UploadPart, Complete, Abort routes
-│   ├── storage/
-│   │   ├── base.py          # StorageBackend Protocol
-│   │   └── filesystem.py    # FilesystemBackend — durable write sequence
-│   ├── metadata/
-│   │   ├── base.py          # MetadataStore Protocol
-│   │   └── sqlite.py        # SQLiteMetadataStore — WAL + FULL synchronous
-│   ├── multipart/
-│   │   └── state_machine.py # CompleteMultipartUpload transactional commit
-│   ├── errors/
-│   │   └── s3errors.py      # S3Error hierarchy + XML serializer
-│   ├── consistency.py       # Startup consistency sweep
-│   ├── config.py            # Settings (env-var driven)
-│   └── app.py               # FastAPI app factory + DI wiring
-├── chaos/
-│   ├── framework/           # FaultInjector, Trigger/Fault protocols
-│   ├── faults/              # RaiseOSError, CorruptBytes, HangForever, PartialWrite
-│   ├── fixtures/            # Tier A (in-process) + Tier B (subprocess) fixtures
-│   └── scenarios/           # test_enospc, test_corruption, test_desync, test_concurrent
-│                              test_crash_multipart (Tier B, POSIX only)
-├── tests/
-│   ├── conformance/         # Bucket, object, multipart, range GET conformance
-│   └── unit/                # ETag computation, SQLite transactions, error XML
-├── scripts/
-│   └── run_ceph_s3tests.sh  # Runs ceph/s3-tests against a live server
-└── docs/
-    ├── crash-model.md       # Explicit durability contract
-    ├── publication-barrier.md # The durable write sequence, formalized
-    └── compatibility.md     # ceph/s3-tests results, known gaps
-```
+The app registers 16 routes: 11 for S3 requests, `/health`, and the 4 routes FastAPI
+adds by default. The S3 routes dispatch on query parameters as follows.
 
----
-
-## API surface
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | List all buckets |
-| PUT | `/{bucket}` | Create bucket |
-| DELETE | `/{bucket}` | Delete bucket |
-| HEAD | `/{bucket}` | Bucket exists check |
-| GET | `/{bucket}` | List objects (V1 and V2) |
-| POST | `/{bucket}?delete` | Bulk delete objects (DeleteObjects) |
-| PUT | `/{bucket}/{key}` | Put object |
-| GET | `/{bucket}/{key}` | Get object (with Range, If-Match) |
-| HEAD | `/{bucket}/{key}` | Object metadata |
-| DELETE | `/{bucket}/{key}` | Delete object |
-| POST | `/{bucket}/{key}?uploads` | Initiate multipart upload |
-| PUT | `/{bucket}/{key}?partNumber&uploadId` | Upload part |
-| POST | `/{bucket}/{key}?uploadId` | Complete multipart upload |
-| DELETE | `/{bucket}/{key}?uploadId` | Abort multipart upload |
+| Method | Path | Operation |
+|---|---|---|
+| GET | `/` | ListBuckets |
+| PUT | `/{bucket}` | CreateBucket |
+| HEAD | `/{bucket}` | HeadBucket |
+| DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
+| GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Only `prefix` is applied. |
+| POST | `/{bucket}?delete` | DeleteObjects |
+| PUT | `/{bucket}/{key}` | PutObject. With `partNumber` and `uploadId`: UploadPart. |
+| GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
+| HEAD | `/{bucket}/{key}` | HeadObject |
+| DELETE | `/{bucket}/{key}` | DeleteObject. With `uploadId`: AbortMultipartUpload. |
+| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload |
+| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload |
 | GET | `/health` | Health check |
+| GET, HEAD | `/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc` | FastAPI defaults |
+
+The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
+operations. Requests for S3 operations that are not implemented (ACLs, versioning
+configuration, CopyObject, ListParts, ListMultipartUploads, POST Object and others)
+get 501 NotImplemented before reaching a handler, and change nothing. Keys are stored
+as the exact string the client sent.
 
 ---
+
+## Storage
+
+Each object version and each uploaded part is an immutable file `blobs/<xx>/<id>`
+under a random ID; no bucket name or key is part of a path. SQLite maps keys to blob
+IDs and records every blob file in a registry. Details:
+[`docs/publication-barrier.md`](docs/publication-barrier.md).
 
 ## Crash model
 
-Litmus guarantees storage invariants across **process kills (SIGKILL) only**.
-
-After returning `200 OK` on a PUT or CompleteMultipartUpload:
-- The object bytes are durable on disk via the temp→fsync→rename→fsync-dir sequence.
-- The object metadata is committed in SQLite with `WAL + synchronous=FULL`.
-- A subsequent GET will return the correct bytes even if the process is killed
-  immediately after the `200` is sent.
-
-OS crash, power loss, and hardware failure are explicitly out of scope.
-
-See [`docs/crash-model.md`](docs/crash-model.md) for the full contract.
-
----
+Litmus is tested against process kills (SIGKILL) on POSIX. After a kill and restart:
+an object that got 200 on PutObject or CompleteMultipartUpload is readable with the
+right bytes and ETag; a write killed before its commit leaves the previous object, or
+no object, visible; and a GET returns one whole version or an error, never a mix.
+OS crash, power loss and hardware failure are out of scope; the fsyncs only matter
+for those, and no test checks their effect. Details, including what the startup
+sweep deletes and what it only reports: [`docs/crash-model.md`](docs/crash-model.md).
 
 ## Publication barrier
 
-Bytes are written to disk **before** metadata is committed. If the process is killed
-between those two steps, the object is not visible — a GET returns `404`. The startup
-consistency sweep detects and logs the orphaned file.
-
-The durable write sequence: `temp file → fsync → rename → fsync(parent dir) → SQLite commit`
-
-See [`docs/publication-barrier.md`](docs/publication-barrier.md) for the formal
-step-by-step analysis including why each step is necessary.
+New bytes are durable before the commit that makes them visible. Every write goes to
+a fresh file: temp file, fsync, rename, fsync of its directory, then one SQLite
+commit. Replaced and deleted files are unlinked only after their commit. Before any
+byte is written, the new blob ID is committed as pending, so the startup sweep can
+find the leftovers of a write that died. Details:
+[`docs/publication-barrier.md`](docs/publication-barrier.md).
 
 ---
 
-## Getting started
+## Running the server
 
 ```bash
-# Clone and install
-git clone https://github.com/YOUR_USERNAME/litmus
-cd litmus
 uv sync
-
-# Start the server
 uv run uvicorn server.app:app --host 127.0.0.1 --port 8000
-
-# Verify with AWS CLI (in another terminal)
-aws s3 mb s3://test-bucket --endpoint-url http://localhost:8000 \
-  --no-sign-request
-aws s3 cp README.md s3://test-bucket/ --endpoint-url http://localhost:8000 \
-  --no-sign-request
-aws s3 ls s3://test-bucket --endpoint-url http://localhost:8000 \
-  --no-sign-request
 ```
 
----
+Configuration is by environment variable:
 
-## Running tests
+| Variable | Default | Meaning |
+|---|---|---|
+| `S3_BLOB_DIR` | `data/blobs` | Directory of the blob files |
+| `S3_DB_PATH` | `data/litmus.db` | SQLite database |
 
-**Unit + conformance tests (all platforms):**
+The server refuses to start:
+
+- if `S3_DATA_DIR` or `S3_PARTS_DIR` is set (both belong to the earlier storage
+  layout);
+- on a database with schema version 1 (earlier data is not migrated: use a new data
+  directory);
+- if the database and the blob directory do not belong together (each holds the same
+  store ID, written at first start);
+- if another server already uses the same blob directory.
+
+Example requests:
+
 ```bash
-uv run pytest tests/ chaos/scenarios/ -v
+curl -X PUT http://127.0.0.1:8000/my-bucket
+curl -X PUT --data-binary @README.md http://127.0.0.1:8000/my-bucket/README.md
+curl http://127.0.0.1:8000/my-bucket/README.md
 ```
 
-**Tier B crash tests (Linux / macOS / WSL2 only — requires SIGKILL):**
+Requests are not authenticated.
+
+---
+
+## Running the tests
+
 ```bash
-uv run pytest chaos/scenarios/test_crash_multipart.py -v
-```
-These tests are automatically skipped on Windows with a clear message.
-
-**ceph/s3-tests (Linux / WSL2 only):**
-```bash
-# Start server first in another terminal
-uv run uvicorn server.app:app --host 127.0.0.1 --port 8000
-
-# Run the suite
-bash scripts/run_ceph_s3tests.sh
+uv run pytest                       # tests/ and chaos/scenarios/
+uv run pytest tests/                # unit and conformance tests
+uv run pytest chaos/scenarios/      # Tier A and Tier B chaos tests
 ```
 
----
+The Tier B tests (`test_crash_points.py`, `test_crash_multipart.py`,
+`test_store_identity.py`, `test_raw_paths.py`) start server processes and need
+SIGKILL; they are skipped on Windows.
 
-## Compatibility
-
-**115 / 325 ceph/s3-tests pass (35%)** — the same test suite used to validate
-production S3-compatible servers including Ceph RGW and MinIO.
-
-Every failure is documented with an explicit reason. The passing categories cover the
-core S3 protocol: bucket and object lifecycle, multipart upload, range GET, ETag
-correctness, and conditional headers.
-
-See [`docs/compatibility.md`](docs/compatibility.md) for the full breakdown.
+ceph/s3-tests (Linux or WSL2): start a server against an empty data directory, then
+run `bash scripts/run_ceph_s3tests.sh`. See
+[`docs/compatibility.md`](docs/compatibility.md).
 
 ---
 
-## Stack
+## Repository layout
 
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Language | Python 3.12 | Target roles value Python automation |
-| HTTP framework | FastAPI | TestClient enables Tier A fault injection |
-| Metadata store | SQLite (stdlib) | WAL + FULL synchronous — correct for process-kill |
-| Object storage | Filesystem | Transparent, auditable, no external dependencies |
-| Test runner | pytest | Industry standard; asyncio mode for concurrent tests |
-| Package manager | uv | Fast, reproducible, native dependency groups |
-| Linter | ruff | Fast, opinionated, zero config drift |
+```
+server/
+  app.py               app factory and startup hook
+  startup.py           startup checks: old variables, lock, store ID
+  config.py            settings from environment variables
+  consistency.py       startup sweep
+  crash_points.py      named crash points for Tier B tests
+  connection.py        closes the connection after an early error to an Expect: 100-continue request
+  api/                 bucket, object and multipart routes; request_guard.py answers 501
+  storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
+  storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit
+  metadata/sqlite.py   schema, blob registry and transactions
+  multipart/           CompleteMultipartUpload and the composite ETag
+  errors/s3errors.py   S3 error responses
+chaos/
+  framework/, faults/, fixtures/   fault injection and server process fixtures
+  scenarios/           Tier A and Tier B tests
+tests/
+  conformance/         protocol tests
+  unit/                unit tests
+scripts/
+  run_ceph_s3tests.sh  runs ceph/s3-tests against a running server
+docs/
+  crash-model.md, publication-barrier.md, compatibility.md
+  design/storage-layout.md   design of the storage layout
+```
 
 ---
 
-## What this is not
+## Not implemented
 
-- **Not production-ready.** No authentication, no multi-node support, no ACLs.
-- **Not a MinIO replacement.** MinIO targets production deployments; this targets
-  correctness verification.
-- **Not OS-crash durable.** The crash model covers SIGKILL only. Power-loss durability
-  would require `O_DIRECT` and battery-backed write caches.
-- **Not feature-complete.** Object copy, versioning, lifecycle, encryption, and many
-  other S3 features are not implemented. See `docs/compatibility.md`.
-
-The point is to demonstrate that correctness can be defined operationally — as passing
-tests against real clients — rather than as documentation claims.
+Authentication, ACLs and policies, versioning, CopyObject, listing parameters other
+than `prefix`, user metadata, and conditional writes and deletes. Litmus runs as one
+process on one machine. See [`docs/compatibility.md`](docs/compatibility.md).
