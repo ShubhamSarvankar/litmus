@@ -577,3 +577,159 @@ def test_v2_pages_concatenate_to_unpaged_listing(client, seed):
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
                 got = _v2_all_pages(client, prefix, delimiter, max_keys)
                 assert got == expected, (prefix, delimiter, max_keys)
+
+
+# --- ListObjectVersions: key-marker, version-id-marker, NextKeyMarker, Owner ---
+
+
+def _versions(client, expect=200, **params):
+    resp = client.get(f"/{BUCKET}", params={"versions": "", **params})
+    assert resp.status_code == expect, resp.text
+    root = ET.fromstring(resp.text)
+    keys = [el.findtext("Key") for el in root.findall("Version")]
+    return root, keys, _common_prefixes(root)
+
+
+def test_versions_elements(client, monkeypatch):
+    monkeypatch.setattr(settings, "owner_id", "owner-id")
+    monkeypatch.setattr(settings, "owner_display_name", "Owner Name")
+    _put(client, ["a", "b"])
+    root, keys, _ = _versions(client)
+    assert keys == ["a", "b"]
+    assert root.findtext("KeyMarker") == ""
+    assert root.findtext("VersionIdMarker") == ""
+    assert root.findtext("MaxKeys") == "1000"
+    assert root.findtext("IsTruncated") == "false"
+    assert root.find("NextKeyMarker") is None and root.find("NextVersionIdMarker") is None
+    for version in root.findall("Version"):
+        assert version.findtext("VersionId") == "null"
+        assert version.findtext("IsLatest") == "true"
+        assert version.findtext("Owner/ID") == "owner-id"
+        assert version.findtext("Owner/DisplayName") == "Owner Name"
+
+
+def test_versions_truncation_and_next_markers(client):
+    _put(client, ["bar", "baz", "foo", "quxx"])
+    root, keys, _ = _versions(client, **{"max-keys": "2"})
+    assert keys == ["bar", "baz"]
+    assert root.findtext("IsTruncated") == "true"
+    assert root.findtext("NextKeyMarker") == "baz"
+    assert root.findtext("NextVersionIdMarker") == "null"
+    root, keys, _ = _versions(
+        client, **{"key-marker": "baz", "version-id-marker": "null", "max-keys": "2"}
+    )
+    assert keys == ["foo", "quxx"]
+    assert root.findtext("KeyMarker") == "baz"
+    assert root.findtext("VersionIdMarker") == "null"
+    assert root.findtext("IsTruncated") == "false"
+
+
+def test_versions_key_marker_alone_starts_after_it(client):
+    _put(client, ["bar", "baz", "foo"])
+    assert _versions(client, **{"key-marker": "baz"})[1] == ["foo"]
+    assert _versions(client, **{"key-marker": "bay"})[1] == ["baz", "foo"]
+    assert _versions(client, **{"key-marker": "zzz"})[1] == []
+
+
+def test_versions_version_id_marker_without_key_marker(client):
+    _put(client, ["a"])
+    resp = client.get(f"/{BUCKET}", params={"versions": "", "version-id-marker": "null"})
+    assert resp.status_code == 400
+    root = ET.fromstring(resp.text)
+    assert root.findtext("Code") == "InvalidArgument"
+    assert root.findtext("ArgumentName") == "version-id-marker"
+
+
+def test_versions_other_version_id_marker_not_implemented(client):
+    _put(client, ["a", "b"])
+    resp = client.get(
+        f"/{BUCKET}",
+        params={"versions": "", "key-marker": "a", "version-id-marker": "3HL4kqtJlcpXrof3"},
+    )
+    assert resp.status_code == 501
+    assert ET.fromstring(resp.text).findtext("Code") == "NotImplemented"
+
+
+def test_versions_empty_version_id_marker_is_absent(client):
+    _put(client, ["a", "b"])
+    root, keys, _ = _versions(client, **{"key-marker": "a", "version-id-marker": ""})
+    assert keys == ["b"]
+    assert root.findtext("VersionIdMarker") == ""
+
+
+def test_versions_delimiter_and_common_prefix_page_end(client):
+    _put(client, ["a", "b/1", "b/2", "c"])
+    root, keys, prefixes = _versions(client, delimiter="/", **{"max-keys": "2"})
+    assert (keys, prefixes) == (["a"], ["b/"])
+    assert root.findtext("Delimiter") == "/"
+    assert root.findtext("NextKeyMarker") == "b/"
+    # The page ended on a common prefix, not on a version.
+    assert root.find("NextVersionIdMarker") is None
+    root, keys, prefixes = _versions(client, delimiter="/", **{"key-marker": "b/"})
+    assert (keys, prefixes) == (["c"], [])
+
+
+@pytest.mark.parametrize("key_marker", ["b/", "b/1", "b/15"])
+def test_versions_key_marker_at_or_inside_common_prefix_skips_it(client, key_marker):
+    _put(client, ["a", "b/1", "b/2", "c"])
+    assert _versions(client, delimiter="/", **{"key-marker": key_marker})[1:] == (["c"], [])
+
+
+def test_versions_max_keys(client):
+    _put(client, ["a", "b"])
+    root, keys, _ = _versions(client, **{"max-keys": "0"})
+    assert keys == [] and root.findtext("IsTruncated") == "false"
+    assert _versions(client, **{"max-keys": "5000"})[0].findtext("MaxKeys") == "1000"
+    resp = client.get(f"/{BUCKET}", params={"versions": "", "max-keys": "-1"})
+    assert resp.status_code == 400
+    assert ET.fromstring(resp.text).findtext("Code") == "InvalidArgument"
+
+
+def _versions_entries(root):
+    keys = [("key", el.findtext("Key")) for el in root.findall("Version")]
+    prefixes = [("prefix", p) for p in _common_prefixes(root)]
+    return sorted(keys + prefixes, key=lambda e: e[1].encode("utf-8"))
+
+
+def _versions_all_pages(client, prefix, delimiter, max_keys):
+    """Page as botocore's paginator does: pass NextKeyMarker and NextVersionIdMarker
+    back as key-marker and version-id-marker, omitting whichever is absent."""
+    entries, markers = [], {}
+    for _ in range(1000):
+        params = {"prefix": prefix, "max-keys": str(max_keys), **markers}
+        if delimiter:
+            params["delimiter"] = delimiter
+        root = _versions(client, **params)[0]
+        page = _versions_entries(root)
+        assert len(page) <= max_keys
+        entries += page
+        if root.findtext("IsTruncated") == "false":
+            assert root.find("NextKeyMarker") is None
+            return entries
+        assert page, "a truncated page must not be empty"
+        assert root.findtext("NextKeyMarker") == page[-1][1]
+        markers = {"key-marker": root.findtext("NextKeyMarker")}
+        if page[-1][0] == "key":
+            assert root.findtext("NextVersionIdMarker") == "null"
+            markers["version-id-marker"] = "null"
+        else:
+            assert root.find("NextVersionIdMarker") is None
+    raise AssertionError("paging did not end")
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_versions_pages_concatenate_to_unpaged_listing(client, seed):
+    keys = _random_keys(seed)
+    _put(client, keys)
+    rng = random.Random(seed)
+    prefixes = ["", "x", "X", "%", "\U0010ffff"] + [k[:2] for k in rng.sample(keys, 2)]
+    for prefix in prefixes:
+        for delimiter in _DELIMITERS:
+            expected = _expected_listing(keys, prefix, delimiter)
+            params = {"prefix": prefix}
+            if delimiter:
+                params["delimiter"] = delimiter
+            assert _versions_entries(_versions(client, **params)[0]) == expected
+            for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
+                got = _versions_all_pages(client, prefix, delimiter, max_keys)
+                assert got == expected, (prefix, delimiter, max_keys)

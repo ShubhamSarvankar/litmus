@@ -1119,7 +1119,8 @@ room for it.
 Every bucket stays unversioned, and the `objects` row for a key is its `null` version.
 GET, HEAD and DELETE with `versionId=null` behave as without it, a DeleteObjects
 `<VersionId>null</VersionId>` deletes the row, and ListObjectVersions lists each row
-as version `null`, exactly as today; any other version ID stays 501.
+as version `null`, paged like the other listings (§13) with `key-marker` and
+`version-id-marker=null`; any other version ID stays 501.
 
 The design eases versioning: every write already produces its own immutable blob, and
 replacing a version is already a single transaction. Versioning would add an

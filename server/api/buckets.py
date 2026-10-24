@@ -127,17 +127,36 @@ def _list_objects_v2_xml(
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _list_versions_xml(bucket: str, objects: list, prefix: str = "") -> str:
-    """Versioning not implemented — return objects as Version elements so cleanup can delete them."""
+def _list_versions_xml(
+    bucket: str,
+    page: ListPage,
+    prefix: str,
+    delimiter: str,
+    key_marker: str,
+    version_id_marker: str,
+    max_keys: int,
+) -> str:
+    """Every bucket is unversioned: each key has one version, "null", which is the
+    latest."""
     root = ET.Element("ListVersionsResult")
     ET.SubElement(root, "Name").text = bucket
     ET.SubElement(root, "Prefix").text = prefix
-    ET.SubElement(root, "MaxKeys").text = "1000"
-    ET.SubElement(root, "IsTruncated").text = "false"
-    for obj in objects:
+    ET.SubElement(root, "KeyMarker").text = key_marker
+    ET.SubElement(root, "VersionIdMarker").text = version_id_marker
+    ET.SubElement(root, "MaxKeys").text = str(max_keys)
+    if delimiter:
+        ET.SubElement(root, "Delimiter").text = delimiter
+    ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
+    if page.is_truncated:
+        # The last key or common prefix returned, and the last version returned; a
+        # page that ended on a common prefix returned no version after it.
+        ET.SubElement(root, "NextKeyMarker").text = page.next_marker
+        if page.restart_after is not None:
+            ET.SubElement(root, "NextVersionIdMarker").text = NULL_VERSION_ID
+    for obj in page.objects:
         ver = ET.SubElement(root, "Version")
         ET.SubElement(ver, "Key").text = obj.key
-        ET.SubElement(ver, "VersionId").text = "null"
+        ET.SubElement(ver, "VersionId").text = NULL_VERSION_ID
         ET.SubElement(ver, "IsLatest").text = "true"
         ET.SubElement(ver, "ETag").text = obj.etag
         ET.SubElement(ver, "Size").text = str(obj.size)
@@ -145,6 +164,9 @@ def _list_versions_xml(bucket: str, objects: list, prefix: str = "") -> str:
             "%Y-%m-%dT%H:%M:%S.000Z"
         )
         ET.SubElement(ver, "StorageClass").text = "STANDARD"
+        _owner_element(ver)
+    for common in page.common_prefixes:
+        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = common
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -167,22 +189,34 @@ async def list_objects(bucket: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    # ?versions → return objects as Version elements (versioning not implemented,
-    # but cleanup code in ceph/s3-tests calls this to find objects before deleting)
-    if "versions" in params:
-        prefix = params.get("prefix", "")
-        objects = metadata.list_objects(bucket, prefix=prefix or None)
-        return Response(
-            content=_list_versions_xml(bucket, objects, prefix),
-            status_code=200,
-            media_type="application/xml",
-        )
-
     prefix = params.get("prefix", "")
-
     # An empty delimiter is no delimiter.
     max_keys = _max_keys(params)
     delimiter = params.get("delimiter", "")
+
+    # ListObjectVersions. Each key's only version is "null", so a page resumes after
+    # (key-marker, version-id-marker) by starting after key-marker, with V1's marker
+    # rule for common prefixes. Any other version ID names a version that cannot
+    # exist in an unversioned bucket: 501, as for versionId elsewhere.
+    if "versions" in params:
+        key_marker = params.get("key-marker", "")
+        version_id_marker = params.get("version-id-marker", "")
+        if version_id_marker and not key_marker:
+            raise InvalidArgument(
+                extra={"ArgumentName": "version-id-marker", "ArgumentValue": version_id_marker}
+            )
+        if version_id_marker and version_id_marker != NULL_VERSION_ID:
+            raise NotImplementedOperation(
+                extra={"Parameter": "version-id-marker", "Value": version_id_marker}
+            )
+        page = metadata.list_page(bucket, prefix, delimiter, key_marker, max_keys)
+        return Response(
+            content=_list_versions_xml(
+                bucket, page, prefix, delimiter, key_marker, version_id_marker, max_keys
+            ),
+            status_code=200,
+            media_type="application/xml",
+        )
 
     # ListObjectsV2 (list-type=2). A continuation token holds where the previous page
     # ended and takes precedence over start-after, which is only echoed then. An

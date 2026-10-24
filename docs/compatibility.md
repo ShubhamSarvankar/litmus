@@ -61,7 +61,9 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
 table below, the ListObjects (V1) parameters moved 21 tests from failed to passed, and
-the ListObjectsV2 parameters 21 more; nothing else changed.
+the ListObjectsV2 parameters 21 more; the ListObjectVersions parameters changed no
+outcome (every selected versions test is skipped), though every test's teardown now
+pages through ListObjectVersions; nothing else changed.
 
 ### How the numbers moved from 115 of 325
 
@@ -204,8 +206,14 @@ when a delimiter was given and the page is truncated. ListObjectsV2 applies the 
 with `continuation-token`: an opaque token that records where the next page starts,
 including the restart after a common prefix, and round trips any key. A malformed token
 is InvalidArgument. `KeyCount` counts keys and common prefixes, and `Owner` appears
-only with `fetch-owner=true`. V1 and V2 ignore `encoding-type`. ListObjectVersions
-applies only `prefix`, and is never truncated.
+only with `fetch-owner=true`. ListObjectVersions applies `prefix`, `delimiter` and
+`max-keys` the same way and pages with `key-marker` and `version-id-marker`: a page
+starts after the key-marker (with V1's rule for a key-marker equal to or inside a
+common prefix), and a truncated page returns `NextKeyMarker`, the last key or common
+prefix returned, and `NextVersionIdMarker`, the last version returned. Every bucket is
+unversioned, so each key appears once, as version `null`, latest, with the configured
+`Owner`; `KeyMarker` and `VersionIdMarker` are always echoed. All three listings ignore
+`encoding-type`.
 
 **Listing choices AWS does not document.** Where the AWS API reference is silent,
 Litmus does the following; each choice is covered by a conformance test.
@@ -222,6 +230,16 @@ Litmus does the following; each choice is covered by a conformance test.
   either rule, because its token comes from a request with the same `start-after`.
 - An empty `continuation-token` is no token (and is echoed empty), as
   `test_bucket_listv2_continuationtoken_empty` expects.
+- In ListObjectVersions, `NextKeyMarker` is the last key returned, as in the
+  reference's own `max-keys=3` example and as boto3's paginator and ceph's teardown
+  expect; the reference's prose ("the first key not returned") disagrees with that
+  example.
+- A ListObjectVersions page that ends on a common prefix has `NextKeyMarker` (the
+  prefix) and no `NextVersionIdMarker`, since it returned no version after it. boto3's
+  paginator omits a missing marker from the next request.
+- `version-id-marker` without `key-marker` is InvalidArgument. A `version-id-marker`
+  other than `null` names a version that cannot exist in an unversioned bucket, and
+  gets 501, as other version IDs do. An empty one is no marker.
 - `fetch-owner` is true when its value is `true` in any letter case, and false
   otherwise.
 
@@ -253,7 +271,7 @@ keys with `.` or `..` segments. Clients that resolve dot segments before sending
 InvalidBucketName.
 
 **Version IDs.** Every bucket is unversioned. `GET /{bucket}?versions` lists each
-object as version `null`. GET, HEAD and DELETE accept `versionId=null` as the current
+object once, as version `null`, and `version-id-marker` accepts only `null`. GET, HEAD and DELETE accept `versionId=null` as the current
 object, and a DeleteObjects entry with `<VersionId>null</VersionId>` deletes the
 object. Any other version ID gets 501 (or a per-key NotImplemented error in
 DeleteObjects), and `versionId` on PUT or POST gets 501.
