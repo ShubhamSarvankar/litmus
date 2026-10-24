@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**151 passed, 172 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**153 passed, 170 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -65,8 +65,9 @@ ListObjects (V1) parameters moved 21 tests from failed to passed, and
 the ListObjectsV2 parameters 21 more; the ListObjectVersions parameters changed no
 outcome (every selected versions test is skipped), though every test's teardown now
 pages through ListObjectVersions; `encoding-type=url` moved 2 more
-(`test_bucket_list_encoding_basic` and `test_bucket_listv2_encoding_basic`). Nothing
-else changed, although botocore sends `encoding-type=url` on every listing it builds,
+(`test_bucket_list_encoding_basic` and `test_bucket_listv2_encoding_basic`), and the
+DeleteObjects limit of 1000 Objects moved 2 more (`test_multi_object_delete_key_limit`
+and `test_multi_objectv2_delete_key_limit`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -92,6 +93,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Bucket name validation | 330 | 508 | 151 | CreateBucket enforces the AWS naming rules. 7 passes gained: `test_bucket_create_naming_bad_ip`, `_bad_short_one`, `_bad_short_two`, `_bad_starts_nonalpha`, `_dns_dash_at_end`, `_dns_dot_dot`, `_dns_underscore`. Recorded at the commit that adds the validation. |
 | Trailing slash on a bucket path | 330 | 508 | 151 | `/{bucket}/` is the bucket, for every method. No outcome changed, and none was expected to: the results file is identical to the previous one, and the server's access log for the run (7523 requests) holds no request to `/{bucket}/`. The only paths ending in a slash besides `/` were `PUT /{bucket}/asdf/` (2) and `PUT /{bucket}/0/` (1), which are keys. Recorded at the commit that adds the route. |
 | DeleteObjects MalformedXML | 330 | 508 | 151 | A DeleteObjects body that is not well-formed XML gets 400 MalformedXML instead of 500. No outcome changed, and none was expected to: the results file is identical to the previous one, and the one selected test that expects MalformedXML, `test_multipart_upload_empty`, is CompleteMultipartUpload, which this change does not touch. All 195 DeleteObjects requests in the run were answered 200. Recorded at the commit that adds the error. |
+| DeleteObjects document validation | 330 | 508 | 153 | The Delete document is validated whole before anything is deleted: root, 1 to 1000 Objects, one Key each, Quiet. More than 1000 Objects is 400 MalformedXML. 2 passes gained: `test_multi_object_delete_key_limit` and `test_multi_objectv2_delete_key_limit`, as forecast; no other outcome changed. Recorded at the commit that adds the validation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -110,7 +112,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 151 passes are incidental**.
+is authenticated or owned. By that rule, **27 of the 153 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -212,7 +214,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
-| DeleteObjects | 4 | 2 | 2 | 0 | Bulk delete. Fail: the 1000-key limit is not enforced. |
+| DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). |
 | Multipart upload | 14 | 8 | 6 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object. Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); Content-Type given to CreateMultipartUpload is not applied (1); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
@@ -226,7 +228,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **151** | **172** | **7** | |
+| **Total** | **330** | **153** | **170** | **7** | |
 
 ## AWS CLI
 
@@ -443,12 +445,56 @@ unescaped, so the `Deleted` entry for a CR key carries a literal CR, which a cli
 parser reads as LF. A key with LF cannot be stored at all: no route matches the path,
 and PutObject gets 400 InvalidURI.
 
-**DeleteObjects body, beyond well-formedness.** Only well-formedness is checked. A body
-that is well-formed but is not a `Delete` document is not refused: a different root
-element, or no `Object` elements, answers 200 with an empty `DeleteResult`, and an
-`Object` without a `Key` answers `Deleted` with an empty key and deletes nothing. S3
-answers MalformedXML for these. `Quiet` is ignored: every key is reported. An internal
-DTD entity (`<!ENTITY e "x">`) is expanded, within the parser's limits.
+**DeleteObjects document.** The body is checked whole, before anything is deleted, and
+a refusal anywhere in it, even after valid entries, deletes nothing. The root must be
+`Delete`, in the S3 namespace or in none; there must be 1 to 1000 `Object` elements,
+each with exactly one `Key`; `Quiet`, if present, appears once and holds `true` or
+`false`. Everything else a well-formed document can hold is read as follows.
+
+- Basis. The S3 API reference for DeleteObjects says "The request can contain a list of
+  up to 1,000 keys", marks `Delete` and `Object` Required and `Quiet` optional with
+  "When you add this element, you must set its value to `true`", and ObjectIdentifier
+  marks `Key` Required with "Minimum length of 1".
+- Quiet true lists only the keys that failed (a per-key error, such as a version ID or
+  condition Litmus does not implement); a request with no failures answers an empty
+  `DeleteResult`. The reference describes quiet mode in those words: "the response
+  includes only keys where the delete operation encountered an error".
+- `VersionId` is read as `versionId` is elsewhere: `null` names the current object and
+  is echoed back in `Deleted`; any other value, including an empty one, is a per-key
+  NotImplemented error and the key is kept, while the other entries are still deleted.
+  `ETag`, `LastModifiedTime` and `Size` are the same per-key NotImplemented. These
+  per-key errors are not document errors and do not stop the other entries.
+- Duplicate keys: each entry is answered, the key is deleted once. Elements Litmus does
+  not know are ignored, and so are repeated `VersionId`, `ETag`, `LastModifiedTime`
+  and `Size` elements past the first. The reference documents none of this.
+- Elements are read in the root's namespace, so an `Object` that opts out of the root's
+  namespace is not an Object and a `Key` that does is not a Key.
+- A `Key` or `VersionId` or `Quiet` that contains an element is refused, since its text
+  before the element would name a different key than the client sent.
+- An empty `Key` is accepted, against "Minimum length of 1", on purpose: it is the only
+  way to remove an object stored under the empty key by an older Litmus (see "Objects
+  under the empty key").
+
+Undocumented choices. The S3 error list (API reference, Error, Code) has no code for a
+Delete document that breaks the rules above, and none for more than 1000 Objects: no
+TooManyKeys code appears in it. Litmus answers 400 MalformedXML for all of them, the
+code whose description is XML "that doesn't conform to the published XSD". The same
+holds for each of these, which the reference does not settle: a wrong root element or
+a root in another namespace, no `Object`, an `Object` with no `Key` or two, a second
+`Quiet`, and a `Quiet` that is not exactly `true` or `false` (so `1`, `0`, `TRUE`, an
+empty one: the reference types it Boolean without saying whether XML Schema's `1` and
+`0` or other spellings count; surrounding white space is allowed). An empty body is
+MalformedXML too, though the error list gives MissingRequestBodyError ("when the user
+sends an empty XML document as a request") for an empty document; the empty document is
+read as a body that does not parse. None of these choices has been compared with S3's
+responses. The status for more than 1000 Objects is 400, which is what
+`test_multi_object_delete_key_limit` expects; the code is the choice.
+
+Also not done: S3 requires `Content-MD5` or another checksum header on DeleteObjects
+("The Content-MD5 request header is required for all Multi-Object Delete requests"),
+and Litmus accepts a request without one and checks none that it receives; see
+"Checksums are mostly not verified" below. An internal DTD entity
+(`<!ENTITY e "x">`) in the body is expanded, within the parser's limits.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
 keys with `.` or `..` segments. Clients that resolve dot segments before sending

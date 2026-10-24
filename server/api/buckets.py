@@ -7,8 +7,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.api.continuation_tokens import decode_token, encode_token
+from server.api.delete_document import parse_delete_document
 from server.api.request_guard import NULL_VERSION_ID
-from server.api.request_xml import parse_request_xml
 from server.bucket_names import bucket_name_violation
 from server.config import settings
 from server.crash_points import (
@@ -32,9 +32,6 @@ router = APIRouter()
 
 # S3's default and largest max-keys.
 MAX_KEYS = 1000
-
-# Per-key conditions a DeleteObjects <Object> may carry (ObjectIdentifier).
-_CONDITIONAL_DELETE_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
 
 # The one encoding-type value S3 documents (ListObjects, ListObjectsV2 and
 # ListObjectVersions references: "Valid Values: url").
@@ -328,23 +325,8 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    body = await request.body()
-    root = parse_request_xml(body)
-    # boto3 sends XML with the S3 namespace — strip it for robust findall
-    ns = "http://s3.amazonaws.com/doc/2006-03-01/"
-
-    def _find(tag):
-        # try with namespace first, then without (for clients that omit it)
-        results = root.findall(f"{{{ns}}}{tag}")
-        return results if results else root.findall(tag)
-
-    def _text(obj, tag):
-        # "is not None", not "or": an empty element (e.g. <VersionId/>) must stay "".
-        value = obj.findtext(f"{{{ns}}}{tag}")
-        return value if value is not None else obj.findtext(tag)
-
-    def _has(obj, tag):
-        return obj.find(f"{{{ns}}}{tag}") is not None or obj.find(tag) is not None
+    # The whole document is validated first: a refusal anywhere deletes nothing.
+    document = parse_delete_document(await request.body())
 
     def _error(key, version_id, code, message):
         e = ET.Element("Error")
@@ -359,8 +341,8 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
     # one transaction after every entry is checked (docs/design/storage-layout.md §6.4).
     entries = []
     to_delete = []
-    for obj in _find("Object"):
-        key, version_id = _text(obj, "Key"), _text(obj, "VersionId")
+    for item in document.entries:
+        key, version_id = item.key, item.version_id
         # Version IDs arrive in the body, so the request guard cannot see them.
         # Same rule as DELETE /{bucket}/{key}?versionId=: every bucket is unversioned,
         # so "null" is the current object and any other version ID is not implemented.
@@ -372,12 +354,15 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         # Per-key delete conditions (ObjectIdentifier in the S3 API reference). Litmus
         # does not evaluate them; deleting anyway could delete an object the client
         # asked to keep, so the key gets an error and is kept.
-        if any(_has(obj, tag) for tag in _CONDITIONAL_DELETE_ELEMENTS):
+        if item.conditional:
             entries.append(
                 _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
             )
             continue
         to_delete.append(key)
+        # Quiet mode reports only the keys that failed.
+        if document.quiet:
+            continue
         d = ET.Element("Deleted")
         ET.SubElement(d, "Key").text = key
         if version_id is not None:
