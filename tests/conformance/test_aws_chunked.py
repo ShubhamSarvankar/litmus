@@ -134,7 +134,10 @@ def _assert_nothing_stored(port, metadata, blob_dir: Path):
 def test_botocore_request_is_chunk_framed():
     # Guards the premise: if botocore stopped framing, the tests below would prove nothing.
     _, headers, body = _botocore_https_request("put_object", Bucket=BUCKET, Key="k", Body=BODY)
-    assert headers["X-Amz-Content-SHA256"] == "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+    # With awscrt installed botocore signs through the CRT signer, which names this header
+    # in lower case; header names are case insensitive.
+    content_sha256 = {k.lower(): v for k, v in headers.items()}["x-amz-content-sha256"]
+    assert content_sha256 == "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
     assert headers["X-Amz-Decoded-Content-Length"] == str(len(BODY))
     assert headers["Content-Encoding"] == "aws-chunked"
     assert body != BODY and BODY in body and b"x-amz-checksum-crc32:" in body
