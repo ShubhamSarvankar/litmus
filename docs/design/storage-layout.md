@@ -127,7 +127,7 @@ rename, fsync of the parent directory, then the SQLite commit).
     (`chaos/scenarios/test_crash_points.py`).
 
 18. **(asked) Which ceph tests it should flip.** Baseline 99 of 330
-    (`docs/s3-tests-results.txt`). Known direct candidates:
+    (`docs/s3-tests-results.txt` at 8f9c4a9, 2026-10-23). Known direct candidates:
     `test_bucket_list_delimiter_basic`, `test_bucket_listv2_delimiter_basic` and
     `test_bucket_list_delimiter_not_skip_special` fail first on the file vs directory
     collision; they also need listing parameters (category c) to pass.

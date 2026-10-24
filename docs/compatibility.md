@@ -103,16 +103,47 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 142 passes are incidental**
-(classified before the delimiter was implemented; the listing entries are reviewed
-separately):
+is authenticated or owned. By that rule, **27 of the 144 passes are incidental**.
 
-- Listing, the delimiter is ignored and the expected result is the same without it
-  (8): `test_bucket_list_prefix_delimiter_delimiter_not_exist`,
-  `test_bucket_list_prefix_delimiter_prefix_delimiter_not_exist`,
-  `test_bucket_list_prefix_delimiter_prefix_not_exist`,
-  `test_bucket_list_delimiter_prefix_ends_with_delimiter`, and the four
-  `test_bucket_listv2_` tests with the same names.
+The listing entries were reclassified after `delimiter`, paging and `encoding-type`
+were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
+passing) against copies of the server with listing parameters ignored: `delimiter`
+alone, `prefix` alone, `max-keys` alone, `fetch-owner` forced off or forced on, and
+`prefix`, `delimiter`, `max-keys`, `marker`, `start-after`, `continuation-token` and
+`fetch-owner` all together. In every copy, "ignored" means the same thing: the
+parameter has no effect on which keys, common prefixes, truncation and next marker or
+token come back (and, for `max-keys`, an invalid value is not rejected), while the
+server still echoes every request value exactly as the real handler does. Echoing a
+value back does not show that the parameter works. (One check stays in the all-ignored
+copy: a malformed `continuation-token` is still rejected; no listing test sends one.)
+
+The rule for a listing pass: it is incidental or borderline when the test is about a
+listing parameter (it sends one, sends it empty or false, or leaves it out on purpose
+to check the default) and it passes with all of them ignored. It is borderline when
+the parameter is empty, false or absent, which S3 also treats as a no-op, and
+incidental otherwise. A test about no parameter is not classified by this rule: it is
+genuine. `encoding-type` is not counted as a parameter here, since botocore sends it
+on every listing. Of the 76 passes, 26 survive the all-ignored copy: 8 are incidental
+(below), 15 are borderline (below), and 3 only list an empty bucket
+(`test_bucket_list_distinct`, `test_bucket_list_empty`, `test_bucket_list_long_name`)
+and are genuine. The other 50 need an implemented parameter.
+
+The three `prefix_delimiter_*_not_exist` tests (`prefix_delimiter_prefix_not_exist`,
+`prefix_delimiter_delimiter_not_exist` and
+`prefix_delimiter_prefix_delimiter_not_exist`, each as `test_bucket_list_` and
+`test_bucket_listv2_`) are genuine for prefix filtering: they fail when `prefix` is
+ignored. Their delimiter never occurs in the keys, so they still pass when the
+delimiter is ignored, and they do not exercise delimiter support.
+
+- Listing, a non-empty value of the parameter under test changes nothing in the
+  answer, so the test passes with every parameter ignored (8):
+  `test_bucket_list_delimiter_not_exist` and `test_bucket_list_delimiter_unreadable`
+  (a delimiter that occurs in no key), `test_bucket_list_delimiter_prefix_ends_with_delimiter`
+  (the only key is the prefix itself, so no delimiter follows the prefix),
+  `test_bucket_list_marker_unreadable` and `test_bucket_listv2_startafter_unreadable`
+  (a marker below every key), and the V2 forms of the three delimiter tests. The
+  ends-with-delimiter pair still fails on a server that applies the delimiter but
+  ignores the prefix, which rolls the key up into the common prefix `asdf/`.
 - Conditional GET, the header is ignored and the expected answer is the plain object
   (3): `test_get_object_ifmodifiedsince_good` (a date in the past),
   `test_get_object_ifnonematch_failed` (an ETag that does not match),
@@ -136,15 +167,22 @@ separately):
 - User metadata (1): `test_object_metadata_replaced_on_put` expects no metadata after
   a second PUT without any, and Litmus never stores metadata.
 
-Borderline, not counted above (11):
+Borderline, not counted above (18):
 
 - An empty or absent listing parameter, which S3 also treats as a no-op, so the
-  expected result equals ignoring it (8): `test_bucket_list_delimiter_empty`,
-  `test_bucket_list_delimiter_none`, `test_bucket_list_maxkeys_none` (Litmus always
-  reports `MaxKeys` 1000, which is S3's default), their three `test_bucket_listv2_`
-  counterparts, `test_bucket_listv2_fetchowner_defaultempty` and
+  expected result equals ignoring it, and the test passes with every parameter ignored
+  (15): `test_bucket_list_delimiter_empty`, `test_bucket_list_delimiter_none`,
+  `test_bucket_list_prefix_empty`, `test_bucket_list_prefix_none`,
+  `test_bucket_list_marker_empty`, `test_bucket_list_marker_none`,
+  `test_bucket_list_maxkeys_none` (the default `MaxKeys` is 1000), their
+  `test_bucket_listv2_` counterparts (the four delimiter and prefix tests and
+  `test_bucket_listv2_maxkeys_none`), `test_bucket_listv2_continuationtoken_empty`,
+  and `test_bucket_listv2_fetchowner_defaultempty` and
   `test_bucket_listv2_fetchowner_empty` (S3 omits the owner unless `FetchOwner` is
-  true, and Litmus never returns it).
+  true; the first sends no `fetch-owner`, the second `false`). The prefix, marker and
+  continuation-token entries are new to this list: they were never ignored, so they
+  were not flagged before, but they meet the same definition. Without the prefix and
+  marker entries the count is 12.
 - The ACLs are ignored and the requests are anonymous, but the asserted 404 error
   codes are implemented (3): `test_object_raw_get_bucket_gone`,
   `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone`.
@@ -231,13 +269,14 @@ operation are the ones botocore decodes (`botocore/handlers.py`, `decode_list_ob
 ListObjectsV2 and ListObjectVersions references except where noted below:
 
 - ListObjects (V1): `Marker`, `NextMarker`, `Delimiter`, `Contents/Key`,
-  `CommonPrefixes/Prefix`. Not `Prefix`: the current ListObjects reference lists no
-  elements for `EncodingType`; the older wording botocore quotes in its source listed
-  "Delimiter, Marker, Prefix, NextMarker, Key", but botocore does not decode `Prefix`
-  for ListObjects (it does for the other two), so an encoded V1 `Prefix` would reach
-  every boto3 caller percent-encoded, and ceph's RGW does not encode it either. A V1
-  `prefix` with a character XML 1.0 forbids therefore still makes the response
-  ill-formed, with or without `encoding-type`.
+  `CommonPrefixes/Prefix`. Not `Prefix`. **Choice:** the V1 `Prefix` is echoed raw
+  under `encoding-type=url`, for three reasons: botocore does not decode it (it does
+  for ListObjects V2 and ListObjectVersions), so an encoded V1 `Prefix` would reach
+  every boto3 caller percent-encoded; RGW does not encode it; and the current
+  ListObjects reference lists no encoded elements at all for `EncodingType`. (The older
+  wording botocore quotes in its source listed "Delimiter, Marker, Prefix, NextMarker,
+  Key".) A V1 `prefix` with a character XML 1.0 forbids therefore still makes the
+  response ill-formed, with or without `encoding-type`.
 - ListObjectsV2: `Prefix`, `Delimiter`, `StartAfter`, `Contents/Key`,
   `CommonPrefixes/Prefix` (the reference: "Delimiter, Prefix, Key, and StartAfter").
   `ContinuationToken` and `NextContinuationToken` are opaque and never encoded; the
@@ -281,25 +320,28 @@ Litmus does the following; each choice is covered by a conformance test.
 - `encoding-type` accepts exactly `url`, the one value the references list ("Valid
   Values: url"). Any other value, including `URL`, is 400 InvalidArgument with
   `ArgumentName` `encoding-type` and `ArgumentValue` the value sent; the message,
-  "Invalid Encoding Method specified in Request", is the one S3 sends, as reproduced
-  in MinIO's error table (`ErrInvalidEncodingMethod`); the AWS references document
-  only the valid value. An empty `encoding-type` is treated as absent, like an empty
+  "Invalid Encoding Method specified in Request", is taken from MinIO's error table
+  (`ErrInvalidEncodingMethod`), not from S3: the AWS references document only the
+  valid value, and Litmus has not compared the message with S3's response. An empty `encoding-type` is treated as absent, like an empty
   delimiter. (RGW ignores any value but `url`, case-insensitively, and encodes
   nothing.)
 
 **Characters XML 1.0 does not allow.** XML 1.0 allows tab, LF, CR, U+0020 to U+D7FF,
 U+E000 to U+FFFD and U+10000 to U+10FFFF. Litmus accepts keys with the other
 characters, U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F, U+FFFE and U+FFFF, and
-writes request values into XML responses as they are, so any response that echoes such
-a value is not well-formed XML. Checked against a running server with U+0000, U+0001,
-U+0008, U+000B, U+000C, U+001F, U+FFFE and U+FFFF in a key or parameter, these
-responses do not parse:
+writes request values into XML responses as they are. Without `encoding-type`, a
+listing that holds such a key, or echoes such a `prefix`, `marker`, `start-after`,
+`key-marker` or `delimiter`, is written raw and answered 200, and the body is not
+well-formed XML. `encoding-type=url` is the remedy: the key-valued elements become
+`%XX` strings and the response parses. AWS documents the same hazard (ListObjectsV2
+reference): "A `200 OK` response can contain valid or invalid XML. Make sure to design
+your application to parse the contents of the response and handle it appropriately."
+Checked against a running server with U+0000, U+0001, U+0008, U+000B, U+000C, U+001F,
+U+FFFE and U+FFFF in a key or parameter, these responses do not parse whatever the
+client sends:
 
-- ListObjects, ListObjectsV2 and ListObjectVersions without `encoding-type=url` with
-  such a key in the bucket (`Key`) or such a `prefix`, `marker`, `start-after`,
-  `key-marker` or `delimiter` (echoed). With `encoding-type=url` these elements are
-  `%XX` strings and the response parses, except the ListObjects `Prefix`, which is
-  never encoded (see above);
+- The ListObjects (V1) `Prefix`, which is never encoded (see above), so a V1 listing
+  with such a `prefix` is ill-formed even with `encoding-type=url`;
 - InitiateMultipartUpload and CompleteMultipartUpload results (`Key`);
 - NoSuchKey errors from GetObject (`Key`), NoSuchBucket errors (`BucketName`), and
   the InvalidArgument error for `max-keys` (`ArgumentValue`).
