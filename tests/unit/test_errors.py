@@ -68,9 +68,9 @@ def test_render_error_multiple_extra_fields():
 
 def test_render_error_no_extra_fields_by_default():
     root = _parse(render_error(NoSuchBucket()))
-    # Only Code, Message, RequestId should be present
+    # Only Code, Message, RequestId, HostId should be present
     tags = {child.tag for child in root}
-    assert tags == {"Code", "Message", "RequestId"}
+    assert tags == {"Code", "Message", "RequestId", "HostId"}
 
 
 def test_render_error_xml_declaration():

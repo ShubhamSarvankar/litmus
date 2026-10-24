@@ -41,7 +41,7 @@ The script refuses to run if `S3_TEST_CRASH_POINT` is set.
 
 ## Result
 
-**99 passed, 224 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**100 passed, 223 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression.
@@ -52,7 +52,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 99 passes are incidental**:
+is authenticated or owned. By that rule, **27 of the 100 passes are incidental**:
 
 - Listing, the delimiter is ignored and the expected result is the same without it
   (8): `test_bucket_list_prefix_delimiter_delimiter_not_exist`,
@@ -105,7 +105,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 |---|---|---|---|---|---|
 | Bucket operations | 17 | 9 | 7 | 1 | Create, delete, head, list buckets, deleting a non-empty bucket refused, missing-bucket errors. Fail: re-creating a bucket you own expects success or BucketAlreadyOwnedByYou, and Litmus answers 409 BucketAlreadyExists (2 tests). That answer is deliberate: telling the owner apart needs authentication, which is out of scope; RGW-specific usage and statistics headers (3); ListBuckets ignores MaxBuckets and ContinuationToken (1); one test calls PutObjectAcl, which is 501 (1). |
 | Bucket naming | 18 | 9 | 9 | 0 | Valid names are accepted. Fail: Litmus does not validate bucket names apart from rejecting `.` and `..`, so invalid names are accepted. |
-| Object operations | 28 | 24 | 4 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, and the atomic read and write tests. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400; no `x-amz-request-id` header is sent. |
+| Object operations | 28 | 25 | 3 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
@@ -125,7 +125,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **99** | **224** | **7** | |
+| **Total** | **330** | **100** | **223** | **7** | |
 
 ## Known gaps
 

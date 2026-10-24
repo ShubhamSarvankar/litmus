@@ -1,6 +1,8 @@
 import xml.etree.ElementTree as ET
 from typing import ClassVar
 
+from server.request_ids import current_request_ids
+
 
 class S3Error(Exception):
     status_code: ClassVar[int] = 500
@@ -109,16 +111,6 @@ class SlowDown(S3Error):
     message = "Please reduce your request rate."
 
 
-# Counter for generating sequential request IDs within a process lifetime
-_request_counter = 0
-
-
-def _next_request_id() -> str:
-    global _request_counter
-    _request_counter += 1
-    return f"tx-{_request_counter:07d}"
-
-
 def render_error(error: S3Error) -> str:
     root = ET.Element("Error")
 
@@ -128,6 +120,9 @@ def render_error(error: S3Error) -> str:
     for key, value in error.extra.items():
         ET.SubElement(root, key).text = str(value)
 
-    ET.SubElement(root, "RequestId").text = _next_request_id()
+    # The same pair the response carries in x-amz-request-id and x-amz-id-2.
+    ids = current_request_ids()
+    ET.SubElement(root, "RequestId").text = ids.request_id
+    ET.SubElement(root, "HostId").text = ids.host_id
 
     return ET.tostring(root, encoding="unicode", xml_declaration=True)

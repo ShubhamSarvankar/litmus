@@ -22,6 +22,7 @@ from server.errors.s3errors import (
     render_error,
 )
 from server.metadata.sqlite import SQLiteMetadataStore
+from server.request_ids import AddRequestIds, current_request_ids
 from server.startup import (
     StartupRefused,  # noqa: F401 (re-exported: callers catch it from server.app)
     establish_store_identity,
@@ -55,9 +56,11 @@ def _allowed_methods(app: FastAPI, path: str) -> list[str]:
 
 class LitmusApp(FastAPI):
     def build_middleware_stack(self):
-        # Outermost layer, outside Starlette's ServerErrorMiddleware, so it also sees
-        # the 500 responses that middleware sends (server/connection.py).
-        return CloseConnectionIfContinueNotSent(super().build_middleware_stack())
+        # Both layers sit outside Starlette's ServerErrorMiddleware, so they also see
+        # the 500 responses it sends. AddRequestIds is outermost, so it also stamps
+        # the responses of the layer that closes connections after
+        # Expect: 100-continue (server/connection.py).
+        return AddRequestIds(CloseConnectionIfContinueNotSent(super().build_middleware_stack()))
 
 
 def create_app(
@@ -149,8 +152,17 @@ def create_app(
 
     @application.exception_handler(Exception)
     async def unhandled_error(request: Request, exc: Exception) -> Response:
-        # Starlette re-raises the exception after sending this response, so it is
-        # still logged with its traceback.
+        # Logged here with the request ID, so the client's ID matches the traceback.
+        # Starlette re-raises the exception after sending this response.
+        ids = current_request_ids()
+        logger.error(
+            "request_id=%s host_id=%s unhandled exception in %s %s",
+            ids.request_id,
+            ids.host_id,
+            request.method,
+            request.url.path,
+            exc_info=exc,
+        )
         return _xml_error(InternalError())
 
     @application.get("/health")

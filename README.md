@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 99 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 100 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -156,6 +156,7 @@ server/
   metadata/sqlite.py   schema, blob registry and transactions
   multipart/           CompleteMultipartUpload and the composite ETag
   errors/s3errors.py   S3 error responses
+  request_ids.py       x-amz-request-id and x-amz-id-2 on every response
 chaos/
   framework/, faults/, fixtures/   fault injection and server process fixtures
   scenarios/           Tier A and Tier B tests
