@@ -22,6 +22,12 @@ class Settings:
     host: str = "0.0.0.0"
     # crash_model: only process-kill (SIGKILL) durability is guaranteed
     crash_model: str = "process-kill"
+    # The one identity every Owner element reports (ListBuckets, ListObjects). Litmus
+    # has no authentication and one account, so the owner never comes from the request.
+    owner_id: str = field(default_factory=lambda: os.environ.get("S3_OWNER_ID", "litmus"))
+    owner_display_name: str = field(
+        default_factory=lambda: os.environ.get("S3_OWNER_DISPLAY_NAME", "litmus")
+    )
     # S3_TEST_WRITE_DELAY_MS: Tier B chaos tests only. One sleep of this many ms in
     # BlobStore.write_blob (PUT and UploadPart), after the temp file is created and
     # before any bytes are written to it. The request body is already

@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import create_app
+from server.config import Settings, settings
 from server.metadata.base import ObjectMeta
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.blobs import BlobStore
@@ -175,6 +176,67 @@ def test_list_buckets_empty(client):
     resp = client.get("/")
     buckets = _xml(resp.text).findall(".//Bucket")
     assert buckets == []
+
+
+# --- list buckets: owner ---
+
+
+def _owner(resp) -> tuple[str, str]:
+    root = _xml(resp.text)
+    owners = root.findall("Owner")
+    assert len(owners) == 1
+    return owners[0].findtext("ID"), owners[0].findtext("DisplayName")
+
+
+def test_list_buckets_owner_defaults(client, monkeypatch):
+    monkeypatch.delenv("S3_OWNER_ID", raising=False)
+    monkeypatch.delenv("S3_OWNER_DISPLAY_NAME", raising=False)
+    defaults = Settings()
+    monkeypatch.setattr(settings, "owner_id", defaults.owner_id)
+    monkeypatch.setattr(settings, "owner_display_name", defaults.owner_display_name)
+    assert _owner(client.get("/")) == ("litmus", "litmus")
+
+
+def test_list_buckets_owner_precedes_buckets(client):
+    client.put("/alpha")
+    tags = [child.tag for child in _xml(client.get("/").text)]
+    assert tags == ["Owner", "Buckets"]
+
+
+def test_list_buckets_owner_from_settings(client, monkeypatch):
+    monkeypatch.setattr(settings, "owner_id", "id-ünïcode")
+    monkeypatch.setattr(settings, "owner_display_name", 'Name <&> "quoted"')
+    assert _owner(client.get("/")) == ("id-ünïcode", 'Name <&> "quoted"')
+
+
+def test_list_buckets_owner_ignores_request_identity(client, monkeypatch):
+    monkeypatch.setattr(settings, "owner_id", "configured-id")
+    monkeypatch.setattr(settings, "owner_display_name", "Configured Name")
+    headers = {
+        "Authorization": (
+            "AWS4-HMAC-SHA256 Credential=someoneelse/20260101/us-east-1/s3/aws4_request, "
+            "SignedHeaders=host, Signature=00"
+        ),
+        "x-amz-expected-bucket-owner": "someoneelse",
+    }
+    resp = client.get("/", headers=headers)
+    assert _owner(resp) == ("configured-id", "Configured Name")
+    resp = client.get("/?x-id=someoneelse&owner=someoneelse")
+    assert _owner(resp) == ("configured-id", "Configured Name")
+
+
+def test_owner_settings_read_from_environment(monkeypatch):
+    monkeypatch.setenv("S3_OWNER_ID", "env-id")
+    monkeypatch.setenv("S3_OWNER_DISPLAY_NAME", "Env Name")
+    s = Settings()
+    assert (s.owner_id, s.owner_display_name) == ("env-id", "Env Name")
+
+
+def test_owner_settings_defaults(monkeypatch):
+    monkeypatch.delenv("S3_OWNER_ID", raising=False)
+    monkeypatch.delenv("S3_OWNER_DISPLAY_NAME", raising=False)
+    s = Settings()
+    assert (s.owner_id, s.owner_display_name) == ("litmus", "litmus")
 
 
 # --- error responses are valid XML ---

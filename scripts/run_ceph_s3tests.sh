@@ -8,8 +8,9 @@
 # litmus must already be running on localhost:8000.
 #
 # Usage:
-#   # Start litmus first:
-#   uv run uvicorn server.app:app --host 127.0.0.1 --port 8000 &
+#   # Start litmus first, with the owner identity of the [s3 main] user below:
+#   S3_OWNER_ID=testuser S3_OWNER_DISPLAY_NAME="Test User" \
+#       uv run uvicorn server.app:app --host 127.0.0.1 --port 8000 &
 #
 #   # Then run this script from the repo root:
 #   bash scripts/run_ceph_s3tests.sh
@@ -35,6 +36,11 @@ S3TESTS_COMMIT="5b3987116eca0b4b8fa57d6b10f3db57bab196b6"
 S3_HOST="localhost"
 S3_PORT="8000"
 BUCKET_PREFIX="litmus-test-"
+# The [s3 main] identity. Litmus has no authentication and reports one fixed owner
+# (S3_OWNER_ID, S3_OWNER_DISPLAY_NAME); the run is refused unless the server reports
+# exactly these values.
+MAIN_USER_ID="testuser"
+MAIN_DISPLAY_NAME="Test User"
 
 # --- Check out ceph/s3-tests at the pinned commit ---
 if [ ! -d "$S3TESTS_DIR/.git" ]; then
@@ -68,8 +74,8 @@ bucket prefix = $BUCKET_PREFIX
 [s3 main]
 access_key = testkey
 secret_key = testsecret
-display_name = Test User
-user_id = testuser
+display_name = $MAIN_DISPLAY_NAME
+user_id = $MAIN_USER_ID
 email = test@example.com
 region = us-east-1
 
@@ -152,6 +158,25 @@ if ! curl -sf "http://$S3_HOST:$S3_PORT/health" > /dev/null; then
     exit 1
 fi
 echo "Server is up."
+
+# --- Verify litmus reports the [s3 main] identity as owner ---
+# This script does not start litmus, so it cannot set the server's environment; it
+# reads the Owner element of ListBuckets and stops if it differs.
+SERVER_OWNER="$(curl -sf "http://$S3_HOST:$S3_PORT/" | python3 -c '
+import sys, xml.etree.ElementTree as ET
+owner = ET.parse(sys.stdin).getroot().find("Owner")
+if owner is None:
+    sys.exit("no Owner element in ListBuckets")
+print(owner.findtext("ID") or "")
+print(owner.findtext("DisplayName") or "")
+')"
+EXPECTED_OWNER="$(printf '%s\n%s' "$MAIN_USER_ID" "$MAIN_DISPLAY_NAME")"
+if [ "$SERVER_OWNER" != "$EXPECTED_OWNER" ]; then
+    echo "ERROR: litmus reports owner $(echo "$SERVER_OWNER" | paste -sd'/' -), expected $MAIN_USER_ID/$MAIN_DISPLAY_NAME"
+    echo "Restart it with: S3_OWNER_ID=\"$MAIN_USER_ID\" S3_OWNER_DISPLAY_NAME=\"$MAIN_DISPLAY_NAME\" uv run uvicorn server.app:app --host 127.0.0.1 --port 8000"
+    exit 1
+fi
+echo "Server owner matches the [s3 main] user ($MAIN_USER_ID, $MAIN_DISPLAY_NAME)."
 
 # --- Run the suite ---
 # We run only the s3tests/functional/test_s3.py subset and skip known-incompatible

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.api.request_guard import NULL_VERSION_ID
+from server.config import settings
 from server.crash_points import (
     BUCKET_DELETE_AFTER_COMMIT,
     DELETE_OBJECTS_AFTER_COMMIT,
@@ -25,8 +26,15 @@ router = APIRouter()
 _CONDITIONAL_DELETE_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
 
 
+def _owner_element(parent: ET.Element) -> None:
+    owner = ET.SubElement(parent, "Owner")
+    ET.SubElement(owner, "ID").text = settings.owner_id
+    ET.SubElement(owner, "DisplayName").text = settings.owner_display_name
+
+
 def _list_buckets_xml(buckets) -> str:
     root = ET.Element("ListAllMyBucketsResult")
+    _owner_element(root)
     buckets_el = ET.SubElement(root, "Buckets")
     for b in buckets:
         bucket_el = ET.SubElement(buckets_el, "Bucket")

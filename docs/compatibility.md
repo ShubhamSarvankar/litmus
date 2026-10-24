@@ -31,13 +31,28 @@ script:
 
 ```bash
 # Terminal 1
-uv run uvicorn server.app:app --host 127.0.0.1 --port 8000
+S3_OWNER_ID=testuser S3_OWNER_DISPLAY_NAME="Test User" \
+    uv run uvicorn server.app:app --host 127.0.0.1 --port 8000
 
 # Terminal 2
 bash scripts/run_ceph_s3tests.sh
 ```
 
-The script refuses to run if `S3_TEST_CRASH_POINT` is set.
+The script refuses to run if `S3_TEST_CRASH_POINT` is set, or if the server's owner
+(the `Owner` element of ListBuckets) is not the `[s3 main]` user it writes into
+`s3tests.conf`: ID `testuser`, display name `Test User`.
+
+**Owner.** Litmus has no authentication and one account. Every `Owner` element it
+returns carries one fixed identity from `S3_OWNER_ID` and `S3_OWNER_DISPLAY_NAME`
+(default `litmus` for both), never anything taken from the request. Because there is
+no auth, a test that compares an owner with the configured main user can pass only
+because the two were configured to match, not because Litmus identified the caller.
+As of the current run, no selected test makes that comparison and passes:
+`test_bucket_listv2_fetchowner_notempty` checks only that `Owner` is present;
+`test_bucket_list_return_data` and `test_list_multipart_upload_owner` compare owner
+values but fail first on GetObjectAcl and ListMultipartUploads, which are 501; the
+tests that compare the main user's ID with an ACL owner are deselected by `acl`.
+Setting the owner changed no outcome (the run with it matches the run before it).
 
 ## Result
 
