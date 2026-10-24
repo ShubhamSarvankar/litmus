@@ -29,8 +29,10 @@ left on disk, in the database and visible to clients after a restart.
 
 ## API
 
-The app registers 16 routes: 11 for S3 requests, `/health`, and the 4 routes FastAPI
-adds by default. The S3 routes dispatch on query parameters as follows.
+The app registers 12 routes: 11 for S3 requests and `/health`. FastAPI's default
+documentation routes are turned off, so a bucket named `docs`, `redoc` or
+`openapi.json` behaves like any other bucket. The S3 routes dispatch on query
+parameters as follows.
 
 | Method | Path | Operation |
 |---|---|---|
@@ -47,7 +49,6 @@ adds by default. The S3 routes dispatch on query parameters as follows.
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload |
 | GET | `/health` | Health check |
-| GET, HEAD | `/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc` | FastAPI defaults |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning

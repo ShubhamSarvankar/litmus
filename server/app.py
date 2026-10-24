@@ -69,7 +69,16 @@ def create_app(
         finally:
             st.release_lock(lock)
 
-    application = LitmusApp(title="litmus", version="0.1.0", lifespan=lifespan)
+    # No OpenAPI or docs routes: GET /docs, /redoc and /openapi.json would shadow
+    # ListObjects for buckets with those names.
+    application = LitmusApp(
+        title="litmus",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     application.state.storage = storage
     application.state.metadata = metadata
