@@ -9,8 +9,9 @@ class S3Error(Exception):
     code: ClassVar[str] = "InternalError"
     message: ClassVar[str] = "We encountered an internal error. Please try again."
 
-    def __init__(self, extra: dict | None = None):
+    def __init__(self, extra: dict | None = None, headers: dict | None = None):
         self.extra = extra or {}
+        self.headers = headers or {}
         super().__init__(self.message)
 
 
@@ -137,6 +138,12 @@ class MethodNotAllowed(S3Error):
     status_code = 405
     code = "MethodNotAllowed"
     message = "The specified method is not allowed against this resource."
+
+
+class InvalidRange(S3Error):
+    status_code = 416
+    code = "InvalidRange"
+    message = "The requested range cannot be satisfied."
 
 
 class InternalError(S3Error):

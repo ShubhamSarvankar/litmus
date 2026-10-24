@@ -20,6 +20,7 @@ from server.crash_points import (
 )
 from server.errors.s3errors import (
     InternalError,
+    InvalidRange,
     NoSuchBucket,
     NoSuchKey,
     PreconditionFailed,
@@ -176,13 +177,11 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
             try:
                 start, end = _parse_range(range_header, meta.size)
             except ValueError as e:
-                f.close()
                 if "multi-range" in str(e):
+                    f.close()
                     return Response(status_code=400, content="Multi-range not supported")
-                return Response(
-                    status_code=416,
-                    headers={"Content-Range": f"bytes */{meta.size}"},
-                )
+                # The handler below closes f on the way out.
+                raise InvalidRange(headers={"Content-Range": f"bytes */{meta.size}"}) from None
             length = end - start + 1
             return StreamingResponse(
                 _stream(f, start, length),
@@ -226,6 +225,16 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
     meta = metadata.get_object_meta(bucket, key)
     if meta is None:
         raise NoSuchKey(extra={"Key": key})
+
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            _parse_range(range_header, meta.size)
+        except ValueError as e:
+            # GET answers a multi-range with a 400 whose body is not an S3 error, and
+            # HEAD has no such answer to mirror; it ignores the header, as before.
+            if "multi-range" not in str(e):
+                raise InvalidRange(headers={"Content-Range": f"bytes */{meta.size}"}) from None
 
     return Response(
         status_code=200,

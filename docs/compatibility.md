@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**153 passed, 170 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**155 passed, 168 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -67,7 +67,8 @@ outcome (every selected versions test is skipped), though every test's teardown 
 pages through ListObjectVersions; `encoding-type=url` moved 2 more
 (`test_bucket_list_encoding_basic` and `test_bucket_listv2_encoding_basic`), and the
 DeleteObjects limit of 1000 Objects moved 2 more (`test_multi_object_delete_key_limit`
-and `test_multi_objectv2_delete_key_limit`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+and `test_multi_objectv2_delete_key_limit`), and the `InvalidRange` error body moved 2
+more (`test_ranged_request_invalid_range` and `test_ranged_request_empty_object`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -94,6 +95,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Trailing slash on a bucket path | 330 | 508 | 151 | `/{bucket}/` is the bucket, for every method. No outcome changed, and none was expected to: the results file is identical to the previous one, and the server's access log for the run (7523 requests) holds no request to `/{bucket}/`. The only paths ending in a slash besides `/` were `PUT /{bucket}/asdf/` (2) and `PUT /{bucket}/0/` (1), which are keys. Recorded at the commit that adds the route. |
 | DeleteObjects MalformedXML | 330 | 508 | 151 | A DeleteObjects body that is not well-formed XML gets 400 MalformedXML instead of 500. No outcome changed, and none was expected to: the results file is identical to the previous one, and the one selected test that expects MalformedXML, `test_multipart_upload_empty`, is CompleteMultipartUpload, which this change does not touch. All 195 DeleteObjects requests in the run were answered 200. Recorded at the commit that adds the error. |
 | DeleteObjects document validation | 330 | 508 | 153 | The Delete document is validated whole before anything is deleted: root, 1 to 1000 Objects, one Key each, Quiet. More than 1000 Objects is 400 MalformedXML. 2 passes gained: `test_multi_object_delete_key_limit` and `test_multi_objectv2_delete_key_limit`, as forecast; no other outcome changed. Recorded at the commit that adds the validation. |
+| InvalidRange error body | 330 | 508 | 155 | An unsatisfiable Range on GET is raised as the `InvalidRange` S3 error (416) instead of a bare 416, so it carries `Code`, `Message`, `RequestId` and `HostId`. 2 passes gained: `test_ranged_request_invalid_range` and `test_ranged_request_empty_object`, as forecast before the change; no other outcome changed. Recorded at the commit that adds the error. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -112,7 +114,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 153 passes are incidental**.
+is authenticated or owned. By that rule, **27 of the 155 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -211,7 +213,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Object operations | 28 | 25 | 3 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
-| Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
+| Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). |
@@ -228,7 +230,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **153** | **170** | **7** | |
+| **Total** | **330** | **155** | **168** | **7** | |
 
 ## AWS CLI
 
@@ -290,6 +292,26 @@ InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 (httptools), a method name the parser does not know (for example `BREW`) is rejected
 with a plain-text 400 before the request reaches the application. With
 `--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
+
+**Range.** One `bytes=` range per GET. A range with no byte in the object is 416
+`InvalidRange`, with the standard error body (`Code`, `Message`, `RequestId`, `HostId`)
+and a `Content-Range: bytes */{size}` header. That includes every range on an empty
+object. HEAD with such a range is 416 too, without a body. Documented: the GetObject
+reference says "Amazon S3 doesn't support retrieving multiple ranges of data per `GET`
+request"; the Error reference lists `InvalidRange`, "The requested range cannot be
+satisfied.", 416; the HeadObject reference says "If the Range is not satisfiable, S3
+returns a `416 - Requested Range Not Satisfiable` error" and that an error to HEAD
+carries no exact code (HEAD has no body). Undocumented choices, none compared with S3:
+every Range form on an empty object is unsatisfiable (the AWS pages say nothing about
+empty objects; RFC 9110 defines no byte position in a zero-length representation); the
+416 carries `Content-Range: bytes */{size}`, which the AWS pages do not mention; the
+`InvalidRange` body holds no `ActualObjectSize` or `RangeRequested`; `bytes=-0` is
+unsatisfiable. Known gaps, unchanged by this: a range whose end is past the last byte
+(`bytes=5-999` on 10 bytes) is answered 416, where RFC 9110 clamps the end and S3 is
+expected to answer 206; a Range that does not parse (`bytes=abc`, a unit other than
+`bytes`) is 416 where RFC 9110 says to ignore it; more than one range is 400 with a
+plain-text body, not an S3 error; HEAD with a satisfiable range ignores the Range
+(S3 narrows `Content-Length`) and HEAD with several ranges ignores them.
 
 **Bucket names.** CreateBucket enforces the rules in "General purpose bucket naming
 rules" (<https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html>):

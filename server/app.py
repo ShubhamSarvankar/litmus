@@ -125,7 +125,7 @@ def create_app(
 
     @application.exception_handler(S3Error)
     async def s3_error_handler(request: Request, exc: S3Error) -> Response:
-        return _xml_error(exc)
+        return _xml_error(exc, headers=exc.headers or None)
 
     # Responses the framework would otherwise produce itself, with a JSON or plain
     # text body: every one becomes an S3 XML error.
