@@ -14,13 +14,17 @@ from server.crash_points import (
 from server.errors.s3errors import (
     BucketAlreadyExists,
     BucketNotEmpty,
+    InvalidArgument,
     NoSuchBucket,
     NotImplementedOperation,
 )
-from server.metadata.base import BucketHasObjects, BucketMissing
+from server.metadata.base import BucketHasObjects, BucketMissing, ListPage
 from server.storage.lifecycle import collect_garbage
 
 router = APIRouter()
+
+# S3's default and largest max-keys.
+MAX_KEYS = 1000
 
 # Per-key conditions a DeleteObjects <Object> may carry (ObjectIdentifier).
 _CONDITIONAL_DELETE_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
@@ -45,13 +49,22 @@ def _list_buckets_xml(buckets) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _list_objects_xml(bucket: str, objects: list, prefix: str = "") -> str:
+def _list_objects_xml(
+    bucket: str, page: ListPage, prefix: str, delimiter: str, marker: str, max_keys: int
+) -> str:
     root = ET.Element("ListBucketResult")
     ET.SubElement(root, "Name").text = bucket
     ET.SubElement(root, "Prefix").text = prefix
-    ET.SubElement(root, "MaxKeys").text = "1000"
-    ET.SubElement(root, "IsTruncated").text = "false"
-    for obj in objects:
+    ET.SubElement(root, "Marker").text = marker
+    ET.SubElement(root, "MaxKeys").text = str(max_keys)
+    if delimiter:
+        ET.SubElement(root, "Delimiter").text = delimiter
+    ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
+    # S3 returns NextMarker only with a delimiter; without one, a client continues
+    # from the last Key.
+    if delimiter and page.is_truncated:
+        ET.SubElement(root, "NextMarker").text = page.next_marker
+    for obj in page.objects:
         contents = ET.SubElement(root, "Contents")
         ET.SubElement(contents, "Key").text = obj.key
         ET.SubElement(contents, "ETag").text = obj.etag
@@ -60,7 +73,21 @@ def _list_objects_xml(bucket: str, objects: list, prefix: str = "") -> str:
             "%Y-%m-%dT%H:%M:%S.000Z"
         )
         ET.SubElement(contents, "StorageClass").text = "STANDARD"
+        _owner_element(contents)
+    for common in page.common_prefixes:
+        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = common
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _max_keys(params) -> int:
+    """max-keys: default 1000, larger values capped at 1000, 0 allowed. Anything but
+    a decimal integer is InvalidArgument."""
+    raw = params.get("max-keys")
+    if raw is None:
+        return MAX_KEYS
+    if not raw.isascii() or not raw.isdigit():
+        raise InvalidArgument(extra={"ArgumentName": "max-keys", "ArgumentValue": raw})
+    return min(int(raw), MAX_KEYS)
 
 
 def _list_objects_v2_xml(bucket: str, objects: list, prefix: str = "") -> str:
@@ -134,19 +161,23 @@ async def list_objects(bucket: str, request: Request) -> Response:
         )
 
     prefix = params.get("prefix", "")
-    objects = metadata.list_objects(bucket, prefix=prefix or None)
 
     # ListObjectsV2 (list-type=2)
     if params.get("list-type") == "2":
+        objects = metadata.list_objects(bucket, prefix=prefix or None)
         return Response(
             content=_list_objects_v2_xml(bucket, objects, prefix),
             status_code=200,
             media_type="application/xml",
         )
 
-    # ListObjects V1
+    # ListObjects V1. An empty delimiter is no delimiter.
+    max_keys = _max_keys(params)
+    delimiter = params.get("delimiter", "")
+    marker = params.get("marker", "")
+    page = metadata.list_page(bucket, prefix, delimiter, marker, max_keys)
     return Response(
-        content=_list_objects_xml(bucket, objects, prefix),
+        content=_list_objects_xml(bucket, page, prefix, delimiter, marker, max_keys),
         status_code=200,
         media_type="application/xml",
     )

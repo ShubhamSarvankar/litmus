@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -20,6 +20,21 @@ class ObjectMeta:
     blob_id: str
     # Set when the object was written by CompleteMultipartUpload.
     upload_id: str | None = None
+
+
+@dataclass
+class ListPage:
+    """One page of a listing: objects and common prefixes, each in key order."""
+
+    objects: list[ObjectMeta] = field(default_factory=list)
+    common_prefixes: list[str] = field(default_factory=list)
+    is_truncated: bool = False
+    # The last key or common prefix on the page, where the next page starts.
+    next_marker: str | None = None
+
+    @property
+    def count(self) -> int:
+        return len(self.objects) + len(self.common_prefixes)
 
 
 @dataclass
@@ -137,6 +152,12 @@ class MetadataStore(Protocol):
 
     # Keys that start with prefix (exact bytes, case sensitive) and sort after
     # start_after, in key order, at most limit of them.
+
+    def list_page(
+        self, bucket: str, prefix: str, delimiter: str, marker: str, max_keys: int
+    ) -> ListPage: ...
+
+    # One page of keys and common prefixes after marker, read in one read transaction.
 
     def create_upload(self, upload_id: str, bucket: str, key: str, initiated: datetime) -> None: ...
 

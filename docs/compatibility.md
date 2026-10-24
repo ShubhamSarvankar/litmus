@@ -56,10 +56,12 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**100 passed, 223 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**121 passed, 202 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
-are skipped by s3-tests itself, not by the `-k` expression.
+are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
+table below, the ListObjects (V1) parameters moved 21 tests from failed to passed;
+nothing else changed.
 
 ### How the numbers moved from 115 of 325
 
@@ -95,7 +97,9 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 100 passes are incidental**:
+is authenticated or owned. By that rule, **27 of the 121 passes are incidental**
+(classified before the delimiter was implemented; the listing entries are reviewed
+separately):
 
 - Listing, the delimiter is ignored and the expected result is the same without it
   (8): `test_bucket_list_prefix_delimiter_delimiter_not_exist`,
@@ -152,8 +156,8 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
-| ListObjects (V1) | 41 | 17 | 24 | 0 | Listing and `prefix`. Fail: only `prefix` is applied; `delimiter`, `max-keys`, `marker`, `encoding-type` and `allow-unordered` are ignored and listings are never truncated (23); one test calls GetObjectAcl, which is 501 (1). |
-| ListObjectsV2 | 39 | 16 | 23 | 0 | As for V1. Also ignored: `continuation-token`, `start-after` and `fetch-owner`. |
+| ListObjects (V1) | 41 | 38 | 3 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation. Fail: `encoding-type` is ignored (1); `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
+| ListObjectsV2 | 39 | 16 | 23 | 0 | Listing and `prefix`. Fail: only `prefix` is applied; `delimiter`, `max-keys`, `continuation-token`, `start-after`, `fetch-owner`, `encoding-type` and `allow-unordered` are ignored and listings are never truncated. |
 | DeleteObjects | 4 | 2 | 2 | 0 | Bulk delete. Fail: the 1000-key limit is not enforced. |
 | Multipart upload | 14 | 8 | 6 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object. Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); Content-Type given to CreateMultipartUpload is not applied (1); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
@@ -168,7 +172,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **100** | **223** | **7** | |
+| **Total** | **330** | **121** | **202** | **7** | |
 
 ## Known gaps
 
@@ -190,14 +194,38 @@ InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 with a plain-text 400 before the request reaches the application. With
 `--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
 
-**Listing parameters.** ListObjects, ListObjectsV2 and ListObjectVersions apply
-`prefix` and ignore the other listing parameters. Results are never truncated. The
-prefix is an exact, case sensitive prefix of the key (`_` and `%` are ordinary
-characters), read as an indexed key range, and keys are listed in UTF-8 byte order.
+**Listing parameters.** In all three listings the prefix is an exact, case sensitive
+prefix of the key (`_` and `%` are ordinary characters), read as an indexed key range,
+and keys are listed in UTF-8 byte order. ListObjects (V1) applies `delimiter`,
+`max-keys` and `marker` as S3 does: common prefixes count toward `max-keys`, a common
+prefix is returned only if it sorts after the marker, and `NextMarker` appears only
+when a delimiter was given and the page is truncated. `MaxKeys` echoes the value
+applied (1000 for anything larger). `max-keys` must be a decimal integer; anything
+else, including an empty value, a sign or whitespace, is InvalidArgument. V1 ignores
+`encoding-type`. ListObjectsV2 and ListObjectVersions apply only `prefix`, and are never
+truncated.
 
-**Keys that are not XML characters.** Listings write keys into the XML as they are.
-A key containing a character XML 1.0 does not allow, such as U+FFFF, makes the
-listing unparseable.
+**Characters XML 1.0 does not allow.** XML 1.0 allows tab, LF, CR, U+0020 to U+D7FF,
+U+E000 to U+FFFD and U+10000 to U+10FFFF. Litmus accepts keys with the other
+characters, U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F, U+FFFE and U+FFFF, and
+writes request values into XML responses as they are, so any response that echoes such
+a value is not well-formed XML. Checked against a running server with U+0000, U+0001,
+U+0008, U+000B, U+000C, U+001F, U+FFFE and U+FFFF in a key or parameter, these
+responses do not parse:
+
+- ListObjects, ListObjectsV2 and ListObjectVersions with such a key in the bucket
+  (`Key`), and ListObjects with such a `prefix`, `marker` or `delimiter` (echoed);
+- InitiateMultipartUpload and CompleteMultipartUpload results (`Key`);
+- NoSuchKey errors from GetObject (`Key`), NoSuchBucket errors (`BucketName`), and
+  the InvalidArgument error for `max-keys` (`ArgumentValue`).
+
+A DeleteObjects request cannot carry such a key: its body is XML, and with the
+character written as a character reference (`&#x1;`) Litmus answers 500, because the
+body fails to parse. Two related cases with allowed characters: a key with CR is
+stored, but XML parsers turn a CR in the response into LF, so listings show the key
+with LF instead, and a DeleteObjects request with a literal CR deletes the LF form
+(answering Deleted) and leaves the key with CR in place. A key with LF cannot be
+stored at all: no route matches the path, and PutObject gets 400 InvalidURI.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
 keys with `.` or `..` segments. Clients that resolve dot segments before sending

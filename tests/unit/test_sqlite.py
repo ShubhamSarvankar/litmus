@@ -1,12 +1,18 @@
 import random
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from server.metadata.base import ObjectMeta, PartMeta
-from server.metadata.sqlite import SQLiteMetadataStore, key_range_query, key_successor
+from server.metadata.sqlite import (
+    SQLiteMetadataStore,
+    common_prefix,
+    key_range_query,
+    key_successor,
+)
 
 _NOW = datetime(2024, 1, 1, 12, 0, 0, 0)
 
@@ -462,3 +468,134 @@ def test_write_rollback_on_exception(store, tmp_path):
         conn.close()
     # The object must not have been committed
     assert store.get_object_meta("no-such-bucket", "k") is None
+
+
+# --- Listing pages: delimiter, common prefixes, marker, max-keys ---
+
+
+def _page(store, prefix="", delimiter="", marker="", max_keys=1000):
+    page = store.list_page("b", prefix, delimiter, marker, max_keys)
+    return _keys(page.objects), page.common_prefixes, page.is_truncated, page.next_marker
+
+
+def test_common_prefix():
+    assert common_prefix("a/b/c", "", "/") == "a/"
+    assert common_prefix("a/b/c", "a/", "/") == "a/b/"
+    assert common_prefix("a/b", "a/", "/") is None
+    assert common_prefix("abcabc", "", "bc") == "abc"
+    # The delimiter is searched for after the prefix only.
+    assert common_prefix("ab/c", "ab/", "/") is None
+    assert common_prefix("x", "", "") is None
+    assert common_prefix("b/1", "a", "/") is None
+
+
+def test_page_rolls_up_common_prefixes(store):
+    _put_keys(store, ["asdf", "foo/bar", "foo/bar/xyzzy", "quux/thud"])
+    assert _page(store, delimiter="/") == (["asdf"], ["foo/", "quux/"], False, "quux/")
+
+
+def test_page_common_prefixes_count_toward_max_keys(store):
+    _put_keys(store, ["asdf", "boo/bar", "boo/baz/xyzzy", "cquux/bla", "cquux/thud"])
+    assert _page(store, delimiter="/", max_keys=1) == (["asdf"], [], True, "asdf")
+    assert _page(store, delimiter="/", max_keys=2) == (["asdf"], ["boo/"], True, "boo/")
+    assert _page(store, delimiter="/", max_keys=3) == (
+        ["asdf"],
+        ["boo/", "cquux/"],
+        False,
+        "cquux/",
+    )
+
+
+def test_page_marker_equal_to_common_prefix_skips_it(store):
+    _put_keys(store, ["a/", "a/1", "a/2", "a0", "b/1"])
+    assert _page(store, delimiter="/", marker="a/") == (["a0"], ["b/"], False, "b/")
+
+
+def test_page_marker_inside_common_prefix_skips_it(store):
+    _put_keys(store, ["a/1", "a/2", "a/3/x", "b"])
+    for marker in ["a/1", "a/2", "a/25", "a/3/x", "a/\U0010ffff"]:
+        assert _page(store, delimiter="/", marker=marker) == (["b"], [], False, "b")
+
+
+def test_page_marker_before_common_prefix_returns_it(store):
+    _put_keys(store, ["a/1", "a/2", "b"])
+    assert _page(store, delimiter="/", marker="a") == (["b"], ["a/"], False, "b")
+
+
+def test_page_marker_inside_common_prefix_under_prefix(store):
+    _put_keys(store, ["p/a/1", "p/a/2", "p/b", "p/c/1", "q/1"])
+    assert _page(store, prefix="p/", delimiter="/", marker="p/a/1") == (
+        ["p/b"],
+        ["p/c/"],
+        False,
+        "p/c/",
+    )
+    # A marker that does not start with the prefix is only a lower bound.
+    assert _page(store, prefix="p/", delimiter="/", marker="a/x") == (
+        ["p/b"],
+        ["p/a/", "p/c/"],
+        False,
+        "p/c/",
+    )
+
+
+def test_page_marker_without_delimiter_is_a_key_bound(store):
+    _put_keys(store, ["a/1", "a/2", "b"])
+    assert _page(store, marker="a/1") == (["a/2", "b"], [], False, "b")
+
+
+def test_page_restarts_after_common_prefix(store):
+    # Many keys under one common prefix must not use up the page.
+    _put_keys(store, [f"a/{i:03}" for i in range(50)] + ["b", "c/1", "d"])
+    assert _page(store, delimiter="/", max_keys=3) == (["b"], ["a/", "c/"], True, "c/")
+    assert _page(store, delimiter="/", marker="c/", max_keys=3) == (["d"], [], False, "d")
+
+
+def test_page_common_prefix_of_only_max_code_points(store):
+    _put_keys(store, ["\U0010ffff/1", "\U0010ffff/2"])
+    assert _page(store, delimiter="/") == ([], ["\U0010ffff/"], False, "\U0010ffff/")
+    assert _page(store, delimiter="\U0010ffff") == ([], ["\U0010ffff"], False, "\U0010ffff")
+    assert _page(store, delimiter="\U0010ffff", marker="\U0010ffff") == ([], [], False, None)
+
+
+def test_page_multi_character_delimiter(store):
+    _put_keys(store, ["a--b--c", "a--d", "a-e", "f"])
+    assert _page(store, delimiter="--") == (["a-e", "f"], ["a--"], False, "f")
+    assert _page(store, prefix="a--", delimiter="--") == (["a--d"], ["a--b--"], False, "a--d")
+
+
+def test_page_max_keys_zero(store):
+    _put_keys(store, ["a", "b"])
+    assert _page(store, max_keys=0) == ([], [], False, None)
+
+
+def test_page_truncation_is_exact(store):
+    _put_keys(store, ["a", "b", "c"])
+    assert _page(store, max_keys=3) == (["a", "b", "c"], [], False, "c")
+    assert _page(store, max_keys=2) == (["a", "b"], [], True, "b")
+    assert _page(store, delimiter="/", max_keys=2, marker="b") == (["c"], [], False, "c")
+
+
+def test_page_reads_one_snapshot(store, monkeypatch):
+    # A writer that commits between the page's range reads must not be seen.
+    _put_keys(store, ["a/1", "b/1", "c/1"])
+    real_snapshot = store._snapshot
+    calls = []
+
+    @contextmanager
+    def snapshot_with_writer():
+        with real_snapshot() as conn:
+
+            class Conn:
+                def execute(self, sql, params=()):
+                    calls.append(sql)
+                    if len(calls) == 2:
+                        _put_keys(store, ["a0", "b0"])
+                        store.delete_objects("b", ["c/1"])
+                    return conn.execute(sql, params)
+
+            yield Conn()
+
+    monkeypatch.setattr(store, "_snapshot", snapshot_with_writer)
+    assert _page(store, delimiter="/") == ([], ["a/", "b/", "c/"], False, "c/")
+    assert len(calls) >= 3

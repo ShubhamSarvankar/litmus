@@ -1134,12 +1134,34 @@ columns now; a later migration from `objects` to `object_versions` is mechanical
 ### §13. Listing over the new schema (R23)
 
 Listing reads only rows. The `(bucket, key)` primary key in BINARY collation gives the
-byte order S3 uses. Prefix listing should replace `LIKE prefix || '%'` (wildcards,
-ASCII case folding) with an indexed range: `key >= :prefix ORDER BY key`, reading
-pages and stopping at the first key that does not start with the prefix. Markers and
-continuation tokens become `key > :marker`. Delimiters, `max-keys` and paging of
-`?versions` are listing work (category c, j9), unchanged by the layout except that
-the index now supports them.
+byte order S3 uses: the database encoding is UTF-8, so BINARY compares UTF-8 bytes,
+which orders keys by code point.
+
+**Prefix as a key range.** A prefix is the range `key >= :prefix AND key < :upper`,
+where `:upper` is the successor of the prefix: the least string greater than every
+string that starts with it. The successor drops trailing U+10FFFF characters (which
+have no next code point) and increments the last remaining character, stepping from
+U+D7FF to U+E000 over the surrogates, which UTF-8 cannot encode. A prefix that is
+empty or made only of U+10FFFF has no successor, and the range has no upper bound.
+This replaces `LIKE prefix || '%'`, whose `_` and `%` are wildcards and which ignores
+ASCII case. `EXPLAIN QUERY PLAN` shows `SEARCH objects USING PRIMARY KEY (bucket=? AND
+key>? AND key<?)` and no temporary B-tree, so rows come out in index order.
+
+**Pages.** A page is read in one read transaction, as a series of range reads in key
+order, each with a `LIMIT` of one row more than the page still needs, so the page knows
+whether it is truncated without reading further. A marker (and later a continuation
+token or start-after key) is a lower bound `key > :marker`.
+
+**Common prefixes and the restart after one.** With a delimiter, a key that contains
+the delimiter after the prefix rolls up into its common prefix: the key up to and
+including that first delimiter. All keys under a common prefix `cp` lie in
+`[cp, successor(cp))`, so after returning `cp` the next range read starts at
+`key >= successor(cp)`, past every key under it, however many there are; restarting at
+`key > cp` would return `cp` again. A common prefix is returned only if it sorts after
+the marker (the S3 ListObjects reference: "CommonPrefixes is filtered out from results
+if it is not lexicographically greater than the key-marker"). A marker equal to or
+inside a common prefix therefore starts the page at that prefix's successor, and a
+page that ended on `cp` continues correctly from `marker = cp`.
 
 ### §14. Requirement coverage
 

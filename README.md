@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 100 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 121 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -40,7 +40,7 @@ parameters as follows.
 | PUT | `/{bucket}` | CreateBucket |
 | HEAD | `/{bucket}` | HeadBucket |
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
-| GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order. Only `prefix` is applied, as an exact, case sensitive prefix. |
+| GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 also applies `delimiter`, `max-keys` and `marker`, with `NextMarker` and the configured `Owner` in each `Contents`. |
 | POST | `/{bucket}?delete` | DeleteObjects |
 | PUT | `/{bucket}/{key}` | PutObject. With `partNumber` and `uploadId`: UploadPart. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |

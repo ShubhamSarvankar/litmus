@@ -9,6 +9,7 @@ from server.metadata.base import (
     BucketHasObjects,
     BucketMeta,
     BucketMissing,
+    ListPage,
     ObjectMeta,
     PartMeta,
     PartsChanged,
@@ -128,18 +129,23 @@ def key_successor(prefix: str) -> str | None:
 
 
 def key_range_query(
-    bucket: str, prefix: str, start_after: str | None, limit: int | None
+    bucket: str,
+    prefix: str,
+    start_after: str | None,
+    limit: int | None,
+    start_at: str | None = None,
 ) -> tuple[str, tuple]:
-    """SELECT for the objects of bucket whose key starts with prefix and sorts after
-    start_after, in key order: a range on the (bucket, key) primary key, never LIKE
-    (whose _ and % are wildcards and which ignores ASCII case)."""
-    where, params = ["bucket = ?"], [bucket]
-    if start_after is not None and start_after >= prefix:
-        where.append("key > ?")
-        params.append(start_after)
-    else:
-        where.append("key >= ?")
-        params.append(prefix)
+    """SELECT for the objects of bucket whose key starts with prefix, sorts after
+    start_after and not before start_at, in key order: a range on the (bucket, key)
+    primary key, never LIKE (whose _ and % are wildcards and which ignores ASCII
+    case)."""
+    # The tightest lower bound wins; on a tie, the exclusive one.
+    lower, inclusive = prefix, True
+    if start_at is not None and start_at > lower:
+        lower = start_at
+    if start_after is not None and start_after >= lower:
+        lower, inclusive = start_after, False
+    where, params = ["bucket = ?", "key >= ?" if inclusive else "key > ?"], [bucket, lower]
     upper = key_successor(prefix)
     if upper is not None:
         where.append("key < ?")
@@ -149,6 +155,15 @@ def key_range_query(
         sql += " LIMIT ?"
         params.append(limit)
     return sql, tuple(params)
+
+
+def common_prefix(key: str, prefix: str, delimiter: str) -> str | None:
+    """The common prefix key rolls up into: key up to and including the first
+    delimiter after prefix, or None when there is no delimiter after prefix."""
+    if not delimiter or not key.startswith(prefix):
+        return None
+    i = key.find(delimiter, len(prefix))
+    return None if i < 0 else key[: i + len(delimiter)]
 
 
 class SchemaVersionError(RuntimeError):
@@ -522,6 +537,58 @@ class SQLiteMetadataStore:
         sql, params = key_range_query(bucket, prefix or "", start_after, limit)
         with self._snapshot() as conn:
             return [_object(r) for r in conn.execute(sql, params).fetchall()]
+
+    def list_page(
+        self, bucket: str, prefix: str, delimiter: str, marker: str, max_keys: int
+    ) -> ListPage:
+        """One listing page (docs/design/storage-layout.md §13): keys and common prefixes
+        after marker, in key order, at most max_keys of them together, read in one
+        read transaction.
+
+        A key with delimiter after prefix rolls up into its common prefix. A common
+        prefix is returned only if it sorts after marker (as S3 documents for
+        ListObjects), so a marker equal to or inside a common prefix skips every key
+        under it. After returning a common prefix, the next read starts at its
+        successor, past every key under it.
+        """
+        page = ListPage()
+        if max_keys <= 0:
+            return page
+        start_after, start_at = marker or None, None
+        marker_prefix = common_prefix(marker, prefix, delimiter) if marker else None
+        if marker_prefix is not None:
+            start_after, start_at = None, key_successor(marker_prefix)
+            if start_at is None:
+                return page
+        with self._snapshot() as conn:
+            while True:
+                # One row more than the page still needs, to tell whether it is truncated.
+                limit = max_keys - page.count + 1
+                sql, params = key_range_query(bucket, prefix, start_after, limit, start_at)
+                rows = conn.execute(sql, params).fetchall()
+                skipped_to = None
+                for row in rows:
+                    if page.count == max_keys:
+                        page.is_truncated = True
+                        return page
+                    key = row["key"]
+                    rolled_up = common_prefix(key, prefix, delimiter)
+                    if rolled_up is None:
+                        page.objects.append(_object(row))
+                        page.next_marker = key
+                        start_after = key
+                        continue
+                    page.common_prefixes.append(rolled_up)
+                    page.next_marker = rolled_up
+                    skipped_to = key_successor(rolled_up)
+                    break
+                else:
+                    if len(rows) < limit:
+                        return page
+                    continue
+                if skipped_to is None:
+                    return page
+                start_after, start_at = None, skipped_to
 
     # --- Multipart uploads ---
 
