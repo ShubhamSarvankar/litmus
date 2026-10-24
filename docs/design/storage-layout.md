@@ -1169,6 +1169,50 @@ if it is not lexicographically greater than the key-marker"). A marker equal to 
 inside a common prefix therefore starts the page at that prefix's successor, and a
 page that ended on `cp` continues correctly from `marker = cp`.
 
+**Mutation checks.** Each of the two listing rules above was broken on its own in
+`server/metadata/sqlite.py`, the whole local suite was run, and the file was restored;
+after both, the suite was back to 1122 passed, 2 xfailed, with no diff. Tests not named
+here passed under the mutation.
+
+1. *The `LIKE` prefix query.* `key_range_query` selected `key LIKE prefix || '%'` with
+   the marker and restart bounds, in place of the key range. 24 tests failed:
+   - in all three listings (V1, V2, ListObjectVersions), `test_prefix_underscore_is_literal`,
+     `test_prefix_percent_is_literal` and `test_prefix_is_case_sensitive` (9), and
+     `test_v1_`, `test_v2_` and `test_versions_pages_concatenate_to_unpaged_listing`,
+     two seeds each (6);
+   - `test_percent_in_prefix_marker_and_start_after` under httptools and h11 (2), which
+     covers V1 and V2;
+   - in `tests/unit/test_sqlite.py`, four cases of `test_key_range_query_uses_primary_key`,
+     `test_list_prefix_is_not_a_wildcard`, `test_list_prefix_is_case_sensitive` and
+     `test_list_prefix_matches_startswith_on_random_keys` (7), which test the page read
+     shared by all three.
+2. *The next page restarts inside the last common prefix.* A page that ended on `cp`
+   restarts at `key > cp` instead of `key >= successor(cp)`, and a marker equal to or
+   inside a common prefix is a plain lower bound. Both parts are needed to cover all three
+   listings: V2 continues from its token, V1 and ListObjectVersions from `marker = cp`.
+   27 tests failed and one hung:
+   - V1: `test_v1_marker_at_or_inside_common_prefix_skips_it` for `a/`, `a/1` and
+     `a/15` (3), `test_v1_pages_concatenate_to_unpaged_listing` (2) and
+     `test_v1_encoded_elements`; `test_v1_pages_through_common_prefixes` never ends,
+     because its loop pages until a response is not truncated and each page returns
+     `boo/` again. It had to be deselected for the rest of its file to run.
+   - V2: `test_v2_start_after_at_or_inside_common_prefix_skips_it` for `a/` and `a/1`
+     (2), `test_v2_token_carries_restart_after_common_prefix`,
+     `test_v2_pages_concatenate_to_unpaged_listing` (2) and `test_v2_encoded_elements`.
+     The `a/2/x` case passed: no key sorts after it inside `a/`.
+   - ListObjectVersions: `test_versions_key_marker_at_or_inside_common_prefix_skips_it`
+     for `b/`, `b/1` and `b/15` (3), `test_versions_delimiter_and_common_prefix_page_end`,
+     `test_versions_pages_concatenate_to_unpaged_listing` (2) and
+     `test_versions_encoded_elements`.
+   - Through boto3 against uvicorn: `test_paginators_with_delimiter` with page sizes 1
+     and 3 and `test_default_client_decodes_echoed_parameters` (3). botocore stops a
+     paginator that receives the same token twice, so these fail instead of hanging.
+   - In `tests/unit/test_sqlite.py`: `test_page_restarts_after_common_prefix`,
+     `test_page_marker_equal_to_common_prefix_skips_it`,
+     `test_page_marker_inside_common_prefix_skips_it`,
+     `test_page_marker_inside_common_prefix_under_prefix` and
+     `test_page_common_prefix_of_only_max_code_points` (5).
+
 ### §14. Requirement coverage
 
 | Req | Where |
