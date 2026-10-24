@@ -2,13 +2,25 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Route
 
 from server.config import settings
 from server.connection import CloseConnectionIfContinueNotSent
 from server.consistency import run_consistency_sweep
 from server.crash_points import validate_configured_crash_point
-from server.errors.s3errors import S3Error, render_error
+from server.errors.s3errors import (
+    InternalError,
+    InvalidArgument,
+    InvalidRequest,
+    InvalidURI,
+    MethodNotAllowed,
+    NotImplementedOperation,
+    S3Error,
+    render_error,
+)
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.startup import (
     StartupRefused,  # noqa: F401 (re-exported: callers catch it from server.app)
@@ -20,6 +32,25 @@ from server.startup import (
 from server.storage.blobs import BlobStore
 
 logger = logging.getLogger(__name__)
+
+
+def _xml_error(exc: S3Error, headers: dict | None = None) -> Response:
+    return Response(
+        content=render_error(exc),
+        status_code=exc.status_code,
+        media_type="application/xml",
+        headers=headers,
+    )
+
+
+def _allowed_methods(app: FastAPI, path: str) -> list[str]:
+    """Every method some route accepts for this path. Starlette's own 405 names
+    only the first route whose path matched."""
+    methods: set[str] = set()
+    for route in app.router.routes:
+        if isinstance(route, Route) and route.methods and route.path_regex.match(path):
+            methods |= route.methods
+    return sorted(methods)
 
 
 class LitmusApp(FastAPI):
@@ -91,11 +122,36 @@ def create_app(
 
     @application.exception_handler(S3Error)
     async def s3_error_handler(request: Request, exc: S3Error) -> Response:
-        return Response(
-            content=render_error(exc),
-            status_code=exc.status_code,
-            media_type="application/xml",
-        )
+        return _xml_error(exc)
+
+    # Responses the framework would otherwise produce itself, with a JSON or plain
+    # text body: every one becomes an S3 XML error.
+
+    @application.exception_handler(StarletteHTTPException)
+    async def framework_http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if exc.status_code == 404:
+            # No route matches the path, e.g. an empty bucket segment ("//x").
+            return _xml_error(InvalidURI(extra={"URI": request.url.path}))
+        if exc.status_code == 405:
+            if request.method == "OPTIONS":
+                # OPTIONS is S3's CORS preflight, which Litmus does not implement.
+                return _xml_error(NotImplementedOperation(extra={"Method": "OPTIONS"}))
+            allowed = _allowed_methods(application, request.scope["path"])
+            return _xml_error(
+                MethodNotAllowed(extra={"Method": request.method}),
+                headers={"Allow": ", ".join(allowed)},
+            )
+        return _xml_error(InternalError() if exc.status_code >= 500 else InvalidRequest())
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> Response:
+        return _xml_error(InvalidArgument())
+
+    @application.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception) -> Response:
+        # Starlette re-raises the exception after sending this response, so it is
+        # still logged with its traceback.
+        return _xml_error(InternalError())
 
     @application.get("/health")
     async def health() -> JSONResponse:

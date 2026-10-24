@@ -84,3 +84,49 @@ def test_raw_dot_segment_bucket_is_rejected(server, target):
     assert status == 400
     assert ET.fromstring(payload).findtext("Code") == "InvalidBucketName"
     assert _listed(server.port) == []
+
+
+# --- framework responses through a real server: always S3 XML errors ---
+
+
+def _raw_response(port: int, method: str, target: str) -> tuple[int, dict[str, str], bytes]:
+    request = (
+        f"{method} {target} HTTP/1.1\r\nHost: localhost\r\n"
+        "Content-Length: 0\r\nConnection: close\r\n\r\n"
+    ).encode()
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(request)
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    head, _, payload = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    headers = {k.strip().lower(): v.strip() for k, v in (h.split(":", 1) for h in lines[1:])}
+    return int(lines[0].split(" ")[1]), headers, payload
+
+
+@pytest.mark.parametrize("target", ["//x", "//", "*"])
+def test_raw_unmatched_path_is_invalid_uri(server, target):
+    status, headers, payload = _raw_response(server.port, "GET", target)
+    assert status == 400
+    assert headers["content-type"] == "application/xml"
+    assert ET.fromstring(payload).findtext("Code") == "InvalidURI"
+
+
+@pytest.mark.parametrize(
+    "method,target,allowed",
+    [("PATCH", "/bkt/k", "DELETE, GET, HEAD, POST, PUT"), ("POST", "/", "GET")],
+)
+def test_raw_unsupported_method_is_method_not_allowed(server, method, target, allowed):
+    status, headers, payload = _raw_response(server.port, method, target)
+    assert status == 405
+    assert headers["allow"] == allowed
+    assert headers["content-type"] == "application/xml"
+    assert ET.fromstring(payload).findtext("Code") == "MethodNotAllowed"
+
+
+def test_raw_options_is_not_implemented(server):
+    status, headers, payload = _raw_response(server.port, "OPTIONS", "/bkt/k?X-Amz-Expires=100")
+    assert status == 501
+    assert headers["content-type"] == "application/xml"
+    assert ET.fromstring(payload).findtext("Code") == "NotImplemented"

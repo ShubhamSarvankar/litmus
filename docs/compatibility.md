@@ -123,7 +123,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Versioning, restore and read-through | 11 | 0 | 5 | 6 | Fail: PutBucketVersioning is 501, and DeleteObject sends no `x-amz-delete-marker` header. Skipped by s3-tests: 6. |
 | Anonymous and ACL-based access | 19 | 1 | 18 | 0 | The one pass, `test_object_anon_put_write_access`, is incidental: it sets the bucket ACL through the `x-amz-acl` header, which Litmus ignores, and its anonymous PUT succeeds because nothing is authenticated. Fail: requests are not authenticated, so anonymous requests are accepted, and ACL operations are 501. |
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
-| Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; no Litmus route accepts `OPTIONS`, so Starlette's router answers 405, with FastAPI's JSON error body instead of an S3 error (2). |
+| Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
 | **Total** | **330** | **99** | **224** | **7** | |
 
@@ -134,9 +134,18 @@ request is rejected for missing or invalid credentials.
 
 **Unimplemented operations answer 501.** Requests for S3 operations Litmus does not
 implement get 501 NotImplemented and change nothing. That includes ACLs, policies,
-versioning configuration, tagging, CORS, lifecycle, POST Object, CopyObject (any
-request with `x-amz-copy-source`), ListParts, ListMultipartUploads and
-GetObjectAttributes.
+versioning configuration, tagging, CORS (including `OPTIONS`, the CORS preflight),
+lifecycle, POST Object, CopyObject (any request with `x-amz-copy-source`),
+ListParts, ListMultipartUploads and GetObjectAttributes.
+
+**Other methods and paths.** Every error is an S3 XML error. A method that no route
+accepts for a path gets 405 MethodNotAllowed, with an `Allow` header listing the
+methods that path supports. A path that no route matches, such as one with an empty
+bucket name (`//x`), gets 400 InvalidURI. An unexpected server error gets 500
+InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
+(httptools), a method name the parser does not know (for example `BREW`) is rejected
+with a plain-text 400 before the request reaches the application. With
+`--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
 
 **Listing parameters.** ListObjects and ListObjectsV2 apply `prefix` and ignore the
 other listing parameters. Results are never truncated.

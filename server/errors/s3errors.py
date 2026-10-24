@@ -79,6 +79,24 @@ class NotImplementedOperation(S3Error):
     message = "A header you provided implies functionality that is not implemented"
 
 
+class InvalidURI(S3Error):
+    status_code = 400
+    code = "InvalidURI"
+    message = "Couldn't parse the specified URI."
+
+
+class InvalidRequest(S3Error):
+    status_code = 400
+    code = "InvalidRequest"
+    message = "The request is not valid."
+
+
+class MethodNotAllowed(S3Error):
+    status_code = 405
+    code = "MethodNotAllowed"
+    message = "The specified method is not allowed against this resource."
+
+
 class InternalError(S3Error):
     status_code = 500
     code = "InternalError"
