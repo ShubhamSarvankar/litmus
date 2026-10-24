@@ -64,6 +64,12 @@ stores the decoded bytes. The signed `STREAMING-AWS4-HMAC-SHA256-*` variants and
 trailers get 501. Plain request bodies are still read whole into memory before they
 are written. See [`docs/compatibility.md`](docs/compatibility.md).
 
+An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
+its default settings: `mb`, `ls`, `cp` (including multipart uploads), `sync`, `rm`, `rb`
+and `s3api put-object`, `get-object` and `head-object`. `scripts/aws_cli_smoke.sh` runs
+these checks. Only `http://` was tested, credentials are not checked, and an s3 to s3
+copy gets 501 NotImplemented.
+
 ---
 
 ## Storage

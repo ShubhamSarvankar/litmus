@@ -218,6 +218,38 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
 | **Total** | **330** | **144** | **179** | **7** | |
 
+## AWS CLI
+
+`scripts/aws_cli_smoke.sh` runs an unmodified AWS CLI v2 against a scratch Litmus
+server and checks the results. It was last run with aws-cli 2.38.5 (Linux, installed
+outside `/mnt/`); the script refuses versions older than 2.23. It sets no checksum,
+transfer client or s3 config overrides, uses temporary dummy credentials, and passes
+`--endpoint-url http://127.0.0.1:PORT`.
+
+Verified, with content checks and not only exit codes:
+
+- `s3 mb`, `s3 ls` (buckets, a prefix, and `--recursive`) with keys containing a space,
+  a `+`, a non ASCII character and nested `dir/` prefixes, names printed exactly
+- `s3 cp` up and down of a 1 KiB file and a 40 MiB file (multipart, above the 8 MiB
+  threshold), sha256 compared
+- `s3api put-object`, `s3api get-object`, `s3api head-object`, and `s3api get-object
+  --range` on the 40 MiB object, bytes compared
+- `s3 sync` of 20 files up, a second sync that transfers nothing, and a sync down into
+  an empty directory, compared with `diff -r`
+- `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
+  BucketNotEmpty, and `s3 rb --force`
+
+Limits of this check:
+
+- Only `http://` was tested. Litmus does not serve TLS itself, and what the CLI sends
+  over `https://` was not captured.
+- Credentials are not checked: any access key and secret are accepted.
+- `s3 cp s3://b/x s3://b/y` (and anything else that needs CopyObject) fails with 501
+  NotImplemented and creates no destination key.
+- `s3 sync` compares size and modification time. LastModified has one second
+  resolution, so files modified in the same second they were uploaded can be uploaded
+  again by the next sync; the script backdates its source files for this reason.
+
 ## Known gaps
 
 **No authentication.** Litmus does not check credentials or signatures, and no
@@ -390,7 +422,8 @@ it: such a request is stored as an ordinary body.
   `x-amz-trailer`; and an `x-amz-trailer` that lists more than
   one entry or names anything but `x-amz-checksum-crc64nvme`, so CRC32, CRC32C, SHA-1
   and SHA-256 trailers, which botocore sends over `https://` by default, are refused.
-  Clients can avoid framing by using `http://` with the AWS CLI, or by setting
+  The AWS CLI v2 sends the supported framing over `http://` with its default settings
+  (see "AWS CLI" above). A client can also avoid framing by setting
   `request_checksum_calculation = when_required`.
 - Strictness: the size line is 1 to 32 hex digits (either case) and CRLF, with no sign,
   whitespace or chunk extension; every line ends in CRLF and a bare LF is an error;
