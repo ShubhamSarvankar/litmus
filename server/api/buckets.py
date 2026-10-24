@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from server.api.request_guard import NULL_VERSION_ID, unsafe_key
+from server.api.request_guard import NULL_VERSION_ID
 from server.crash_points import (
     BUCKET_DELETE_AFTER_COMMIT,
     DELETE_OBJECTS_AFTER_COMMIT,
@@ -196,14 +196,7 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
     to_delete = []
     for obj in _find("Object"):
         key, version_id = _text(obj, "Key"), _text(obj, "VersionId")
-        # Keys and version IDs arrive in the body, so the request guard cannot see them.
-        if unsafe_key(key):
-            entries.append(
-                _error(
-                    key, version_id, "InvalidArgument", "Key contains a '.' or '..' path segment"
-                )
-            )
-            continue
+        # Version IDs arrive in the body, so the request guard cannot see them.
         # Same rule as DELETE /{bucket}/{key}?versionId=: every bucket is unversioned,
         # so "null" is the current object and any other version ID is not implemented.
         if version_id is not None and version_id != NULL_VERSION_ID:

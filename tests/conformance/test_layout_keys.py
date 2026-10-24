@@ -4,6 +4,7 @@ open upload (docs/design/storage-layout.md R1, §6.9, §16)."""
 import hashlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -104,6 +105,60 @@ def test_1024_byte_keys_round_trip(env, key):
     assert [blob_id is not None for _, blob_id in storage.scan()] == [True]
     assert client.delete(f"/{BUCKET}/{key}").status_code == 204
     assert client.get(f"/{BUCKET}/{key}").status_code == 404
+
+
+# --- keys with "." and ".." segments (R16), deferred from step 4 to step (b) ---
+
+DOT_SEGMENT_KEYS = ["../x", "a/../b", "./c", "..", ".", "a/./b/../c", "../../../../etc/passwd"]
+
+
+def _path(key: str) -> str:
+    """Dot segments percent-encoded, so the client sends them unnormalized."""
+    return "/".join(
+        "%2E" * len(s) if s in (".", "..") else quote(s, safe="") for s in key.split("/")
+    )
+
+
+@pytest.mark.parametrize("key", DOT_SEGMENT_KEYS)
+def test_dot_segment_keys_round_trip(env, tmp_path, key):
+    client, storage, _ = env
+    body = b"stored as " + key.encode()
+    before = {p for p in tmp_path.rglob("*") if p.is_file()}
+    assert client.put(f"/{BUCKET}/{_path(key)}", content=body).status_code == 200
+    # ListObjects shows exactly the literal key, not a normalized one.
+    assert _listed(client) == [key]
+    _assert_object(client, _path(key), body)
+    assert client.head(f"/{BUCKET}/{_path(key)}").status_code == 200
+    # The only new files are one blob (and database WAL files).
+    new = {p for p in tmp_path.rglob("*") if p.is_file()} - before
+    assert {p for p in new if p.suffix not in (".db-wal", ".db-shm")} == {
+        path for path, _ in storage.scan()
+    }
+    assert client.delete(f"/{BUCKET}/{_path(key)}").status_code == 204
+    assert _listed(client) == []
+
+
+def test_dot_segment_keys_are_distinct_objects(env):
+    """No two of these keys collapse into one object."""
+    client, _, _ = env
+    for key in DOT_SEGMENT_KEYS:
+        assert client.put(f"/{BUCKET}/{_path(key)}", content=key.encode()).status_code == 200
+    assert sorted(_listed(client)) == sorted(DOT_SEGMENT_KEYS)
+    for key in DOT_SEGMENT_KEYS:
+        _assert_object(client, _path(key), key.encode())
+
+
+def test_delete_objects_with_dot_segment_keys(env):
+    client, _, _ = env
+    for key in ("../x", "a/../b"):
+        assert client.put(f"/{BUCKET}/{_path(key)}", content=b"x").status_code == 200
+    body = b"<Delete><Object><Key>../x</Key></Object><Object><Key>a/../b</Key></Object></Delete>"
+    resp = client.post(f"/{BUCKET}?delete", content=body)
+    assert resp.status_code == 200
+    root = ET.fromstring(resp.text)
+    assert [d.findtext("Key") for d in root.findall("Deleted")] == ["../x", "a/../b"]
+    assert root.findall("Error") == []
+    assert _listed(client) == []
 
 
 # --- DeleteBucket with an open upload (§6.9, decision 7) ---

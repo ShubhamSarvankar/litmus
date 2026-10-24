@@ -13,16 +13,15 @@ Two layers:
      implements. A subresource missing from the lists above still cannot reach a
      mutating handler.
 
-The same guard rejects bucket names and keys with "." or ".." segments. Paths no
-longer derive from keys (docs/design/storage-layout.md), so this is a leftover
-deviation from S3 that step (b) of that design removes.
+The same guard rejects the bucket names "." and "..", which S3's bucket naming
+rules forbid. Keys are opaque: a key with "." or ".." segments is stored as it is,
+since no key is ever part of a filesystem path (docs/design/storage-layout.md R16).
 """
 
 from fastapi import Request
 from fastapi.responses import Response
 
 from server.errors.s3errors import (
-    InvalidArgument,
     InvalidBucketName,
     NotImplementedOperation,
     S3Error,
@@ -143,13 +142,8 @@ CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
 # supported request: CopyObject and UploadPartCopy.
 _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
 
+# Bucket names S3's naming rules forbid and that would read as path segments.
 _DOT_SEGMENTS = frozenset({".", ".."})
-
-
-def unsafe_key(key: str) -> bool:
-    """A key with a "." or ".." path segment. Still rejected until step (b) of
-    docs/design/storage-layout.md; no key is part of a path any more."""
-    return any(segment in _DOT_SEGMENTS for segment in key.split("/"))
 
 
 def _check(method: str, path: str, query, headers) -> None:
@@ -159,8 +153,6 @@ def _check(method: str, path: str, query, headers) -> None:
     bucket, _, key = path.lstrip("/").partition("/")
     if bucket in _DOT_SEGMENTS:
         raise InvalidBucketName(extra={"BucketName": bucket})
-    if key and unsafe_key(key):
-        raise InvalidArgument(extra={"ArgumentName": "key", "ArgumentValue": key, "Key": key})
 
     if key:
         subresources, implemented, allowed = (

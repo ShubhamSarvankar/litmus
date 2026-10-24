@@ -124,7 +124,7 @@ def _next_request_outcome(sock: socket.socket) -> str:
 EARLY_ERRORS = [
     pytest.param("/no-such-bucket/k", 404, id="404-no-such-bucket"),
     pytest.param(f"/{BUCKET}/k?acl", 501, id="501-unimplemented"),
-    pytest.param(f"/{BUCKET}/..%2Fk", 400, id="400-unsafe-key"),
+    pytest.param("/%2E%2E/k", 400, id="400-invalid-bucket-name"),
 ]
 
 

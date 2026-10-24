@@ -1,7 +1,7 @@
 # Storage layout redesign
 
-Status: step (a) implemented; step (b) not started. The design follows the
-requirements below; the decisions are recorded in §19.
+Status: steps (a) and (b) implemented. The design follows the requirements below;
+the decisions are recorded in §19.
 
 ## Requirements
 
@@ -189,8 +189,8 @@ rename, fsync of the parent directory, then the SQLite commit).
 
 ## Design proposal
 
-Status: step (a) implemented; step (b) not started. Reviewed on 2026-10-23; the
-decisions are recorded in §19 and the open questions marked in §18. Requirement numbers are written R1 to R25
+Status: steps (a) and (b) implemented. Reviewed on 2026-10-23; the decisions are
+recorded in §19 and the open questions marked in §18. Requirement numbers are written R1 to R25
 (the numbered items above); sections of this design are written §1 to §19.
 
 Notation used in the sequences:
