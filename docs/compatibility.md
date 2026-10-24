@@ -91,6 +91,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | `2011375` | 330 | 508 | 144 | `encoding-type=url` in all three listings. 2 passes gained. |
 | Bucket name validation | 330 | 508 | 151 | CreateBucket enforces the AWS naming rules. 7 passes gained: `test_bucket_create_naming_bad_ip`, `_bad_short_one`, `_bad_short_two`, `_bad_starts_nonalpha`, `_dns_dash_at_end`, `_dns_dot_dot`, `_dns_underscore`. Recorded at the commit that adds the validation. |
 | Trailing slash on a bucket path | 330 | 508 | 151 | `/{bucket}/` is the bucket, for every method. No outcome changed, and none was expected to: the results file is identical to the previous one, and the server's access log for the run (7523 requests) holds no request to `/{bucket}/`. The only paths ending in a slash besides `/` were `PUT /{bucket}/asdf/` (2) and `PUT /{bucket}/0/` (1), which are keys. Recorded at the commit that adds the route. |
+| DeleteObjects MalformedXML | 330 | 508 | 151 | A DeleteObjects body that is not well-formed XML gets 400 MalformedXML instead of 500. No outcome changed, and none was expected to: the results file is identical to the previous one, and the one selected test that expects MalformedXML, `test_multipart_upload_empty`, is CompleteMultipartUpload, which this change does not touch. All 195 DeleteObjects requests in the run were answered 200. Recorded at the commit that adds the error. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -417,13 +418,37 @@ client sends:
 - NoSuchKey errors from GetObject (`Key`), NoSuchBucket errors (`BucketName`), and
   the InvalidArgument error for `max-keys` (`ArgumentValue`).
 
-A DeleteObjects request cannot carry such a key: its body is XML, and with the
-character written as a character reference (`&#x1;`) Litmus answers 500, because the
-body fails to parse. Two related cases with allowed characters: a key with CR is
-stored, but XML parsers turn a CR in the response into LF, so listings show the key
-with LF instead, and a DeleteObjects request with a literal CR deletes the LF form
-(answering Deleted) and leaves the key with CR in place. A key with LF cannot be
-stored at all: no route matches the path, and PutObject gets 400 InvalidURI.
+A DeleteObjects request cannot carry such a key: its body is XML, and a reference to
+one of those characters (`&#x1;`, `&#0;`, `&#xFFFE;`), like one to a surrogate or to a
+code point above U+10FFFF, is not well-formed (XML 1.0, section 4.1, "Legal
+Character": "Characters referred to using character references MUST match the
+production for Char"). It gets 400 MalformedXML, as does any body that is not
+well-formed XML or not UTF-8 (an empty body, markup that does not nest, an undefined
+entity, entity expansion beyond the parser's limits), and nothing in the request is
+deleted. Such a key is removed with DeleteObject (`DELETE /{bucket}/{key}`, percent-encoded),
+not with DeleteObjects. References to allowed
+characters work and decode to those characters: `&#9;`, `&#10;`, `&#13;`,
+`&#x1F600;`, `&#xE000;`, `&#x10FFFF;` and the five predefined entities.
+
+A key with CR is stored. XML parsers turn a CR written literally into LF (XML 1.0,
+section 2.11), so there are two effects. In a listing, the key is shown with LF
+instead. In DeleteObjects, a literal CR in a `<Key>` names the LF form: the request
+deletes the key with LF if there is one, answers Deleted either way, and leaves the
+key with CR in place. A reference does name it: `&#13;` is a CR that survives parsing
+(AWS's DeleteObjects reference uses it for this, in "DeleteObjects containing a
+carriage return"), so a key with CR can be deleted that way, and a key with LF next to
+it is left alone. Clients that write the key into the body unescaped, botocore among
+them, cannot delete a key with CR. Litmus also writes the key into its own response
+unescaped, so the `Deleted` entry for a CR key carries a literal CR, which a client's
+parser reads as LF. A key with LF cannot be stored at all: no route matches the path,
+and PutObject gets 400 InvalidURI.
+
+**DeleteObjects body, beyond well-formedness.** Only well-formedness is checked. A body
+that is well-formed but is not a `Delete` document is not refused: a different root
+element, or no `Object` elements, answers 200 with an empty `DeleteResult`, and an
+`Object` without a `Key` answers `Deleted` with an empty key and deletes nothing. S3
+answers MalformedXML for these. `Quiet` is ignored: every key is reported. An internal
+DTD entity (`<!ENTITY e "x">`) is expanded, within the parser's limits.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
 keys with `.` or `..` segments. Clients that resolve dot segments before sending
@@ -526,7 +551,9 @@ botocore refuses that body for the same reason, so it takes a hand-written reque
 one: no other path in Litmus stores an empty key.
 
 **Empty Complete body.** CompleteMultipartUpload with an empty body gets 500, because
-the body is not parsed as XML. S3 answers 400 MalformedXML.
+the body is not parsed as XML. S3 answers 400 MalformedXML. So does any other body
+that is not well-formed XML or not UTF-8: Complete has its own parser, which still
+lets the error escape, though DeleteObjects now answers 400 for the same bodies.
 
 **Multipart details.** Content-Type and user metadata given to CreateMultipartUpload
 are not applied to the object. The minimum part size is not enforced. `partNumber`

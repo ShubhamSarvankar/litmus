@@ -8,6 +8,7 @@ from fastapi.responses import Response
 
 from server.api.continuation_tokens import decode_token, encode_token
 from server.api.request_guard import NULL_VERSION_ID
+from server.api.request_xml import parse_request_xml
 from server.bucket_names import bucket_name_violation
 from server.config import settings
 from server.crash_points import (
@@ -328,7 +329,7 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     body = await request.body()
-    root = ET.fromstring(body.decode())
+    root = parse_request_xml(body)
     # boto3 sends XML with the S3 namespace — strip it for robust findall
     ns = "http://s3.amazonaws.com/doc/2006-03-01/"
 

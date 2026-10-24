@@ -119,6 +119,14 @@ class InvalidURI(S3Error):
     message = "Couldn't parse the specified URI."
 
 
+class MalformedXML(S3Error):
+    status_code = 400
+    code = "MalformedXML"
+    message = (
+        "The XML you provided was not well-formed or did not validate against our published schema"
+    )
+
+
 class InvalidRequest(S3Error):
     status_code = 400
     code = "InvalidRequest"
