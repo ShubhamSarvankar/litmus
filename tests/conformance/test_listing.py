@@ -5,6 +5,7 @@ prefix is an exact, case sensitive prefix of the key: _ and % are ordinary
 characters, and keys are listed in UTF-8 byte order.
 """
 
+import base64
 import random
 import sqlite3
 import uuid
@@ -381,4 +382,198 @@ def test_v1_pages_concatenate_to_unpaged_listing(client, seed):
             assert _v1_entries(_v1(client, **params)[0]) == expected, (prefix, delimiter)
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
                 got = _v1_all_pages(client, prefix, delimiter, max_keys)
+                assert got == expected, (prefix, delimiter, max_keys)
+
+
+# --- ListObjectsV2: continuation-token, start-after, KeyCount, fetch-owner ---
+
+
+def _v2(client, expect=200, **params):
+    resp = client.get(f"/{BUCKET}", params={"list-type": "2", **params})
+    assert resp.status_code == expect, resp.text
+    root = ET.fromstring(resp.text)
+    return root, _contents(root), _common_prefixes(root)
+
+
+def test_v2_delimiter_and_key_count(client):
+    _put(client, ["foo/bar", "foo/bar/xyzzy", "quux/thud", "asdf"])
+    root, keys, prefixes = _v2(client, delimiter="/")
+    assert (keys, prefixes) == (["asdf"], ["foo/", "quux/"])
+    assert root.findtext("Delimiter") == "/"
+    # KeyCount counts common prefixes as well as keys.
+    assert root.findtext("KeyCount") == "3"
+
+
+def test_v2_key_count_of_only_common_prefixes(client):
+    _put(client, ["p/a/1", "p/b/2"])
+    root, keys, prefixes = _v2(client, prefix="p/", delimiter="/")
+    assert (keys, prefixes) == ([], ["p/a/", "p/b/"])
+    assert root.findtext("KeyCount") == "2"
+
+
+def test_v2_max_keys(client):
+    _put(client, ["bar", "baz", "foo", "quxx"])
+    root, keys, _ = _v2(client, **{"max-keys": "1"})
+    assert keys == ["bar"]
+    assert (root.findtext("IsTruncated"), root.findtext("KeyCount")) == ("true", "1")
+    assert root.findtext("NextContinuationToken")
+    root, keys, _ = _v2(client, **{"max-keys": "0"})
+    assert keys == []
+    assert (root.findtext("IsTruncated"), root.findtext("KeyCount")) == ("false", "0")
+    assert root.find("NextContinuationToken") is None
+    assert _v2(client)[0].findtext("MaxKeys") == "1000"
+    assert _v2(client, **{"max-keys": "2000"})[0].findtext("MaxKeys") == "1000"
+    resp = client.get(f"/{BUCKET}", params={"list-type": "2", "max-keys": "x"})
+    assert resp.status_code == 400
+    assert ET.fromstring(resp.text).findtext("Code") == "InvalidArgument"
+
+
+def test_v2_continuation_token_pages(client):
+    _put(client, ["bar", "baz", "foo", "quxx"])
+    root, keys, _ = _v2(client, **{"max-keys": "2"})
+    assert keys == ["bar", "baz"]
+    token = root.findtext("NextContinuationToken")
+    root, keys, _ = _v2(client, **{"continuation-token": token})
+    assert keys == ["foo", "quxx"]
+    assert root.findtext("ContinuationToken") == token
+    assert root.findtext("IsTruncated") == "false"
+    assert root.find("NextContinuationToken") is None
+
+
+def test_v2_token_carries_restart_after_common_prefix(client):
+    # The page ends on a common prefix; the token must restart past every key under
+    # it, even when the next request names no delimiter at all.
+    _put(client, ["a", "b/1", "b/2", "b/3", "c"])
+    root, keys, prefixes = _v2(client, delimiter="/", **{"max-keys": "2"})
+    assert (keys, prefixes) == (["a"], ["b/"])
+    token = root.findtext("NextContinuationToken")
+    assert _v2(client, delimiter="/", **{"continuation-token": token})[1:] == (["c"], [])
+    assert _v2(client, **{"continuation-token": token})[1:] == (["c"], [])
+
+
+def test_v2_token_round_trips_non_ascii_keys(client):
+    keys = ["é/1", "é/2", "日本", "\U0001f600", "\U0010ffff", "\U0010ffff/x"]
+    _put(client, keys)
+    got, token = [], None
+    while True:
+        params = {"max-keys": "1"}
+        if token:
+            params["continuation-token"] = token
+        root, page, _ = _v2(client, **params)
+        got += page
+        token = root.findtext("NextContinuationToken")
+        if root.findtext("IsTruncated") == "false":
+            break
+    assert got == sorted(keys, key=lambda k: k.encode("utf-8"))
+
+
+def test_v2_empty_continuation_token(client):
+    _put(client, ["bar", "baz"])
+    root, keys, _ = _v2(client, **{"continuation-token": ""})
+    assert root.findtext("ContinuationToken") == ""
+    assert keys == ["bar", "baz"]
+
+
+@pytest.mark.parametrize("token", ["x", "!!", "bm90IGpzb24=", "eyJ2IjoxfQ=="])
+def test_v2_malformed_continuation_token(client, token):
+    resp = client.get(f"/{BUCKET}", params={"list-type": "2", "continuation-token": token})
+    assert resp.status_code == 400
+    root = ET.fromstring(resp.text)
+    assert root.findtext("Code") == "InvalidArgument"
+    assert root.findtext("ArgumentName") == "continuation-token"
+
+
+def test_v2_lone_surrogate_in_token_is_invalid_argument(client):
+    raw = b'{"v":1,"after":"\\ud800"}'
+    token = base64.urlsafe_b64encode(raw).decode()
+    resp = client.get(f"/{BUCKET}", params={"list-type": "2", "continuation-token": token})
+    assert resp.status_code == 400
+
+
+def test_v2_start_after(client):
+    _put(client, ["bar", "baz", "foo", "quxx"])
+    root, keys, _ = _v2(client, **{"start-after": "blah"})
+    assert root.findtext("StartAfter") == "blah"
+    assert keys == ["foo", "quxx"]
+    assert _v2(client, **{"start-after": "zzz"})[1] == []
+    assert _v2(client, **{"start-after": "\n"})[1] == ["bar", "baz", "foo", "quxx"]
+    assert _v2(client)[0].find("StartAfter") is None
+
+
+@pytest.mark.parametrize("start_after", ["a/", "a/1", "a/2/x"])
+def test_v2_start_after_at_or_inside_common_prefix_skips_it(client, start_after):
+    # S3: CommonPrefixes is filtered out if it is not lexicographically greater than
+    # the StartAfter value.
+    _put(client, ["a/1", "a/2/x", "a0", "b/1"])
+    root, keys, prefixes = _v2(client, delimiter="/", **{"start-after": start_after})
+    assert (keys, prefixes) == (["a0"], ["b/"])
+
+
+def test_v2_continuation_token_takes_precedence_over_start_after(client):
+    _put(client, ["bar", "baz", "foo", "quxx"])
+    root = _v2(client, **{"start-after": "bar", "max-keys": "1"})[0]
+    token = root.findtext("NextContinuationToken")  # restarts after "baz"
+    # Same start-after as the first request (ceph's case).
+    root, keys, _ = _v2(client, **{"start-after": "bar", "continuation-token": token})
+    assert keys == ["foo", "quxx"]
+    assert root.findtext("StartAfter") == "bar"
+    assert root.findtext("ContinuationToken") == token
+    # A start-after beyond the token's position does not move it, and one before it
+    # does not move it back: the token decides where the page starts.
+    assert _v2(client, **{"start-after": "foo", "continuation-token": token})[1] == ["foo", "quxx"]
+    assert _v2(client, **{"start-after": "a", "continuation-token": token})[1] == ["foo", "quxx"]
+
+
+def test_v2_fetch_owner(client, monkeypatch):
+    monkeypatch.setattr(settings, "owner_id", "owner-id")
+    monkeypatch.setattr(settings, "owner_display_name", "Owner Name")
+    _put(client, ["a"])
+    for params in ({}, {"fetch-owner": "false"}, {"fetch-owner": ""}):
+        assert _v2(client, **params)[0].find("Contents/Owner") is None
+    for value in ("true", "True", "TRUE"):
+        root = _v2(client, **{"fetch-owner": value})[0]
+        assert root.findtext("Contents/Owner/ID") == "owner-id"
+        assert root.findtext("Contents/Owner/DisplayName") == "Owner Name"
+
+
+def _v2_entries(root):
+    return _v1_entries(root)
+
+
+def _v2_all_pages(client, prefix, delimiter, max_keys):
+    """Page with continuation tokens only: no start-after and no marker."""
+    entries, token = [], None
+    for _ in range(1000):
+        params = {"prefix": prefix, "max-keys": str(max_keys)}
+        if delimiter:
+            params["delimiter"] = delimiter
+        if token is not None:
+            params["continuation-token"] = token
+        root = _v2(client, **params)[0]
+        page = _v2_entries(root)
+        assert int(root.findtext("KeyCount")) == len(page) <= max_keys
+        entries += page
+        if root.findtext("IsTruncated") == "false":
+            assert root.find("NextContinuationToken") is None
+            return entries
+        assert page, "a truncated page must not be empty"
+        token = root.findtext("NextContinuationToken")
+    raise AssertionError("paging did not end")
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_v2_pages_concatenate_to_unpaged_listing(client, seed):
+    keys = _random_keys(seed)
+    _put(client, keys)
+    rng = random.Random(seed)
+    prefixes = ["", "x", "X", "%", "\U0010ffff"] + [k[:2] for k in rng.sample(keys, 2)]
+    for prefix in prefixes:
+        for delimiter in _DELIMITERS:
+            expected = _expected_listing(keys, prefix, delimiter)
+            params = {"prefix": prefix}
+            if delimiter:
+                params["delimiter"] = delimiter
+            assert _v2_entries(_v2(client, **params)[0]) == expected, (prefix, delimiter)
+            for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
+                got = _v2_all_pages(client, prefix, delimiter, max_keys)
                 assert got == expected, (prefix, delimiter, max_keys)

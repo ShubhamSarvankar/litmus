@@ -68,6 +68,10 @@ class InvalidArgument(S3Error):
     message = "Invalid Argument"
 
 
+class InvalidContinuationToken(InvalidArgument):
+    message = "The continuation token provided is incorrect"
+
+
 class InvalidBucketName(S3Error):
     status_code = 400
     code = "InvalidBucketName"

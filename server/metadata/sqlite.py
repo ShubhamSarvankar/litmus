@@ -539,7 +539,13 @@ class SQLiteMetadataStore:
             return [_object(r) for r in conn.execute(sql, params).fetchall()]
 
     def list_page(
-        self, bucket: str, prefix: str, delimiter: str, marker: str, max_keys: int
+        self,
+        bucket: str,
+        prefix: str,
+        delimiter: str,
+        marker: str,
+        max_keys: int,
+        start_at: str | None = None,
     ) -> ListPage:
         """One listing page (docs/design/storage-layout.md §13): keys and common prefixes
         after marker, in key order, at most max_keys of them together, read in one
@@ -550,16 +556,21 @@ class SQLiteMetadataStore:
         ListObjects), so a marker equal to or inside a common prefix skips every key
         under it. After returning a common prefix, the next read starts at its
         successor, past every key under it.
+
+        start_at, when given, replaces marker: the page starts at that key, inclusive.
+        It is the restart position of an earlier page (ListPage.restart_at).
         """
         page = ListPage()
         if max_keys <= 0:
             return page
-        start_after, start_at = marker or None, None
-        marker_prefix = common_prefix(marker, prefix, delimiter) if marker else None
-        if marker_prefix is not None:
-            start_after, start_at = None, key_successor(marker_prefix)
-            if start_at is None:
-                return page
+        start_after = None
+        if start_at is None and marker:
+            start_after = marker
+            marker_prefix = common_prefix(marker, prefix, delimiter)
+            if marker_prefix is not None:
+                start_after, start_at = None, key_successor(marker_prefix)
+                if start_at is None:
+                    return page
         with self._snapshot() as conn:
             while True:
                 # One row more than the page still needs, to tell whether it is truncated.
@@ -576,11 +587,13 @@ class SQLiteMetadataStore:
                     if rolled_up is None:
                         page.objects.append(_object(row))
                         page.next_marker = key
+                        page.restart_after, page.restart_at = key, None
                         start_after = key
                         continue
                     page.common_prefixes.append(rolled_up)
                     page.next_marker = rolled_up
                     skipped_to = key_successor(rolled_up)
+                    page.restart_after, page.restart_at = None, skipped_to
                     break
                 else:
                     if len(rows) < limit:

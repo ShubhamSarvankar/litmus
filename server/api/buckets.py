@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from server.api.continuation_tokens import decode_token, encode_token
 from server.api.request_guard import NULL_VERSION_ID
 from server.config import settings
 from server.crash_points import (
@@ -64,6 +65,11 @@ def _list_objects_xml(
     # from the last Key.
     if delimiter and page.is_truncated:
         ET.SubElement(root, "NextMarker").text = page.next_marker
+    _page_entries(root, page, owner=True)
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _page_entries(root: ET.Element, page: ListPage, owner: bool) -> None:
     for obj in page.objects:
         contents = ET.SubElement(root, "Contents")
         ET.SubElement(contents, "Key").text = obj.key
@@ -73,10 +79,10 @@ def _list_objects_xml(
             "%Y-%m-%dT%H:%M:%S.000Z"
         )
         ET.SubElement(contents, "StorageClass").text = "STANDARD"
-        _owner_element(contents)
+        if owner:
+            _owner_element(contents)
     for common in page.common_prefixes:
         ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = common
-    return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
 def _max_keys(params) -> int:
@@ -90,22 +96,34 @@ def _max_keys(params) -> int:
     return min(int(raw), MAX_KEYS)
 
 
-def _list_objects_v2_xml(bucket: str, objects: list, prefix: str = "") -> str:
+def _list_objects_v2_xml(
+    bucket: str,
+    page: ListPage,
+    params,
+    prefix: str,
+    delimiter: str,
+    max_keys: int,
+    fetch_owner: bool,
+) -> str:
     root = ET.Element("ListBucketResult")
     ET.SubElement(root, "Name").text = bucket
     ET.SubElement(root, "Prefix").text = prefix
-    ET.SubElement(root, "KeyCount").text = str(len(objects))
-    ET.SubElement(root, "MaxKeys").text = "1000"
-    ET.SubElement(root, "IsTruncated").text = "false"
-    for obj in objects:
-        contents = ET.SubElement(root, "Contents")
-        ET.SubElement(contents, "Key").text = obj.key
-        ET.SubElement(contents, "ETag").text = obj.etag
-        ET.SubElement(contents, "Size").text = str(obj.size)
-        ET.SubElement(contents, "LastModified").text = obj.last_modified.strftime(
-            "%Y-%m-%dT%H:%M:%S.000Z"
+    # StartAfter and ContinuationToken are echoed when sent, even empty.
+    if "start-after" in params:
+        ET.SubElement(root, "StartAfter").text = params["start-after"]
+    if "continuation-token" in params:
+        ET.SubElement(root, "ContinuationToken").text = params["continuation-token"]
+    # KeyCount counts keys and common prefixes, as max-keys does.
+    ET.SubElement(root, "KeyCount").text = str(page.count)
+    ET.SubElement(root, "MaxKeys").text = str(max_keys)
+    if delimiter:
+        ET.SubElement(root, "Delimiter").text = delimiter
+    ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
+    if page.is_truncated:
+        ET.SubElement(root, "NextContinuationToken").text = encode_token(
+            page.restart_after, page.restart_at
         )
-        ET.SubElement(contents, "StorageClass").text = "STANDARD"
+    _page_entries(root, page, owner=fetch_owner)
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -162,18 +180,31 @@ async def list_objects(bucket: str, request: Request) -> Response:
 
     prefix = params.get("prefix", "")
 
-    # ListObjectsV2 (list-type=2)
+    # An empty delimiter is no delimiter.
+    max_keys = _max_keys(params)
+    delimiter = params.get("delimiter", "")
+
+    # ListObjectsV2 (list-type=2). A continuation token holds where the previous page
+    # ended and takes precedence over start-after, which is only echoed then. An
+    # empty token is no token.
     if params.get("list-type") == "2":
-        objects = metadata.list_objects(bucket, prefix=prefix or None)
+        token = params.get("continuation-token", "")
+        if token:
+            after, at = decode_token(token)
+            page = metadata.list_page(bucket, prefix, delimiter, after or "", max_keys, at)
+        else:
+            start_after = params.get("start-after", "")
+            page = metadata.list_page(bucket, prefix, delimiter, start_after, max_keys)
+        fetch_owner = params.get("fetch-owner", "").lower() == "true"
         return Response(
-            content=_list_objects_v2_xml(bucket, objects, prefix),
+            content=_list_objects_v2_xml(
+                bucket, page, params, prefix, delimiter, max_keys, fetch_owner
+            ),
             status_code=200,
             media_type="application/xml",
         )
 
-    # ListObjects V1. An empty delimiter is no delimiter.
-    max_keys = _max_keys(params)
-    delimiter = params.get("delimiter", "")
+    # ListObjects V1
     marker = params.get("marker", "")
     page = metadata.list_page(bucket, prefix, delimiter, marker, max_keys)
     return Response(

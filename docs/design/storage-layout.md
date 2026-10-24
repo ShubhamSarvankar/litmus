@@ -1149,8 +1149,13 @@ key>? AND key<?)` and no temporary B-tree, so rows come out in index order.
 
 **Pages.** A page is read in one read transaction, as a series of range reads in key
 order, each with a `LIMIT` of one row more than the page still needs, so the page knows
-whether it is truncated without reading further. A marker (and later a continuation
-token or start-after key) is a lower bound `key > :marker`.
+whether it is truncated without reading further. A marker or start-after key is a
+lower bound `key > :marker`. A ListObjectsV2 continuation token records the restart
+position itself: after the last key returned (`key > :key`), or, when the page ended
+on a common prefix, at that prefix's successor (`key >= :successor`). The next page
+therefore restarts correctly even if the follow-up request changes or drops the
+delimiter. The token is URL-safe base64 of a small JSON object, so it carries any key,
+and the server accepts only the exact encoding it produces.
 
 **Common prefixes and the restart after one.** With a delimiter, a key that contains
 the delimiter after the prefix rolls up into its common prefix: the key up to and

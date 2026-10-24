@@ -29,8 +29,13 @@ class ListPage:
     objects: list[ObjectMeta] = field(default_factory=list)
     common_prefixes: list[str] = field(default_factory=list)
     is_truncated: bool = False
-    # The last key or common prefix on the page, where the next page starts.
+    # The last key or common prefix on the page (V1's NextMarker).
     next_marker: str | None = None
+    # Where the next page starts: after this key, or at this key (inclusive) when the
+    # page ended on a common prefix, whose successor it is. Exactly one is set on a
+    # truncated page.
+    restart_after: str | None = None
+    restart_at: str | None = None
 
     @property
     def count(self) -> int:
@@ -154,10 +159,17 @@ class MetadataStore(Protocol):
     # start_after, in key order, at most limit of them.
 
     def list_page(
-        self, bucket: str, prefix: str, delimiter: str, marker: str, max_keys: int
+        self,
+        bucket: str,
+        prefix: str,
+        delimiter: str,
+        marker: str,
+        max_keys: int,
+        start_at: str | None = None,
     ) -> ListPage: ...
 
-    # One page of keys and common prefixes after marker, read in one read transaction.
+    # One page of keys and common prefixes after marker (or from start_at, inclusive),
+    # read in one read transaction.
 
     def create_upload(self, upload_id: str, bucket: str, key: str, initiated: datetime) -> None: ...
 

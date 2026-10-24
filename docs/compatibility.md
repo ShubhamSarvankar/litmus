@@ -56,12 +56,12 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**121 passed, 202 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**142 passed, 181 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
-table below, the ListObjects (V1) parameters moved 21 tests from failed to passed;
-nothing else changed.
+table below, the ListObjects (V1) parameters moved 21 tests from failed to passed, and
+the ListObjectsV2 parameters 21 more; nothing else changed.
 
 ### How the numbers moved from 115 of 325
 
@@ -97,7 +97,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 121 passes are incidental**
+is authenticated or owned. By that rule, **27 of the 142 passes are incidental**
 (classified before the delimiter was implemented; the listing entries are reviewed
 separately):
 
@@ -157,7 +157,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
 | ListObjects (V1) | 41 | 38 | 3 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation. Fail: `encoding-type` is ignored (1); `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
-| ListObjectsV2 | 39 | 16 | 23 | 0 | Listing and `prefix`. Fail: only `prefix` is applied; `delimiter`, `max-keys`, `continuation-token`, `start-after`, `fetch-owner`, `encoding-type` and `allow-unordered` are ignored and listings are never truncated. |
+| ListObjectsV2 | 39 | 37 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation. Fail: `encoding-type` is ignored (1); `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 2 | 2 | 0 | Bulk delete. Fail: the 1000-key limit is not enforced. |
 | Multipart upload | 14 | 8 | 6 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object. Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); Content-Type given to CreateMultipartUpload is not applied (1); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
@@ -172,7 +172,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **121** | **202** | **7** | |
+| **Total** | **330** | **142** | **181** | **7** | |
 
 ## Known gaps
 
@@ -199,11 +199,31 @@ prefix of the key (`_` and `%` are ordinary characters), read as an indexed key 
 and keys are listed in UTF-8 byte order. ListObjects (V1) applies `delimiter`,
 `max-keys` and `marker` as S3 does: common prefixes count toward `max-keys`, a common
 prefix is returned only if it sorts after the marker, and `NextMarker` appears only
-when a delimiter was given and the page is truncated. `MaxKeys` echoes the value
-applied (1000 for anything larger). `max-keys` must be a decimal integer; anything
-else, including an empty value, a sign or whitespace, is InvalidArgument. V1 ignores
-`encoding-type`. ListObjectsV2 and ListObjectVersions apply only `prefix`, and are never
-truncated.
+when a delimiter was given and the page is truncated. ListObjectsV2 applies the same
+`delimiter` and `max-keys` rules, with `start-after` in place of `marker`, and pages
+with `continuation-token`: an opaque token that records where the next page starts,
+including the restart after a common prefix, and round trips any key. A malformed token
+is InvalidArgument. `KeyCount` counts keys and common prefixes, and `Owner` appears
+only with `fetch-owner=true`. V1 and V2 ignore `encoding-type`. ListObjectVersions
+applies only `prefix`, and is never truncated.
+
+**Listing choices AWS does not document.** Where the AWS API reference is silent,
+Litmus does the following; each choice is covered by a conformance test.
+
+- `MaxKeys` in the response echoes the value applied, so a request for more than 1000
+  shows 1000. (ceph/s3-tests checks only the default, 1000.)
+- `max-keys` is parsed as ASCII digits only. An empty value, a sign (`-1`, `+1`),
+  whitespace, a decimal point, hex or non-ASCII digits are InvalidArgument; any
+  number of digits is accepted and capped at 1000.
+- With both `continuation-token` and `start-after`, the token decides where the page
+  starts and `start-after` is only echoed. The ListObjectsV2 reference says that
+  StartAfter is echoed when sent and that the token continues the listing, but not
+  which wins. `test_bucket_listv2_both_continuationtoken_startafter` passes under
+  either rule, because its token comes from a request with the same `start-after`.
+- An empty `continuation-token` is no token (and is echoed empty), as
+  `test_bucket_listv2_continuationtoken_empty` expects.
+- `fetch-owner` is true when its value is `true` in any letter case, and false
+  otherwise.
 
 **Characters XML 1.0 does not allow.** XML 1.0 allows tab, LF, CR, U+0020 to U+D7FF,
 U+E000 to U+FFFD and U+10000 to U+10FFFF. Litmus accepts keys with the other
