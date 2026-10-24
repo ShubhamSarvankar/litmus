@@ -72,6 +72,10 @@ class InvalidContinuationToken(InvalidArgument):
     message = "The continuation token provided is incorrect"
 
 
+class InvalidEncodingType(InvalidArgument):
+    message = "Invalid Encoding Method specified in Request"
+
+
 class InvalidBucketName(S3Error):
     status_code = 400
     code = "InvalidBucketName"

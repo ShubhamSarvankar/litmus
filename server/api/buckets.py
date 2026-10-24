@@ -1,5 +1,7 @@
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
@@ -16,6 +18,7 @@ from server.errors.s3errors import (
     BucketAlreadyExists,
     BucketNotEmpty,
     InvalidArgument,
+    InvalidEncodingType,
     NoSuchBucket,
     NotImplementedOperation,
 )
@@ -29,6 +32,33 @@ MAX_KEYS = 1000
 
 # Per-key conditions a DeleteObjects <Object> may carry (ObjectIdentifier).
 _CONDITIONAL_DELETE_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
+
+# The one encoding-type value S3 documents (ListObjects, ListObjectsV2 and
+# ListObjectVersions references: "Valid Values: url").
+URL_ENCODING = "url"
+
+
+def _url_encode(value: str) -> str:
+    """S3's url encoding type: every byte of the UTF-8 form is %XX except the
+    unreserved characters (A-Z a-z 0-9 - _ . ~) and "/". A space is %20 and "+" is
+    %2B, never a bare "+": botocore decodes with unquote_plus, which turns a bare "+"
+    into a space, so this is the only encoding it round trips."""
+    return quote(value, safe="/")
+
+
+def _identity(value: str) -> str:
+    return value
+
+
+def _encoder(params) -> Callable[[str], str] | None:
+    """The key encoder for a listing, or None without encoding-type. Only "url" is
+    valid; an empty value is treated as absent, like an empty delimiter."""
+    raw = params.get("encoding-type", "")
+    if raw == "":
+        return None
+    if raw != URL_ENCODING:
+        raise InvalidEncodingType(extra={"ArgumentName": "encoding-type", "ArgumentValue": raw})
+    return _url_encode
 
 
 def _owner_element(parent: ET.Element) -> None:
@@ -51,28 +81,40 @@ def _list_buckets_xml(buckets) -> str:
 
 
 def _list_objects_xml(
-    bucket: str, page: ListPage, prefix: str, delimiter: str, marker: str, max_keys: int
+    bucket: str,
+    page: ListPage,
+    prefix: str,
+    delimiter: str,
+    marker: str,
+    max_keys: int,
+    encode: Callable[[str], str] | None,
 ) -> str:
+    """With encoding-type=url, the encoded elements are Marker, NextMarker,
+    Delimiter, Key and CommonPrefixes/Prefix: the elements botocore decodes for
+    ListObjects. Prefix is not encoded (docs/compatibility.md, listing choices)."""
+    enc = encode or _identity
     root = ET.Element("ListBucketResult")
     ET.SubElement(root, "Name").text = bucket
     ET.SubElement(root, "Prefix").text = prefix
-    ET.SubElement(root, "Marker").text = marker
+    ET.SubElement(root, "Marker").text = enc(marker)
     ET.SubElement(root, "MaxKeys").text = str(max_keys)
     if delimiter:
-        ET.SubElement(root, "Delimiter").text = delimiter
+        ET.SubElement(root, "Delimiter").text = enc(delimiter)
     ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
     # S3 returns NextMarker only with a delimiter; without one, a client continues
     # from the last Key.
     if delimiter and page.is_truncated:
-        ET.SubElement(root, "NextMarker").text = page.next_marker
-    _page_entries(root, page, owner=True)
+        ET.SubElement(root, "NextMarker").text = enc(page.next_marker)
+    if encode:
+        ET.SubElement(root, "EncodingType").text = URL_ENCODING
+    _page_entries(root, page, owner=True, enc=enc)
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _page_entries(root: ET.Element, page: ListPage, owner: bool) -> None:
+def _page_entries(root: ET.Element, page: ListPage, owner: bool, enc: Callable[[str], str]) -> None:
     for obj in page.objects:
         contents = ET.SubElement(root, "Contents")
-        ET.SubElement(contents, "Key").text = obj.key
+        ET.SubElement(contents, "Key").text = enc(obj.key)
         ET.SubElement(contents, "ETag").text = obj.etag
         ET.SubElement(contents, "Size").text = str(obj.size)
         ET.SubElement(contents, "LastModified").text = obj.last_modified.strftime(
@@ -82,7 +124,7 @@ def _page_entries(root: ET.Element, page: ListPage, owner: bool) -> None:
         if owner:
             _owner_element(contents)
     for common in page.common_prefixes:
-        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = common
+        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = enc(common)
 
 
 def _max_keys(params) -> int:
@@ -104,26 +146,33 @@ def _list_objects_v2_xml(
     delimiter: str,
     max_keys: int,
     fetch_owner: bool,
+    encode: Callable[[str], str] | None,
 ) -> str:
+    """With encoding-type=url, the encoded elements are Delimiter, Prefix, Key,
+    StartAfter (the ListObjectsV2 reference) and CommonPrefixes/Prefix. The tokens
+    are opaque and never encoded."""
+    enc = encode or _identity
     root = ET.Element("ListBucketResult")
     ET.SubElement(root, "Name").text = bucket
-    ET.SubElement(root, "Prefix").text = prefix
+    ET.SubElement(root, "Prefix").text = enc(prefix)
     # StartAfter and ContinuationToken are echoed when sent, even empty.
     if "start-after" in params:
-        ET.SubElement(root, "StartAfter").text = params["start-after"]
+        ET.SubElement(root, "StartAfter").text = enc(params["start-after"])
     if "continuation-token" in params:
         ET.SubElement(root, "ContinuationToken").text = params["continuation-token"]
     # KeyCount counts keys and common prefixes, as max-keys does.
     ET.SubElement(root, "KeyCount").text = str(page.count)
     ET.SubElement(root, "MaxKeys").text = str(max_keys)
     if delimiter:
-        ET.SubElement(root, "Delimiter").text = delimiter
+        ET.SubElement(root, "Delimiter").text = enc(delimiter)
     ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
     if page.is_truncated:
         ET.SubElement(root, "NextContinuationToken").text = encode_token(
             page.restart_after, page.restart_at
         )
-    _page_entries(root, page, owner=fetch_owner)
+    if encode:
+        ET.SubElement(root, "EncodingType").text = URL_ENCODING
+    _page_entries(root, page, owner=fetch_owner, enc=enc)
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -135,27 +184,33 @@ def _list_versions_xml(
     key_marker: str,
     version_id_marker: str,
     max_keys: int,
+    encode: Callable[[str], str] | None,
 ) -> str:
     """Every bucket is unversioned: each key has one version, "null", which is the
-    latest."""
+    latest. With encoding-type=url, the encoded elements are KeyMarker,
+    NextKeyMarker, Prefix, Key, Delimiter (the ListObjectVersions reference) and
+    CommonPrefixes/Prefix; version IDs are never encoded."""
+    enc = encode or _identity
     root = ET.Element("ListVersionsResult")
     ET.SubElement(root, "Name").text = bucket
-    ET.SubElement(root, "Prefix").text = prefix
-    ET.SubElement(root, "KeyMarker").text = key_marker
+    ET.SubElement(root, "Prefix").text = enc(prefix)
+    ET.SubElement(root, "KeyMarker").text = enc(key_marker)
     ET.SubElement(root, "VersionIdMarker").text = version_id_marker
     ET.SubElement(root, "MaxKeys").text = str(max_keys)
     if delimiter:
-        ET.SubElement(root, "Delimiter").text = delimiter
+        ET.SubElement(root, "Delimiter").text = enc(delimiter)
     ET.SubElement(root, "IsTruncated").text = "true" if page.is_truncated else "false"
     if page.is_truncated:
         # The last key or common prefix returned, and the last version returned; a
         # page that ended on a common prefix returned no version after it.
-        ET.SubElement(root, "NextKeyMarker").text = page.next_marker
+        ET.SubElement(root, "NextKeyMarker").text = enc(page.next_marker)
         if page.restart_after is not None:
             ET.SubElement(root, "NextVersionIdMarker").text = NULL_VERSION_ID
+    if encode:
+        ET.SubElement(root, "EncodingType").text = URL_ENCODING
     for obj in page.objects:
         ver = ET.SubElement(root, "Version")
-        ET.SubElement(ver, "Key").text = obj.key
+        ET.SubElement(ver, "Key").text = enc(obj.key)
         ET.SubElement(ver, "VersionId").text = NULL_VERSION_ID
         ET.SubElement(ver, "IsLatest").text = "true"
         ET.SubElement(ver, "ETag").text = obj.etag
@@ -166,7 +221,7 @@ def _list_versions_xml(
         ET.SubElement(ver, "StorageClass").text = "STANDARD"
         _owner_element(ver)
     for common in page.common_prefixes:
-        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = common
+        ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = enc(common)
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -193,6 +248,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
     # An empty delimiter is no delimiter.
     max_keys = _max_keys(params)
     delimiter = params.get("delimiter", "")
+    encode = _encoder(params)
 
     # ListObjectVersions. Each key's only version is "null", so a page resumes after
     # (key-marker, version-id-marker) by starting after key-marker, with V1's marker
@@ -212,7 +268,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
         page = metadata.list_page(bucket, prefix, delimiter, key_marker, max_keys)
         return Response(
             content=_list_versions_xml(
-                bucket, page, prefix, delimiter, key_marker, version_id_marker, max_keys
+                bucket, page, prefix, delimiter, key_marker, version_id_marker, max_keys, encode
             ),
             status_code=200,
             media_type="application/xml",
@@ -232,7 +288,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
         fetch_owner = params.get("fetch-owner", "").lower() == "true"
         return Response(
             content=_list_objects_v2_xml(
-                bucket, page, params, prefix, delimiter, max_keys, fetch_owner
+                bucket, page, params, prefix, delimiter, max_keys, fetch_owner, encode
             ),
             status_code=200,
             media_type="application/xml",
@@ -242,7 +298,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
     marker = params.get("marker", "")
     page = metadata.list_page(bucket, prefix, delimiter, marker, max_keys)
     return Response(
-        content=_list_objects_xml(bucket, page, prefix, delimiter, marker, max_keys),
+        content=_list_objects_xml(bucket, page, prefix, delimiter, marker, max_keys, encode),
         status_code=200,
         media_type="application/xml",
     )

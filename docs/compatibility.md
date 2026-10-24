@@ -56,14 +56,18 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**142 passed, 181 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**144 passed, 179 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
 table below, the ListObjects (V1) parameters moved 21 tests from failed to passed, and
 the ListObjectsV2 parameters 21 more; the ListObjectVersions parameters changed no
 outcome (every selected versions test is skipped), though every test's teardown now
-pages through ListObjectVersions; nothing else changed.
+pages through ListObjectVersions; `encoding-type=url` moved 2 more
+(`test_bucket_list_encoding_basic` and `test_bucket_listv2_encoding_basic`). Nothing
+else changed, although botocore sends `encoding-type=url` on every listing it builds,
+so every selected test that lists a bucket, and every teardown, now reads encoded keys
+and decodes them.
 
 ### How the numbers moved from 115 of 325
 
@@ -158,8 +162,8 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 4 | 2 | 0 | Single, open-ended and suffix ranges. Fail: an unsatisfiable range gets 416 without the `InvalidRange` error body. |
-| ListObjects (V1) | 41 | 38 | 3 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation. Fail: `encoding-type` is ignored (1); `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
-| ListObjectsV2 | 39 | 37 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation. Fail: `encoding-type` is ignored (1); `allow-unordered`, an RGW extension, is not implemented (1). |
+| ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
+| ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 2 | 2 | 0 | Bulk delete. Fail: the 1000-key limit is not enforced. |
 | Multipart upload | 14 | 8 | 6 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object. Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); Content-Type given to CreateMultipartUpload is not applied (1); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
@@ -174,7 +178,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **142** | **181** | **7** | |
+| **Total** | **330** | **144** | **179** | **7** | |
 
 ## Known gaps
 
@@ -212,8 +216,40 @@ starts after the key-marker (with V1's rule for a key-marker equal to or inside 
 common prefix), and a truncated page returns `NextKeyMarker`, the last key or common
 prefix returned, and `NextVersionIdMarker`, the last version returned. Every bucket is
 unversioned, so each key appears once, as version `null`, latest, with the configured
-`Owner`; `KeyMarker` and `VersionIdMarker` are always echoed. All three listings ignore
-`encoding-type`.
+`Owner`; `KeyMarker` and `VersionIdMarker` are always echoed.
+
+**`encoding-type=url`.** All three listings accept `encoding-type=url`, echo
+`<EncodingType>url</EncodingType>`, and write the key-valued elements url-encoded: every
+byte of the UTF-8 form is `%XX` except the unreserved characters (`A-Z a-z 0-9 - _ . ~`)
+and `/`, so a space is `%20`, `+` is `%2B` and `test_file(3).png` is
+`test_file%283%29.png` (the reference's example). This is the encoding botocore inverts:
+it sends `encoding-type=url` on every ListObjects, ListObjectsV2 and ListObjectVersions
+request it builds, and, when `EncodingType` is echoed, decodes with `unquote_plus`,
+which turns a bare `+` into a space; so `+` must be `%2B`. The elements encoded per
+operation are the ones botocore decodes (`botocore/handlers.py`, `decode_list_object`,
+`decode_list_object_v2`, `decode_list_object_versions`), which match the lists in the
+ListObjectsV2 and ListObjectVersions references except where noted below:
+
+- ListObjects (V1): `Marker`, `NextMarker`, `Delimiter`, `Contents/Key`,
+  `CommonPrefixes/Prefix`. Not `Prefix`: the current ListObjects reference lists no
+  elements for `EncodingType`; the older wording botocore quotes in its source listed
+  "Delimiter, Marker, Prefix, NextMarker, Key", but botocore does not decode `Prefix`
+  for ListObjects (it does for the other two), so an encoded V1 `Prefix` would reach
+  every boto3 caller percent-encoded, and ceph's RGW does not encode it either. A V1
+  `prefix` with a character XML 1.0 forbids therefore still makes the response
+  ill-formed, with or without `encoding-type`.
+- ListObjectsV2: `Prefix`, `Delimiter`, `StartAfter`, `Contents/Key`,
+  `CommonPrefixes/Prefix` (the reference: "Delimiter, Prefix, Key, and StartAfter").
+  `ContinuationToken` and `NextContinuationToken` are opaque and never encoded; the
+  older reference wording listed `ContinuationToken`, botocore does not decode it.
+- ListObjectVersions: `KeyMarker`, `NextKeyMarker`, `Prefix`, `Delimiter`,
+  `Version/Key`, `CommonPrefixes/Prefix` (the reference: "KeyMarker, NextKeyMarker,
+  Prefix, Key, and Delimiter"). `VersionIdMarker` and `NextVersionIdMarker` are not
+  encoded.
+
+In all three, `CommonPrefixes/Prefix` is encoded because botocore decodes it and
+`test_bucket_list_encoding_basic` expects it; the references name only "Prefix". Without
+`encoding-type` nothing is encoded and no `EncodingType` element is returned.
 
 **Listing choices AWS does not document.** Where the AWS API reference is silent,
 Litmus does the following; each choice is covered by a conformance test.
@@ -242,6 +278,14 @@ Litmus does the following; each choice is covered by a conformance test.
   gets 501, as other version IDs do. An empty one is no marker.
 - `fetch-owner` is true when its value is `true` in any letter case, and false
   otherwise.
+- `encoding-type` accepts exactly `url`, the one value the references list ("Valid
+  Values: url"). Any other value, including `URL`, is 400 InvalidArgument with
+  `ArgumentName` `encoding-type` and `ArgumentValue` the value sent; the message,
+  "Invalid Encoding Method specified in Request", is the one S3 sends, as reproduced
+  in MinIO's error table (`ErrInvalidEncodingMethod`); the AWS references document
+  only the valid value. An empty `encoding-type` is treated as absent, like an empty
+  delimiter. (RGW ignores any value but `url`, case-insensitively, and encodes
+  nothing.)
 
 **Characters XML 1.0 does not allow.** XML 1.0 allows tab, LF, CR, U+0020 to U+D7FF,
 U+E000 to U+FFFD and U+10000 to U+10FFFF. Litmus accepts keys with the other
@@ -251,8 +295,11 @@ a value is not well-formed XML. Checked against a running server with U+0000, U+
 U+0008, U+000B, U+000C, U+001F, U+FFFE and U+FFFF in a key or parameter, these
 responses do not parse:
 
-- ListObjects, ListObjectsV2 and ListObjectVersions with such a key in the bucket
-  (`Key`), and ListObjects with such a `prefix`, `marker` or `delimiter` (echoed);
+- ListObjects, ListObjectsV2 and ListObjectVersions without `encoding-type=url` with
+  such a key in the bucket (`Key`) or such a `prefix`, `marker`, `start-after`,
+  `key-marker` or `delimiter` (echoed). With `encoding-type=url` these elements are
+  `%XX` strings and the response parses, except the ListObjects `Prefix`, which is
+  never encoded (see above);
 - InitiateMultipartUpload and CompleteMultipartUpload results (`Key`);
 - NoSuchKey errors from GetObject (`Key`), NoSuchBucket errors (`BucketName`), and
   the InvalidArgument error for `max-keys` (`ArgumentValue`).

@@ -2,7 +2,8 @@
 Listing conformance tests: ListObjects (V1), ListObjectsV2 and ListObjectVersions.
 
 prefix is an exact, case sensitive prefix of the key: _ and % are ordinary
-characters, and keys are listed in UTF-8 byte order.
+characters, and keys are listed in UTF-8 byte order. encoding-type=url encodes the
+key-valued elements the way botocore decodes them.
 """
 
 import base64
@@ -11,11 +12,12 @@ import sqlite3
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote_plus
 
 import pytest
 from fastapi.testclient import TestClient
 
+from server.api.continuation_tokens import encode_token
 from server.app import create_app
 from server.config import settings
 from server.metadata.sqlite import SQLiteMetadataStore
@@ -733,3 +735,177 @@ def test_versions_pages_concatenate_to_unpaged_listing(client, seed):
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
                 got = _versions_all_pages(client, prefix, delimiter, max_keys)
                 assert got == expected, (prefix, delimiter, max_keys)
+
+
+# --- encoding-type=url ---
+#
+# botocore sends encoding-type=url on every listing and decodes the encoded elements
+# with unquote_plus whenever EncodingType is echoed, so the encoding must be exactly
+# what unquote_plus inverts: %20 for a space and %2B for "+", never a bare "+". The
+# encoded elements per operation follow the ListObjectsV2 and ListObjectVersions
+# references and botocore's decoders (docs/compatibility.md).
+
+# Each key with its url encoding: the unreserved characters and "/" stay, every other
+# byte of the UTF-8 form is %XX (AWS's example: test_file(3).png).
+ENCODED_KEYS = [
+    ("a b", "a%20b"),
+    ("a+b", "a%2Bb"),
+    ("100%", "100%25"),
+    ("a/b", "a/b"),
+    ("é/日", "%C3%A9/%E6%97%A5"),
+    ("test_file(3).png", "test_file%283%29.png"),
+    ("-_.~", "-_.~"),
+    ("q?x#y&z=w", "q%3Fx%23y%26z%3Dw"),
+    ("<>\"'\\", "%3C%3E%22%27%5C"),
+    ("\x01\x1f\x7f", "%01%1F%7F"),
+    ("￾￿", "%EF%BF%BE%EF%BF%BF"),
+    ("\t\r", "%09%0D"),
+]
+
+
+def test_encoding_type_url_encodes_keys(client, listing):
+    _put(client, [k for k, _ in ENCODED_KEYS])
+    root, keys = _list(client, listing, **{"encoding-type": "url"})
+    assert root.findtext("EncodingType") == "url"
+    expected = {k: e for k, e in ENCODED_KEYS}
+    assert sorted(keys) == sorted(expected.values())
+    # Every key is its own encoding's only preimage, so the client can decode.
+    assert {quote(k, safe="/") for k in expected} == set(keys)
+
+
+def test_encoding_type_absent_leaves_keys_raw(client, listing):
+    raw = [k for k, _ in ENCODED_KEYS if k.isprintable() or k == "a b"]
+    _put(client, raw)
+    root, keys = _list(client, listing)
+    assert root.find("EncodingType") is None
+    assert sorted(keys) == sorted(raw)
+
+
+def test_encoding_type_url_makes_xml_invalid_keys_parseable(client, listing):
+    # Without encoding-type the response is not well-formed XML (docs/compatibility.md,
+    # "Characters XML 1.0 does not allow"); with it, the key is an ASCII %XX string.
+    _put(client, ["\x01", "￾"])
+    query, element = LISTINGS[listing]
+    resp = client.get(f"/{BUCKET}", params=query)
+    assert resp.status_code == 200
+    with pytest.raises(ET.ParseError):
+        ET.fromstring(resp.text)
+    _, keys = _list(client, listing, **{"encoding-type": "url"})
+    assert keys == ["%01", "%EF%BF%BE"]
+
+
+def test_encoding_type_empty_is_absent(client, listing):
+    _put(client, ["a b"])
+    root, keys = _list(client, listing, **{"encoding-type": ""})
+    assert root.find("EncodingType") is None
+    assert keys == ["a b"]
+
+
+@pytest.mark.parametrize("value", ["URL", "Url", "xml", "url ", " url", "base64", "none"])
+def test_encoding_type_other_value_is_invalid_argument(client, listing, value):
+    _put(client, ["a"])
+    query, _ = LISTINGS[listing]
+    resp = client.get(f"/{BUCKET}", params={**query, "encoding-type": value})
+    assert resp.status_code == 400, resp.text
+    root = ET.fromstring(resp.text)
+    assert root.findtext("Code") == "InvalidArgument"
+    assert root.findtext("ArgumentName") == "encoding-type"
+    assert root.findtext("ArgumentValue") == value
+
+
+# Keys for the per-element tests. With prefix "a b" and delimiter "+":
+#   "a b+f"   rolls up into the common prefix "a b+"
+#   "a b/c+d" rolls up into the common prefix "a b/c+"
+#   "a b/e", "a b/g" are keys
+# in that byte order ("+" 0x2B sorts before "/" 0x2F).
+_FIELD_KEYS = ["a b/c+d", "a b/e", "a b/g", "a b+f", "zz"]
+_FIELD_PARAMS = {"prefix": "a b", "delimiter": "+", "encoding-type": "url"}
+
+
+def test_v1_encoded_elements(client):
+    _put(client, _FIELD_KEYS)
+    root, keys, prefixes = _v1(client, marker="a a", **{"max-keys": "2"}, **_FIELD_PARAMS)
+    assert root.findtext("EncodingType") == "url"
+    # Prefix is the one element botocore does not decode for ListObjects, so it is
+    # echoed as sent.
+    assert root.findtext("Prefix") == "a b"
+    assert root.findtext("Marker") == "a%20a"
+    assert root.findtext("Delimiter") == "%2B"
+    assert root.findtext("IsTruncated") == "true"
+    assert root.findtext("NextMarker") == "a%20b/c%2B"
+    assert keys == []
+    assert prefixes == ["a%20b%2B", "a%20b/c%2B"]
+    # The client decodes NextMarker and continues from the raw key.
+    root, keys, prefixes = _v1(client, marker="a b/c+", **_FIELD_PARAMS)
+    assert keys == ["a%20b/e", "a%20b/g"] and prefixes == []
+    assert root.findtext("IsTruncated") == "false" and root.find("NextMarker") is None
+
+
+def test_v2_encoded_elements(client):
+    _put(client, _FIELD_KEYS)
+    root, keys, prefixes = _v2(client, **{"start-after": "a a", "max-keys": "2"}, **_FIELD_PARAMS)
+    assert root.findtext("EncodingType") == "url"
+    assert root.findtext("Prefix") == "a%20b"
+    assert root.findtext("StartAfter") == "a%20a"
+    assert root.findtext("Delimiter") == "%2B"
+    assert root.findtext("KeyCount") == "2"
+    assert keys == [] and prefixes == ["a%20b%2B", "a%20b/c%2B"]
+    token = root.findtext("NextContinuationToken")
+    # Tokens are opaque and never encoded: the token is the exact one the server
+    # produces (base64 padding "=" and all), and the echo is byte for byte the token
+    # sent.
+    assert token == encode_token(None, "a b/c,")
+    root, keys, prefixes = _v2(client, **{"continuation-token": token}, **_FIELD_PARAMS)
+    assert root.findtext("ContinuationToken") == token
+    assert keys == ["a%20b/e", "a%20b/g"] and prefixes == []
+    # A token with base64 padding is echoed with its "=", not %3D.
+    padded = encode_token("a b/e", None)
+    assert padded.endswith("=")
+    root, keys, prefixes = _v2(client, **{"continuation-token": padded}, **_FIELD_PARAMS)
+    assert root.findtext("ContinuationToken") == padded
+    assert keys == ["a%20b/g"]
+
+
+def test_versions_encoded_elements(client):
+    _put(client, _FIELD_KEYS)
+    root, keys, prefixes = _versions(
+        client,
+        **{"key-marker": "a a", "version-id-marker": "null", "max-keys": "2"},
+        **_FIELD_PARAMS,
+    )
+    assert root.findtext("EncodingType") == "url"
+    assert root.findtext("Prefix") == "a%20b"
+    assert root.findtext("KeyMarker") == "a%20a"
+    assert root.findtext("VersionIdMarker") == "null"
+    assert root.findtext("Delimiter") == "%2B"
+    assert root.findtext("NextKeyMarker") == "a%20b/c%2B"
+    assert root.find("NextVersionIdMarker") is None
+    assert keys == [] and prefixes == ["a%20b%2B", "a%20b/c%2B"]
+    # A page ending on a version: NextKeyMarker is the encoded key, the version ID is
+    # not encoded.
+    root, keys, prefixes = _versions(client, **{"max-keys": "3"}, **_FIELD_PARAMS)
+    assert keys == ["a%20b/e"] and prefixes == ["a%20b%2B", "a%20b/c%2B"]
+    assert root.findtext("NextKeyMarker") == "a%20b/e"
+    assert root.findtext("NextVersionIdMarker") == "null"
+    for version in root.findall("Version"):
+        assert version.findtext("VersionId") == "null"
+
+
+def test_encoding_does_not_change_paging(client, listing):
+    # Encoding is applied to the response only: the same keys, pages and markers as
+    # without it, byte for byte once decoded.
+    keys = _random_keys(3) + ["a b+c", "a+b c/d", "é é/+"]
+    _put(client, keys)
+    query, element = LISTINGS[listing]
+    for delimiter in ("", "/", "+", " "):
+        params = {"prefix": "", "max-keys": "5"}
+        if delimiter:
+            params["delimiter"] = delimiter
+        raw = client.get(f"/{BUCKET}", params={**query, **params}).text
+        encoded = client.get(f"/{BUCKET}", params={**query, **params, "encoding-type": "url"}).text
+        raw_root, enc_root = ET.fromstring(raw), ET.fromstring(encoded)
+        enc_root.remove(enc_root.find("EncodingType"))
+        raw_els, enc_els = list(raw_root.iter()), list(enc_root.iter())
+        assert [e.tag for e in raw_els] == [e.tag for e in enc_els]
+        for raw_el, enc_el in zip(raw_els, enc_els, strict=True):
+            assert unquote_plus(enc_el.text or "") == (raw_el.text or ""), enc_el.tag
