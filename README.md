@@ -53,8 +53,9 @@ parameters as follows.
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
 configuration, CopyObject, ListParts, ListMultipartUploads, POST Object and others)
-get 501 NotImplemented before reaching a handler, and change nothing. Keys are stored
-as the exact string the client sent.
+get 501 NotImplemented before reaching a handler, and change nothing. `/{bucket}/`
+(a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
+in the table. Keys are stored as the exact string the client sent.
 
 PutObject and UploadPart also accept an aws-chunked body, but only the one framing the
 AWS CLI sends over `http://` by default: `x-amz-content-sha256:

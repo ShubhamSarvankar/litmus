@@ -90,6 +90,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | `4cee3b0` | 330 | 508 | 142 | ListObjectsV2 paging with `continuation-token` and `start-after`. 21 passes gained. |
 | `2011375` | 330 | 508 | 144 | `encoding-type=url` in all three listings. 2 passes gained. |
 | Bucket name validation | 330 | 508 | 151 | CreateBucket enforces the AWS naming rules. 7 passes gained: `test_bucket_create_naming_bad_ip`, `_bad_short_one`, `_bad_short_two`, `_bad_starts_nonalpha`, `_dns_dash_at_end`, `_dns_dot_dot`, `_dns_underscore`. Recorded at the commit that adds the validation. |
+| Trailing slash on a bucket path | 330 | 508 | 151 | `/{bucket}/` is the bucket, for every method. No outcome changed, and none was expected to: the results file is identical to the previous one, and the server's access log for the run (7523 requests) holds no request to `/{bucket}/`. The only paths ending in a slash besides `/` were `PUT /{bucket}/asdf/` (2) and `PUT /{bucket}/0/` (1), which are keys. Recorded at the commit that adds the route. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -272,7 +273,16 @@ ListParts, ListMultipartUploads and GetObjectAttributes.
 **Other methods and paths.** Every error is an S3 XML error. A method that no route
 accepts for a path gets 405 MethodNotAllowed, with an `Allow` header listing the
 methods that path supports. A path that no route matches, such as one with an empty
-bucket name (`//x`), gets 400 InvalidURI. An unexpected server error gets 500
+bucket name (`//x`), gets 400 InvalidURI. `/{bucket}/`, a trailing slash and no key,
+is the bucket, not an object with an empty key: every method on it behaves as on
+`/{bucket}`, query parameters included. A path-style request names its bucket by the
+first slash-delimited component and its key by the rest of the Request-URI (S3 User
+Guide, "Virtual hosting of general purpose buckets",
+<https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.md>, "HTTP `Host`
+header bucket specification"); S3's bucket-level requests, such as `GET /?list-type=2`,
+send no key. The AWS pages do not state outright that `/{bucket}/` equals `/{bucket}`,
+so that equivalence is read from those two. `/{bucket}//` has the key `/`, and
+`/{bucket}/dir/` the key `dir/`; both are objects. An unexpected server error gets 500
 InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 (httptools), a method name the parser does not know (for example `BREW`) is rejected
 with a plain-text 400 before the request reaches the application. With
@@ -503,6 +513,17 @@ other entries are still deleted.
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The
 retry changes nothing in Litmus. A strict xfail test records the S3 behavior.
+
+**Objects under the empty key.** Before `/{bucket}/` became the bucket, `PUT /{bucket}/`
+stored an object under the key `""`. No S3 client sends such a key (the API model gives the
+`Key` parameter a minimum length of 1, which botocore enforces), and no request can now
+name one at a path. A store written by that version may
+still hold such an object. It is not orphaned: ListObjects lists it with an empty
+`<Key>`, DeleteBucket refuses with 409 BucketNotEmpty while it is there, and
+DeleteObjects removes it, given a raw body such as
+`<Delete><Object><Key></Key></Object></Delete>` (`POST /{bucket}?delete`).
+botocore refuses that body for the same reason, so it takes a hand-written request. GET, HEAD and DELETE on `/{bucket}/` no longer reach it. Nothing creates a new
+one: no other path in Litmus stores an empty key.
 
 **Empty Complete body.** CompleteMultipartUpload with an empty body gets 500, because
 the body is not parsed as XML. S3 answers 400 MalformedXML.

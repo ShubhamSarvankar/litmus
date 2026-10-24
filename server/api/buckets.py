@@ -239,6 +239,7 @@ async def list_buckets(request: Request) -> Response:
 
 
 @router.get("/{bucket}")
+@router.get("/{bucket}/")
 async def list_objects(bucket: str, request: Request) -> Response:
     metadata = request.app.state.metadata
     params = dict(request.query_params)
@@ -307,6 +308,7 @@ async def list_objects(bucket: str, request: Request) -> Response:
 
 
 @router.post("/{bucket}")
+@router.post("/{bucket}/")
 async def post_bucket(bucket: str, request: Request) -> Response:
     """Dispatch bucket-level POSTs — currently only ?delete (DeleteObjects)."""
     params = dict(request.query_params)
@@ -397,6 +399,7 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
 
 
 @router.head("/{bucket}")
+@router.head("/{bucket}/")
 async def head_bucket(bucket: str, request: Request) -> Response:
     metadata = request.app.state.metadata
     if not metadata.bucket_exists(bucket):
@@ -405,6 +408,7 @@ async def head_bucket(bucket: str, request: Request) -> Response:
 
 
 @router.put("/{bucket}")
+@router.put("/{bucket}/")
 async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
     metadata = request.app.state.metadata
 
@@ -421,6 +425,7 @@ async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
 
 
 @router.delete("/{bucket}")
+@router.delete("/{bucket}/")
 async def delete_bucket(bucket: str, request: Request) -> Response:
     """DeleteBucket (docs/design/storage-layout.md §6.9): open multipart uploads are
     aborted in the same transaction (decision 7)."""

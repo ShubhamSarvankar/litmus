@@ -169,13 +169,18 @@ def create_app(
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
-    from server.api.multipart import router as multipart_router
-
-    application.include_router(multipart_router)
-
+    # The bucket routes come first: they also take "/{bucket}/", which the object
+    # routes' "/{bucket}/{key:path}" would otherwise match with an empty key. A path
+    # with nothing after the bucket and its slash names the bucket, not a key (S3
+    # User Guide, "Virtual hosting of general purpose buckets": the key is the rest
+    # of the Request-URI after the bucket).
     from server.api.buckets import router as buckets_router
 
     application.include_router(buckets_router)
+
+    from server.api.multipart import router as multipart_router
+
+    application.include_router(multipart_router)
 
     return application
 
