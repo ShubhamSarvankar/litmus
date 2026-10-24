@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from chaos.framework.framed import frame, framed_headers, framed_request
 from server.app import create_app
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.blobs import BlobStore
@@ -167,6 +168,19 @@ def barrier_problems(events, storage: BlobStore, blob_id: str, replaced: list[st
     return problems
 
 
+@pytest.fixture(params=[pytest.param(False, id="plain"), pytest.param(True, id="framed")])
+def framed(request) -> bool:
+    """Whether the write under test is sent as an aws-chunked body."""
+    return request.param
+
+
+def _put(client, url: str, data: bytes, framed: bool = False):
+    if framed:
+        headers, body = framed_request(data)
+        return client.put(url, content=body, headers=headers)
+    return client.put(url, content=data)
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch):
     storage = BlobStore(tmp_path / "blobs")
@@ -179,30 +193,30 @@ def env(tmp_path: Path, monkeypatch):
     return client, storage, metadata, recorder
 
 
-def _put_overwrite(env):
+def _put_overwrite(env, framed: bool = False):
     client, storage, metadata, recorder = env
     assert client.put(f"/{BUCKET}/{KEY}", content=b"old body").status_code == 200
     old = metadata.get_object_meta(BUCKET, KEY).blob_id
     recorder.active = True
-    assert client.put(f"/{BUCKET}/{KEY}", content=b"new body").status_code == 200
+    assert _put(client, f"/{BUCKET}/{KEY}", b"new body", framed).status_code == 200
     recorder.active = False
     return metadata.get_object_meta(BUCKET, KEY).blob_id, [old]
 
 
-def test_put_object_barrier_order(env):
+def test_put_object_barrier_order(env, framed):
     client, storage, _, recorder = env
-    blob_id, replaced = _put_overwrite(env)
+    blob_id, replaced = _put_overwrite(env, framed)
     assert barrier_problems(recorder.events, storage, blob_id, replaced) == []
 
 
-def test_upload_part_barrier_order(env):
+def test_upload_part_barrier_order(env, framed):
     client, storage, metadata, recorder = env
     upload_id = ET.fromstring(client.post(f"/{BUCKET}/{KEY}?uploads").text).findtext("UploadId")
     url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
     assert client.put(url, content=b"first attempt").status_code == 200
     (old,) = [p.blob_id for p in metadata.get_parts(upload_id)]
     recorder.active = True
-    assert client.put(url, content=b"second attempt").status_code == 200
+    assert _put(client, url, b"second attempt", framed).status_code == 200
     recorder.active = False
     (blob_id,) = [p.blob_id for p in metadata.get_parts(upload_id)]
     assert barrier_problems(recorder.events, storage, blob_id, [old]) == []
@@ -274,3 +288,22 @@ def test_checker_reports_a_commit_before_the_directory_fsync(env):
     events.append(moved)  # now after the visibility commit
     problems = barrier_problems(events, storage, blob_id, replaced)
     assert "the visibility commit begins before the fanout directory fsync" in problems
+
+
+# --- a refused framed request never reaches the barrier ---
+
+
+def test_refused_framed_put_reaches_no_durable_step(env):
+    client, storage, _, recorder = env
+    data = b"refused body" * 1000
+    body = frame(data, trailer_line="x-amz-checksum-crc64nvme:AAAAAAAAAAA=")
+    recorder.active = True
+    resp = client.put(f"/{BUCKET}/{KEY}", content=body, headers=framed_headers(body, len(data)))
+    recorder.active = False
+    assert resp.status_code == 400
+    assert ET.fromstring(resp.text).findtext("Code") == "BadDigest"
+    # The temp file was written, but never fsynced, renamed, or made live.
+    kinds = [e[0] for e in recorder.events]
+    assert "fsync-file" not in kinds and "rename" not in kinds
+    assert not any(e[0] == "sql" and "SET state = 'live'" in e[1] for e in recorder.events)
+    assert [e for e, _ in storage.scan()] == [] and storage.temp_entries() == []

@@ -6,6 +6,7 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
+from server.api.aws_chunked import is_framed, preflight, write_framed_body
 from server.crash_points import (
     DELETE_AFTER_COMMIT,
     DELETE_BEFORE_COMMIT,
@@ -86,15 +87,22 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    body = await request.body()
+    # A framed body is decoded straight into the blob; the plain path buffers it whole.
+    framed = preflight(request.headers) if is_framed(request.headers) else None
+    body = b"" if framed else await request.body()
     content_type = request.headers.get("content-type", "binary/octet-stream")
 
     blob_id = metadata.register_blob("object", bucket, key)
     crash_point(PUT_AFTER_REGISTER)
     try:
-        etag, size = storage.write_blob(
-            blob_id, io.BytesIO(body), mid_write_point=armed_point(PUT_MID_WRITE)
-        )
+        if framed:
+            etag, size = await write_framed_body(
+                request, storage, blob_id, framed, armed_point(PUT_MID_WRITE)
+            )
+        else:
+            etag, size = storage.write_blob(
+                blob_id, io.BytesIO(body), mid_write_point=armed_point(PUT_MID_WRITE)
+            )
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
         raise

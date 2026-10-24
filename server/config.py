@@ -30,9 +30,9 @@ class Settings:
     )
     # S3_TEST_WRITE_DELAY_MS: Tier B chaos tests only. One sleep of this many ms in
     # BlobStore.write_blob (PUT and UploadPart), after the temp file is created and
-    # before any bytes are written to it. The request body is already
-    # fully buffered by then. Not applied per chunk, and not applied to
-    # CompleteMultipartUpload assembly.
+    # before any bytes are written to it. A plain request body is already
+    # fully buffered by then; a framed (aws-chunked) body is not yet read. Not applied
+    # per chunk, and not applied to CompleteMultipartUpload assembly.
     test_write_delay_ms: int = field(default_factory=lambda: _env_int("S3_TEST_WRITE_DELAY_MS", 0))
     # S3_TEST_CRASH_POINT: Tier B chaos tests only. Names a step in the write path at
     # which the server SIGKILLs itself; see server/crash_points.py. Empty = inert.

@@ -21,6 +21,13 @@ since no key is ever part of a filesystem path (docs/design/storage-layout.md R1
 from fastapi import Request
 from fastapi.responses import Response
 
+from server.api.aws_chunked import (
+    CONTENT_SHA256_HEADER,
+    DECODED_LENGTH_HEADER,
+    TRAILER_HEADER,
+    is_framed,
+    trailer_is_supported,
+)
 from server.errors.s3errors import (
     InvalidBucketName,
     NotImplementedOperation,
@@ -147,13 +154,37 @@ _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
 # framing (S3 User Guide, "Checking object integrity for data uploads", trailing
 # checksum headers). Content-Encoding: aws-chunked is optional there, so it is not a
 # marker. botocore 1.36+ and AWS CLI 2.23+ send such bodies for PutObject and
-# UploadPart to https endpoints. Litmus does not decode the framing; storing the body
-# as it arrives would keep the chunk sizes and trailer as object bytes.
+# UploadPart. Litmus decodes exactly one framing (server/api/aws_chunked.py):
+# STREAMING-UNSIGNED-PAYLOAD-TRAILER with the single trailer x-amz-checksum-crc64nvme.
+# Everything else is refused, because storing such a body as it arrives would keep the
+# chunk sizes (and signatures, and trailer) as object bytes: the signed
+# STREAMING-AWS4-HMAC-SHA256-* variants, x-amz-decoded-content-length under any other
+# x-amz-content-sha256, the streaming value without a supported x-amz-trailer.
 _STREAMING_PAYLOAD_PREFIX = "STREAMING-"
-_DECODED_LENGTH_HEADER = "x-amz-decoded-content-length"
+_DECODED_LENGTH_HEADER = DECODED_LENGTH_HEADER
 
 # Bucket names S3's naming rules forbid and that would read as path segments.
 _DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def _check_framing(headers, decodable: bool) -> None:
+    """Refuse every chunk-framed PUT except the one framing Litmus decodes, and that one
+    only where it is decoded: decodable is true for PutObject and UploadPart alone. A
+    framed CreateBucket, or any other PUT, is refused like an unsupported framing, since
+    its body would otherwise be ignored or stored with the framing in it."""
+    content_sha256 = headers.get(CONTENT_SHA256_HEADER, "")
+    if decodable and is_framed(headers):
+        if not trailer_is_supported(headers):
+            raise NotImplementedOperation(
+                extra={"Header": TRAILER_HEADER, "Value": ",".join(headers.getlist(TRAILER_HEADER))}
+            )
+        return
+    if content_sha256.upper().startswith(_STREAMING_PAYLOAD_PREFIX):
+        raise NotImplementedOperation(
+            extra={"Header": CONTENT_SHA256_HEADER, "Value": content_sha256}
+        )
+    if _DECODED_LENGTH_HEADER in headers:
+        raise NotImplementedOperation(extra={"Header": _DECODED_LENGTH_HEADER})
 
 
 def _check(method: str, path: str, query, headers) -> None:
@@ -164,6 +195,11 @@ def _check(method: str, path: str, query, headers) -> None:
     if bucket in _DOT_SEGMENTS:
         raise InvalidBucketName(extra={"BucketName": bucket})
 
+    if method == "PUT":
+        # PutObject (no subresource) and UploadPart (partNumber and uploadId).
+        is_object_write = bool(key) and (query_keys - _IGNORED) in _ALLOWED_MUTATING_OBJECT["PUT"]
+        _check_framing(headers, decodable=is_object_write)
+
     if key:
         subresources, implemented, allowed = (
             OBJECT_SUBRESOURCES,
@@ -172,14 +208,6 @@ def _check(method: str, path: str, query, headers) -> None:
         )
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
-        if method == "PUT":  # PutObject and UploadPart
-            content_sha256 = headers.get("x-amz-content-sha256", "")
-            if content_sha256.upper().startswith(_STREAMING_PAYLOAD_PREFIX):
-                raise NotImplementedOperation(
-                    extra={"Header": "x-amz-content-sha256", "Value": content_sha256}
-                )
-            if _DECODED_LENGTH_HEADER in headers:
-                raise NotImplementedOperation(extra={"Header": _DECODED_LENGTH_HEADER})
         if method == "DELETE":
             conditional = CONDITIONAL_DELETE_HEADERS
         elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart

@@ -82,6 +82,30 @@ class InvalidBucketName(S3Error):
     message = "The specified bucket is not valid."
 
 
+class BadDigest(S3Error):
+    status_code = 400
+    code = "BadDigest"
+    message = "The checksum you specified did not match what we received."
+
+
+class InvalidDigest(S3Error):
+    status_code = 400
+    code = "InvalidDigest"
+    message = "The checksum you specified is not valid."
+
+
+class IncompleteBody(S3Error):
+    status_code = 400
+    code = "IncompleteBody"
+    message = "You did not provide the number of bytes specified by the Content-Length HTTP header"
+
+
+class MissingContentLength(S3Error):
+    status_code = 411
+    code = "MissingContentLength"
+    message = "You must provide the Content-Length HTTP header."
+
+
 class NotImplementedOperation(S3Error):
     # Named to avoid shadowing the NotImplemented builtin; the S3 code is NotImplemented.
     status_code = 501

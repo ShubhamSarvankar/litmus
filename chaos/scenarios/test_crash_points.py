@@ -32,6 +32,7 @@ import httpx
 import pytest
 
 from chaos.fixtures.subprocess import ServerProcess, _find_free_port
+from chaos.framework.framed import framed_request
 from server.consistency import (
     InterruptedCleanup,
     InterruptedWrite,
@@ -182,6 +183,19 @@ def _prepare_upload(client: httpx.Client) -> tuple[str, list[bytes], list[str]]:
     return upload_id, parts, etags
 
 
+@pytest.fixture(params=[pytest.param(False, id="plain"), pytest.param(True, id="framed")])
+def framed(request) -> bool:
+    """Whether the request under test is sent as an aws-chunked body."""
+    return request.param
+
+
+def _put(client: httpx.Client, url: str, data: bytes, framed: bool = False) -> httpx.Response:
+    if framed:
+        headers, body = framed_request(data)
+        return client.put(url, content=body, headers=headers)
+    return client.put(url, content=data)
+
+
 # --- tests ---
 
 
@@ -199,7 +213,7 @@ def test_unknown_crash_point_refuses_to_start(tmp_path: Path):
     assert "not a known crash point" in server.collect_logs()
 
 
-def test_put_killed_after_bytes_before_metadata(tmp_path: Path):
+def test_put_killed_after_bytes_before_metadata(tmp_path: Path, framed):
     """PUT bytes durable at a fresh blob path, metadata not committed.
 
     Expected: the object is not visible; its complete bytes are on disk as a pending
@@ -208,7 +222,7 @@ def test_put_killed_after_bytes_before_metadata(tmp_path: Path):
     body = os.urandom(1024 * 1024)
     server, client = _start(tmp_path, crash_point=PUT_AFTER_BYTES)
     assert client.put(f"/{BUCKET}").status_code == 200
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=body))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", body, framed))
     client.close()
 
     # While the server is down: no metadata row; the complete bytes are at the
@@ -238,7 +252,7 @@ def test_put_killed_after_bytes_before_metadata(tmp_path: Path):
         assert _registry(tmp_path) == []
 
         # The client's retry succeeds and the object becomes visible.
-        assert client2.put(f"/{BUCKET}/{KEY}", content=body).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", body, framed).status_code == 200
         resp = client2.get(f"/{BUCKET}/{KEY}")
         assert resp.status_code == 200
         assert resp.content == body
@@ -536,10 +550,10 @@ def _blob_bytes(tmp_path: Path, blob_id: str) -> bytes | None:
 # PutObject
 
 
-def test_put_killed_after_register(tmp_path: Path):
+def test_put_killed_after_register(tmp_path: Path, framed):
     server, client = _start(tmp_path, crash_point=PUT_AFTER_REGISTER)
     assert client.put(f"/{BUCKET}").status_code == 200
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", NEW, framed))
     client.close()
 
     # (a) A registered ID with no bytes.
@@ -560,22 +574,29 @@ def test_put_killed_after_register(tmp_path: Path):
         # (c)
         assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
         # (d)
-        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", NEW, framed).status_code == 200
         _assert_object(client2, NEW, _md5(NEW))
 
 
-def test_put_killed_mid_write(tmp_path: Path):
+def test_put_killed_mid_write(tmp_path: Path, framed):
     body = os.urandom(200 * 1024)
     server, client = _start(tmp_path, crash_point=PUT_MID_WRITE)
     assert client.put(f"/{BUCKET}").status_code == 200
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=body))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", body, framed))
     client.close()
 
     # (a) A partial temp file and no blob.
     (row,) = _registry(tmp_path, "pending")
     temp = _blobs(tmp_path).temp_path(row.blob_id)
     assert _temp_files(tmp_path) == [temp]
-    assert temp.read_bytes() == body[:65536]
+    if framed:
+        # The decoder writes as each buffer arrives, not after the whole chunk: the body
+        # is one chunk of 200 KiB, and the temp file holds the decoded start of it, at
+        # most one write (64 KiB), not the decoded length.
+        partial = temp.read_bytes()
+        assert 0 < len(partial) <= 65536 < len(body) and body.startswith(partial)
+    else:
+        assert temp.read_bytes() == body[:65536]
     assert _blob_files(tmp_path) == set()
     assert _store(tmp_path).get_object_meta(BUCKET, KEY) is None
 
@@ -589,17 +610,17 @@ def test_put_killed_mid_write(tmp_path: Path):
 
     with _restarted(tmp_path) as client2:
         assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
-        assert client2.put(f"/{BUCKET}/{KEY}", content=body).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", body, framed).status_code == 200
         _assert_object(client2, body, _md5(body))
 
 
-def test_overwrite_killed_after_bytes_keeps_old_object(tmp_path: Path):
+def test_overwrite_killed_after_bytes_keeps_old_object(tmp_path: Path, framed):
     """R2: new bytes durable at a fresh path, not committed; the old object's bytes
     and ETag survive."""
     _setup_unarmed(tmp_path, _put_old)
     old = _store(tmp_path).get_object_meta(BUCKET, KEY)
     server, client = _start(tmp_path, crash_point=PUT_AFTER_BYTES)
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", NEW, framed))
     client.close()
 
     # (a) The row and the old blob are untouched; the new blob is pending and complete.
@@ -620,17 +641,17 @@ def test_overwrite_killed_after_bytes_keeps_old_object(tmp_path: Path):
         # (c) Exactly the old object.
         _assert_object(client2, OLD, _md5(OLD))
         # (d)
-        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", NEW, framed).status_code == 200
         _assert_object(client2, NEW, _md5(NEW))
         current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
         assert _blob_files(tmp_path) == {current}
 
 
-def test_overwrite_killed_after_commit(tmp_path: Path):
+def test_overwrite_killed_after_commit(tmp_path: Path, framed):
     _setup_unarmed(tmp_path, _put_old)
     old = _store(tmp_path).get_object_meta(BUCKET, KEY)
     server, client = _start(tmp_path, crash_point=PUT_AFTER_COMMIT)
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", NEW, framed))
     client.close()
 
     # (a) The row names the new live blob; the old blob is garbage, its file present.
@@ -649,17 +670,17 @@ def test_overwrite_killed_after_commit(tmp_path: Path):
 
     with _restarted(tmp_path) as client2:
         _assert_object(client2, NEW, _md5(NEW))
-        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", NEW, framed).status_code == 200
         _assert_object(client2, NEW, _md5(NEW))
         current = _store(tmp_path).get_object_meta(BUCKET, KEY).blob_id
         assert _blob_files(tmp_path) == {current}
 
 
-def test_overwrite_killed_after_gc_unlink(tmp_path: Path):
+def test_overwrite_killed_after_gc_unlink(tmp_path: Path, framed):
     _setup_unarmed(tmp_path, _put_old)
     old = _store(tmp_path).get_object_meta(BUCKET, KEY)
     server, client = _start(tmp_path, crash_point=PUT_AFTER_GC_UNLINK)
-    _request_into_crash(server, lambda: client.put(f"/{BUCKET}/{KEY}", content=NEW))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", NEW, framed))
     client.close()
 
     # (a) The old blob's file is unlinked; its garbage row is still there.
@@ -674,7 +695,7 @@ def test_overwrite_killed_after_gc_unlink(tmp_path: Path):
 
     with _restarted(tmp_path) as client2:
         _assert_object(client2, NEW, _md5(NEW))
-        assert client2.put(f"/{BUCKET}/{KEY}", content=NEW).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", NEW, framed).status_code == 200
         _assert_object(client2, NEW, _md5(NEW))
 
 
@@ -786,17 +807,19 @@ def test_delete_objects_killed_after_commit(tmp_path: Path):
 # UploadPart
 
 
-def _part_killed_before_commit(tmp_path: Path, point: str, body: bytes):
+def _part_killed_before_commit(tmp_path: Path, point: str, body: bytes, framed: bool = False):
     server, client = _start(tmp_path, crash_point=point)
     assert client.put(f"/{BUCKET}").status_code == 200
     upload_id, _ = _open_upload(client, [])
     url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
-    _request_into_crash(server, lambda: client.put(url, content=body))
+    _request_into_crash(server, lambda: _put(client, url, body, framed))
     client.close()
     return upload_id, url
 
 
-def _part_retry(tmp_path: Path, upload_id: str, url: str, body: bytes) -> None:
+def _part_retry(
+    tmp_path: Path, upload_id: str, url: str, body: bytes, framed: bool = False
+) -> None:
     with _restarted(tmp_path) as client2:
         # (c) The part was never recorded: Complete with its ETag is refused, and the
         # upload stays open.
@@ -805,15 +828,15 @@ def _part_retry(tmp_path: Path, upload_id: str, url: str, body: bytes) -> None:
         assert ET.fromstring(resp.text).findtext("Code") == "InvalidPart"
         assert _store(tmp_path).upload_exists(upload_id)
         # (d)
-        retry = client2.put(url, content=body)
+        retry = _put(client2, url, body, framed)
         assert retry.status_code == 200
         assert _complete(client2, upload_id, [retry.headers["etag"]]).status_code == 200
         _assert_object(client2, body, _multipart_etag([body]))
 
 
-def test_upload_part_killed_after_register(tmp_path: Path):
+def test_upload_part_killed_after_register(tmp_path: Path, framed):
     body = b"part body " * 1000
-    upload_id, url = _part_killed_before_commit(tmp_path, PART_AFTER_REGISTER, body)
+    upload_id, url = _part_killed_before_commit(tmp_path, PART_AFTER_REGISTER, body, framed)
 
     # (a)
     (row,) = _registry(tmp_path)
@@ -834,18 +857,25 @@ def test_upload_part_killed_after_register(tmp_path: Path):
     ]
     assert _registry(tmp_path) == []
 
-    _part_retry(tmp_path, upload_id, url, body)
+    _part_retry(tmp_path, upload_id, url, body, framed)
 
 
-def test_upload_part_killed_mid_write(tmp_path: Path):
+def test_upload_part_killed_mid_write(tmp_path: Path, framed):
     body = os.urandom(200 * 1024)
-    upload_id, url = _part_killed_before_commit(tmp_path, PART_MID_WRITE, body)
+    upload_id, url = _part_killed_before_commit(tmp_path, PART_MID_WRITE, body, framed)
 
     # (a)
     (row,) = _registry(tmp_path, "pending")
     temp = _blobs(tmp_path).temp_path(row.blob_id)
     assert _temp_files(tmp_path) == [temp]
-    assert temp.read_bytes() == body[:65536]
+    if framed:
+        # The decoder writes as each buffer arrives, not after the whole chunk: the body
+        # is one chunk of 200 KiB, and the temp file holds the decoded start of it, at
+        # most one write (64 KiB), not the decoded length.
+        partial = temp.read_bytes()
+        assert 0 < len(partial) <= 65536 < len(body) and body.startswith(partial)
+    else:
+        assert temp.read_bytes() == body[:65536]
     assert _blob_files(tmp_path) == set()
     assert _store(tmp_path).get_parts(upload_id) == []
 
@@ -857,7 +887,7 @@ def test_upload_part_killed_mid_write(tmp_path: Path):
     ]
     assert _temp_files(tmp_path) == [] and _registry(tmp_path) == []
 
-    _part_retry(tmp_path, upload_id, url, body)
+    _part_retry(tmp_path, upload_id, url, body, framed)
 
 
 X = b"first attempt " * 1000
@@ -870,12 +900,12 @@ def _upload_x(client) -> tuple[str, str]:
     return upload_id, x_etag
 
 
-def test_reupload_part_killed_after_bytes_keeps_old_part(tmp_path: Path):
+def test_reupload_part_killed_after_bytes_keeps_old_part(tmp_path: Path, framed):
     upload_id, x_etag = _setup_unarmed(tmp_path, _upload_x)
     (x_part,) = _store(tmp_path).get_parts(upload_id)
     url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
     server, client = _start(tmp_path, crash_point=PART_AFTER_BYTES)
-    _request_into_crash(server, lambda: client.put(url, content=Y))
+    _request_into_crash(server, lambda: _put(client, url, Y, framed))
     client.close()
 
     # (a) Part 1 is still X, intact; Y is a pending, complete blob.
@@ -901,18 +931,18 @@ def test_reupload_part_killed_after_bytes_keeps_old_part(tmp_path: Path):
 
     with _restarted(twin) as client3:
         # (d) The client retries the re-upload, then completes with it.
-        retry = client3.put(url, content=Y)
+        retry = _put(client3, url, Y, framed)
         assert retry.status_code == 200
         assert _complete(client3, upload_id, [retry.headers["etag"]]).status_code == 200
         _assert_object(client3, Y, _multipart_etag([Y]))
 
 
-def test_reupload_part_killed_after_commit(tmp_path: Path):
+def test_reupload_part_killed_after_commit(tmp_path: Path, framed):
     upload_id, x_etag = _setup_unarmed(tmp_path, _upload_x)
     (x_part,) = _store(tmp_path).get_parts(upload_id)
     url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
     server, client = _start(tmp_path, crash_point=PART_AFTER_COMMIT)
-    _request_into_crash(server, lambda: client.put(url, content=Y))
+    _request_into_crash(server, lambda: _put(client, url, Y, framed))
     client.close()
 
     # (a) Part 1 is Y; X's blob is garbage with its file present.
@@ -937,7 +967,7 @@ def test_reupload_part_killed_after_commit(tmp_path: Path):
 
     with _restarted(twin) as client3:
         # (d)
-        retry = client3.put(url, content=Y)
+        retry = _put(client3, url, Y, framed)
         assert retry.status_code == 200
         assert _complete(client3, upload_id, [retry.headers["etag"]]).status_code == 200
         _assert_object(client3, Y, _multipart_etag([Y]))

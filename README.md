@@ -56,6 +56,14 @@ configuration, CopyObject, ListParts, ListMultipartUploads, POST Object and othe
 get 501 NotImplemented before reaching a handler, and change nothing. Keys are stored
 as the exact string the client sent.
 
+PutObject and UploadPart also accept an aws-chunked body, but only the one framing the
+AWS CLI sends over `http://` by default: `x-amz-content-sha256:
+STREAMING-UNSIGNED-PAYLOAD-TRAILER` with a CRC64NVME trailer (`x-amz-trailer:
+x-amz-checksum-crc64nvme`). Litmus decodes it as it arrives, verifies the checksum, and
+stores the decoded bytes. The signed `STREAMING-AWS4-HMAC-SHA256-*` variants and other
+trailers get 501. Plain request bodies are still read whole into memory before they
+are written. See [`docs/compatibility.md`](docs/compatibility.md).
+
 ---
 
 ## Storage
@@ -154,7 +162,9 @@ server/
   connection.py        closes the connection after an early error to an Expect: 100-continue request
   api/                 routes: buckets.py for buckets; multipart.py for every
                        /{bucket}/{key} request, handing plain object requests to
-                       the handlers in objects.py; request_guard.py answers 501
+                       the handlers in objects.py; request_guard.py answers 501;
+                       aws_chunked.py decodes aws-chunked bodies
+  crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit
   metadata/sqlite.py   schema, blob registry and transactions

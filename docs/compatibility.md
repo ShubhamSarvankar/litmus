@@ -365,24 +365,65 @@ object, and a DeleteObjects entry with `<VersionId>null</VersionId>` deletes the
 object. Any other version ID gets 501 (or a per-key NotImplemented error in
 DeleteObjects), and `versionId` on PUT or POST gets 501.
 
-**Chunk-framed bodies are refused.** PutObject and UploadPart with a chunk-framed
-(aws-chunked) body get 501 NotImplemented before any byte is written or any blob is
-registered, so no object, part or pending blob is left behind. Litmus identifies such a
-body the way S3 documents it: `x-amz-content-sha256` starting with `STREAMING-` (for
-example `STREAMING-UNSIGNED-PAYLOAD-TRAILER`), or an `x-amz-decoded-content-length`
-header. `Content-Encoding: aws-chunked` alone is not a marker, since S3 does not
-require it: such a request is stored as an ordinary body. botocore and boto3 1.36.0+
-and AWS CLI v2 2.23.0+ send chunk-framed bodies with a trailing checksum for
-PutObject and UploadPart by default when the endpoint URL is `https://`, including a
-custom endpoint (and so behind a TLS-terminating proxy); against a plain `http://`
-endpoint they send an ordinary body with an `x-amz-checksum-*` header. Before this
-check, Litmus answered 200 and stored the chunk sizes and trailer as object bytes.
-Clients can avoid framing by using an `http://` endpoint, or by setting
-`request_checksum_calculation = when_required` (PutObject and UploadPart do not
-require a checksum, so none is sent unless the caller sets `ChecksumAlgorithm`).
+**Chunk-framed (aws-chunked) bodies: one framing is decoded.** botocore and boto3
+1.36.0+ and AWS CLI v2 2.23.0+ send PutObject and UploadPart bodies as aws-chunked with
+a trailing checksum by default. Litmus identifies such a body the way S3 documents it:
+`x-amz-content-sha256` starting with `STREAMING-`, or an `x-amz-decoded-content-length`
+header. `Content-Encoding: aws-chunked` alone is not a marker, since S3 does not require
+it: such a request is stored as an ordinary body.
 
-**Checksums are not verified.** `x-amz-checksum-*` headers (and
-`x-amz-sdk-checksum-algorithm`) on PutObject and UploadPart are accepted but never
+- Supported, on PutObject and UploadPart only: `x-amz-content-sha256:
+  STREAMING-UNSIGNED-PAYLOAD-TRAILER` (compared exactly) with `x-amz-trailer:
+  x-amz-checksum-crc64nvme` (one entry, any letter case), `x-amz-decoded-content-length`
+  and `Content-Length`. This is what the AWS CLI v2 sends with its default settings over
+  `http://`. The body is a lower case hex size line, the data, CRLF, any number of
+  chunks, `0`, CRLF, one trailer line `x-amz-checksum-crc64nvme:<base64 of the 8 byte
+  big endian CRC64NVME>`, CRLF, and a final CRLF. The decoded bytes are what is stored:
+  the ETag is their MD5, and the framing, the trailer and the checksum are not kept.
+  The trailer is verified before the blob is made durable.
+- Still 501 NotImplemented, before the body is read and before anything is registered or
+  written: the signed variants `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` (and any other `STREAMING-` value);
+  `x-amz-decoded-content-length` with any other `x-amz-content-sha256`; the supported
+  streaming value on any PUT other than PutObject and UploadPart (a framed CreateBucket,
+  for one, which would otherwise ignore the body); the supported streaming value without
+  `x-amz-trailer`; and an `x-amz-trailer` that lists more than
+  one entry or names anything but `x-amz-checksum-crc64nvme`, so CRC32, CRC32C, SHA-1
+  and SHA-256 trailers, which botocore sends over `https://` by default, are refused.
+  Clients can avoid framing by using `http://` with the AWS CLI, or by setting
+  `request_checksum_calculation = when_required`.
+- Strictness: the size line is 1 to 32 hex digits (either case) and CRLF, with no sign,
+  whitespace or chunk extension; every line ends in CRLF and a bare LF is an error;
+  nothing may follow the final CRLF; the framed body must be exactly `Content-Length`
+  bytes; the trailer is exactly one line whose name matches `x-amz-trailer` in any
+  letter case; its value must be strict base64 of 8 bytes. Reading stops as soon as the
+  decoded bytes exceed `x-amz-decoded-content-length` (at most 5 GiB).
+- Errors AWS documents (S3 API reference, "Error responses",
+  https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html): a checksum that
+  does not match the body is 400 BadDigest; a malformed checksum value is 400
+  InvalidDigest; a missing `Content-Length` is 411 MissingContentLength.
+- Errors AWS does not document for this case, so these are Litmus's own choices:
+
+  - Framing errors (bad or missing size, bare LF, chunk extension, bytes after the final
+    CRLF, a body that ends inside the framing, a missing, repeated, overlong or
+    colon-less trailer line, framed size different from `Content-Length`): 400
+    InvalidRequest, with a `Reason` element naming the fault.
+  - A trailer line whose name is not the one in `x-amz-trailer`: 400 InvalidRequest.
+  - The decoded length differing from `x-amz-decoded-content-length`, short or long: 400
+    IncompleteBody, the code for fewer bytes than were announced.
+  - A missing, non-numeric, signed, space-padded or non-ASCII
+    `x-amz-decoded-content-length`, or one above 5 GiB: 400 InvalidRequest.
+- Nothing is left behind by a refused or interrupted framed upload: no object, part or
+  registry row, an empty `tmp/`, and a clean consistency sweep. A re-upload of a part
+  that is refused leaves the earlier part and its ETag as they were.
+- Memory: a framed body is decoded as it arrives. Each received buffer is written to
+  the blob at once, and the decoder keeps at most a size line or the trailer line, so
+  memory does not grow with the object. Plain bodies are not streamed: they are still
+  read whole into memory before they are written, as before.
+
+**Checksums are mostly not verified.** The one checksum Litmus verifies is the CRC64NVME
+trailer of a framed body, above. `x-amz-checksum-*` headers (and
+`x-amz-sdk-checksum-algorithm`) on a plain PutObject or UploadPart are accepted but never
 checked, so a request whose body does not match its checksum still gets 200. No
 checksum is stored, and GetObject and HeadObject return no `x-amz-checksum-*` headers.
 `Content-MD5` is not checked either.
