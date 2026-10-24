@@ -46,6 +46,34 @@ The script refuses to run if `S3_TEST_CRASH_POINT` is set.
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression.
 
+### How the numbers moved from 115 of 325
+
+The first published figure was 115 passed of 325 selected, 504 deselected. Each step
+below is backed by `docs/s3-tests-results.txt` as committed at the named commit, except
+the first, which rests on the reproduction recorded in commit `3e74a07`.
+
+| Step | Selected | Deselected | Passed | Cause |
+|---|---|---|---|---|
+| Start | 325 | 504 | 115 | Measured against s3-tests `master` of the day, because the script used to `git pull`; reproduces at s3-tests `fb8b730`. |
+| `3e74a07` pin | 328 | 510 | 116 | s3-tests pinned at `5b39871`. Upstream added 9 tests in between; the filter deselects 6 and selects 3: `test_multipart_upload_complete_without_create` (passes) and the two `restore_status` tests (skipped). The 325 tests present at both commits keep their outcome. |
+| `9b7cd65` | 330 | 508 | 116 | `test_copy_object_ifmatch_failed` and `test_multipart_upload_empty` were deselected by exact name; now selected, both fail. |
+| `86ce90a` | 330 | 508 | 103 | Unimplemented operations answer 501. 14 passes lost (12 `test_post_object_*`, `test_bucket_create_special_key_names`, `test_object_copy_zero_size`), 1 gained (`test_upload_part_copy_percent_encoded_key`). |
+| `79f506d` | 330 | 508 | 98 | Conditional PutObject and Complete answer 501. 5 passes lost: `test_put_object_ifmatch_good`, `test_put_object_ifmatch_overwrite_existed_good`, `test_put_object_ifnonmatch_good`, `test_put_object_ifnonmatch_nonexisted_good`, `test_atomic_conditional_write_1mb`. |
+| `8f9c4a9` | 330 | 508 | 99 | `Connection: close` on an early response to `Expect: 100-continue`. `test_100_continue_error_retry` passes. |
+| Storage layout (`f94ee21` to `4dea326`) | 330 | 508 | 99 | No outcome changed; see below. |
+| `b8e2625` | 330 | 508 | 100 | `x-amz-request-id` on every response. `test_object_requestid_matches_header_on_error` passes. |
+
+So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
+1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
+2 fewer deselected ones, with no change in passes. Litmus behavior changes account for a
+net loss of 16 passes (13 lost to 501s for unimplemented operations, 5 to 501s for
+conditional writes, 2 gained by the connection and request ID fixes). None of the change
+is attributable to the storage layout work: the results file is the same from `8f9c4a9`
+to `9767483`, and the next recorded run, at `b8e2625`, differs from the `8f9c4a9` run in
+only the request ID test. No run was recorded at the end of the storage layout commits
+alone, so the record shows that their net effect is zero, not that no test changed and
+changed back in between.
+
 ### Incidental passes
 
 A pass is listed here when the test would also pass against a server that does not
