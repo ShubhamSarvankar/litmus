@@ -35,8 +35,8 @@ def app(stores):
 @pytest.fixture
 def client(app) -> TestClient:
     c = TestClient(app, raise_server_exceptions=False)
-    assert c.put("/b").status_code == 200
-    assert c.put("/b/k", content=b"body").status_code == 200
+    assert c.put("/bkt").status_code == 200
+    assert c.put("/bkt/k", content=b"body").status_code == 200
     return c
 
 
@@ -102,9 +102,9 @@ def test_unmatched_path_is_invalid_uri(app, path):
         ("PUT", "/", "GET"),
         ("DELETE", "/", "GET"),
         ("PATCH", "/", "GET"),
-        ("PATCH", "/b", ALL_S3_METHODS),
-        ("PATCH", "/b/k", ALL_S3_METHODS),
-        ("TRACE", "/b/k", ALL_S3_METHODS),
+        ("PATCH", "/bkt", ALL_S3_METHODS),
+        ("PATCH", "/bkt/k", ALL_S3_METHODS),
+        ("TRACE", "/bkt/k", ALL_S3_METHODS),
         ("PATCH", "/health", ALL_S3_METHODS),
     ],
 )
@@ -126,23 +126,23 @@ def test_head_on_service_is_method_not_allowed_without_body(client):
 
 
 def test_unsupported_method_changes_nothing(client):
-    assert client.request("PATCH", "/b/k", content=b"new").status_code == 405
+    assert client.request("PATCH", "/bkt/k", content=b"new").status_code == 405
     assert client.request("DELETE", "/").status_code == 405
-    assert client.get("/b/k").content == b"body"
-    assert client.head("/b").status_code == 200
+    assert client.get("/bkt/k").content == b"body"
+    assert client.head("/bkt").status_code == 200
 
 
 # --- OPTIONS (CORS preflight, not implemented) ---
 
 
-@pytest.mark.parametrize("path", ["/", "/b", "/b/k"])
+@pytest.mark.parametrize("path", ["/", "/bkt", "/bkt/k"])
 def test_options_is_not_implemented(client, path):
     resp = client.options(path, headers={"Origin": "http://example.com"})
     assert resp.status_code == 501
     root = _error(resp)
     assert root.findtext("Code") == "NotImplemented"
     assert root.findtext("Method") == "OPTIONS"
-    assert client.get("/b/k").content == b"body"
+    assert client.get("/bkt/k").content == b"body"
 
 
 # --- validation errors ---
@@ -200,7 +200,7 @@ def test_unhandled_exception_on_head_has_no_body(app, stores, monkeypatch):
     _, metadata = stores
     client = TestClient(app, raise_server_exceptions=False)
     monkeypatch.setattr(metadata, "bucket_exists", lambda bucket: 1 / 0)
-    resp = client.head("/b")
+    resp = client.head("/bkt")
     assert resp.status_code == 500
     assert resp.headers["content-type"] == "application/xml"
     assert resp.content == b""

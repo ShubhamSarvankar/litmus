@@ -38,8 +38,8 @@ def _first_start(data_dir: Path, db_path: Path, put: bool = True) -> None:
     server.wait_ready()
     if put:
         with _client(server) as client:
-            assert client.put("/b").status_code == 200
-            assert client.put("/b/k", content=b"stored").status_code == 200
+            assert client.put("/bkt").status_code == 200
+            assert client.put("/bkt/k", content=b"stored").status_code == 200
     server.stop()
 
 
@@ -101,7 +101,7 @@ def test_first_start_writes_matching_store_ids(tmp_path: Path):
     server.wait_ready()
     try:
         with _client(server) as client:
-            assert client.get("/b/k").content == b"stored"
+            assert client.get("/bkt/k").content == b"stored"
     finally:
         server.stop()
     assert _store_row(db) == (store_id, "ready", blob_dir)
@@ -254,12 +254,12 @@ def test_second_server_on_the_same_blob_dir_refuses(tmp_path: Path):
     first.wait_ready()
     try:
         with _client(first) as client:
-            assert client.put("/b").status_code == 200
-            assert client.put("/b/k", content=b"first").status_code == 200
+            assert client.put("/bkt").status_code == 200
+            assert client.put("/bkt/k", content=b"first").status_code == 200
             _assert_refused_unchanged(tmp_path, a, db, "already in use by another server")
-            assert client.put("/b/k2", content=b"still serving").status_code == 200
-            assert client.get("/b/k").content == b"first"
-            assert client.get("/b/k2").content == b"still serving"
+            assert client.put("/bkt/k2", content=b"still serving").status_code == 200
+            assert client.get("/bkt/k").content == b"first"
+            assert client.get("/bkt/k2").content == b"still serving"
     finally:
         first.stop()
 
@@ -272,10 +272,10 @@ def test_second_server_sharing_the_database_with_another_blob_dir_refuses(tmp_pa
     first.wait_ready()
     try:
         with _client(first) as client:
-            assert client.put("/b").status_code == 200
-            assert client.put("/b/k", content=b"first").status_code == 200
+            assert client.put("/bkt").status_code == 200
+            assert client.put("/bkt/k", content=b"first").status_code == 200
             _assert_refused_unchanged(tmp_path, b, db, "has no STORE_ID marker")
-            assert client.put("/b/k2", content=b"still serving").status_code == 200
-            assert client.get("/b/k").content == b"first"
+            assert client.put("/bkt/k2", content=b"still serving").status_code == 200
+            assert client.get("/bkt/k").content == b"first"
     finally:
         first.stop()

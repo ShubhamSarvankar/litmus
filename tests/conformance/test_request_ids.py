@@ -30,8 +30,8 @@ def app(stores):
     storage, metadata = stores
     application = create_app(storage=storage, metadata=metadata)
     client = TestClient(application, raise_server_exceptions=False)
-    assert client.put("/b").status_code == 200
-    assert client.put("/b/k", content=b"0123456789" * 10).status_code == 200
+    assert client.put("/bkt").status_code == 200
+    assert client.put("/bkt/k", content=b"0123456789" * 10).status_code == 200
     return application
 
 
@@ -120,26 +120,33 @@ def _expect_continue_early_error(app, stores, monkeypatch):
 
 # (name, call, expected status, has an XML error body)
 RESPONSE_PATHS = [
-    ("handler success: PutObject", _via_client("PUT", "/b/new", content=b"x"), 200, False),
-    ("handler success: ListObjects", _via_client("GET", "/b"), 200, False),
-    ("handler success: DeleteObject", _via_client("DELETE", "/b/k"), 204, False),
+    ("handler success: PutObject", _via_client("PUT", "/bkt/new", content=b"x"), 200, False),
+    ("handler success: ListObjects", _via_client("GET", "/bkt"), 200, False),
+    ("handler success: DeleteObject", _via_client("DELETE", "/bkt/k"), 204, False),
     (
         "handler success: DeleteObjects",
-        _via_client("POST", "/b?delete", content=b"<Delete><Object><Key>k</Key></Object></Delete>"),
+        _via_client(
+            "POST", "/bkt?delete", content=b"<Delete><Object><Key>k</Key></Object></Delete>"
+        ),
         200,
         False,
     ),
-    ("handler success: CreateMultipartUpload", _via_client("POST", "/b/mp?uploads"), 200, False),
-    ("streaming GET", _via_client("GET", "/b/k"), 200, False),
-    ("streaming range GET", _via_client("GET", "/b/k", headers={"Range": "bytes=0-9"}), 206, False),
-    ("HEAD, no body", _via_client("HEAD", "/b/k"), 200, False),
-    ("HEAD error, no body", _via_client("HEAD", "/b/missing"), 404, False),
-    ("handler error: NoSuchKey", _via_client("GET", "/b/missing"), 404, True),
+    ("handler success: CreateMultipartUpload", _via_client("POST", "/bkt/mp?uploads"), 200, False),
+    ("streaming GET", _via_client("GET", "/bkt/k"), 200, False),
+    (
+        "streaming range GET",
+        _via_client("GET", "/bkt/k", headers={"Range": "bytes=0-9"}),
+        206,
+        False,
+    ),
+    ("HEAD, no body", _via_client("HEAD", "/bkt/k"), 200, False),
+    ("HEAD error, no body", _via_client("HEAD", "/bkt/missing"), 404, False),
+    ("handler error: NoSuchKey", _via_client("GET", "/bkt/missing"), 404, True),
     ("handler error: NoSuchBucket", _via_client("GET", "/missing/k"), 404, True),
-    ("request guard 501", _via_client("PUT", "/b/k?acl", content=b""), 501, True),
+    ("request guard 501", _via_client("PUT", "/bkt/k?acl", content=b""), 501, True),
     ("framework: InvalidURI", _unmatched_path, 400, True),
-    ("framework: MethodNotAllowed", _via_client("PATCH", "/b"), 405, True),
-    ("framework: OPTIONS NotImplemented", _via_client("OPTIONS", "/b"), 501, True),
+    ("framework: MethodNotAllowed", _via_client("PATCH", "/bkt"), 405, True),
+    ("framework: OPTIONS NotImplemented", _via_client("OPTIONS", "/bkt"), 501, True),
     ("framework: validation InvalidArgument", _validation_error, 400, True),
     ("framework: unhandled InternalError", _unhandled_exception, 500, True),
     ("Expect: 100-continue early error", _expect_continue_early_error, 404, True),
@@ -170,10 +177,10 @@ def test_two_requests_never_share_an_id(app):
     seen_request_ids, seen_host_ids = set(), set()
     for _ in range(100):
         for method, path in [
-            ("GET", "/b/k"),
-            ("GET", "/b/missing"),
-            ("PATCH", "/b"),
-            ("HEAD", "/b"),
+            ("GET", "/bkt/k"),
+            ("GET", "/bkt/missing"),
+            ("PATCH", "/bkt"),
+            ("HEAD", "/bkt"),
         ]:
             r = client.request(method, path)
             seen_request_ids.add(r.headers["x-amz-request-id"])
@@ -191,7 +198,7 @@ def test_generated_ids_are_distinct_and_well_formed():
 
 def test_error_responses_are_logged_with_their_request_id(app, caplog):
     with caplog.at_level(logging.INFO, logger="server.request_ids"):
-        r = _client(app).get("/b/missing")
+        r = _client(app).get("/bkt/missing")
     request_id = r.headers["x-amz-request-id"]
     lines = [rec.getMessage() for rec in caplog.records if rec.name == "server.request_ids"]
     assert any(request_id in line and "404" in line for line in lines), lines

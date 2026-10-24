@@ -127,7 +127,7 @@ def test_failed_put_whose_temp_cannot_be_removed_leaves_it_for_the_sweep(tmp_pat
         create_app(storage=FailingWrites(storage), metadata=metadata),
         raise_server_exceptions=False,
     )
-    assert client.put("/b").status_code == 200
+    assert client.put("/bkt").status_code == 200
     real_unlink = os.unlink
 
     def unlink(path, *args, **kwargs):
@@ -136,13 +136,13 @@ def test_failed_put_whose_temp_cannot_be_removed_leaves_it_for_the_sweep(tmp_pat
         return real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "unlink", unlink)
-    assert client.put("/b/k", content=b"body").status_code == 500
+    assert client.put("/bkt/k", content=b"body").status_code == 500
     monkeypatch.undo()
 
     (record,) = metadata.list_blob_records()
     assert record.state == "pending"
     assert storage.temp_entries() == [storage.temp_path(record.blob_id)]
-    assert client.get("/b/k").status_code == 404
+    assert client.get("/bkt/k").status_code == 404
 
     report = run_consistency_sweep(metadata, storage)
     assert storage.temp_entries() == []

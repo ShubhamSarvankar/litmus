@@ -56,11 +56,12 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**144 passed, 179 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**151 passed, 172 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
-table below, the ListObjects (V1) parameters moved 21 tests from failed to passed, and
+table below, bucket name validation moved 7 tests from failed to passed, the
+ListObjects (V1) parameters moved 21 tests from failed to passed, and
 the ListObjectsV2 parameters 21 more; the ListObjectVersions parameters changed no
 outcome (every selected versions test is skipped), though every test's teardown now
 pages through ListObjectVersions; `encoding-type=url` moved 2 more
@@ -85,6 +86,10 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | `8f9c4a9` | 330 | 508 | 99 | `Connection: close` on an early response to `Expect: 100-continue`. `test_100_continue_error_retry` passes. |
 | Storage layout (`f94ee21` to `4dea326`) | 330 | 508 | 99 | No outcome changed; see below. |
 | `b8e2625` | 330 | 508 | 100 | `x-amz-request-id` on every response. `test_object_requestid_matches_header_on_error` passes. |
+| `74b5902` | 330 | 508 | 121 | `delimiter`, `max-keys` and `marker` in ListObjects (V1). 21 passes gained. |
+| `4cee3b0` | 330 | 508 | 142 | ListObjectsV2 paging with `continuation-token` and `start-after`. 21 passes gained. |
+| `2011375` | 330 | 508 | 144 | `encoding-type=url` in all three listings. 2 passes gained. |
+| Bucket name validation | 330 | 508 | 151 | CreateBucket enforces the AWS naming rules. 7 passes gained: `test_bucket_create_naming_bad_ip`, `_bad_short_one`, `_bad_short_two`, `_bad_starts_nonalpha`, `_dns_dash_at_end`, `_dns_dot_dot`, `_dns_underscore`. Recorded at the commit that adds the validation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -103,7 +108,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 144 passes are incidental**.
+is authenticated or owned. By that rule, **27 of the 151 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -152,8 +157,11 @@ delimiter is ignored, and they do not exercise delimiter support.
   get their 404 from the client's HeadObject on the missing source, and no copy
   request reaches Litmus; `test_upload_part_copy_percent_encoded_key` expects
   UploadPartCopy to fail, and it gets 501.
-- Bucket naming, names are not validated and the test only checks that a valid name
-  is accepted (9): `test_bucket_create_naming_dns_long`,
+- Bucket naming, the test only checks that a valid name is accepted (9). Still
+  incidental after name validation: all 9 also pass against a copy of the server with
+  the check removed (run for this change), so they do not show that validation works;
+  the 7 tests that do show it fail on that copy, and so do the 2 that stay failing.
+  The 9: `test_bucket_create_naming_dns_long`,
   `test_bucket_create_naming_good_contains_hyphen`,
   `test_bucket_create_naming_good_contains_period`,
   `test_bucket_create_naming_good_long_60` to `_63` (4 tests),
@@ -195,7 +203,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Category | Selected | Passed | Failed | Skipped | What passes; why the rest fail |
 |---|---|---|---|---|---|
 | Bucket operations | 17 | 9 | 7 | 1 | Create, delete, head, list buckets, deleting a non-empty bucket refused, missing-bucket errors. Fail: re-creating a bucket you own expects success or BucketAlreadyOwnedByYou, and Litmus answers 409 BucketAlreadyExists (2 tests). That answer is deliberate: telling the owner apart needs authentication, which is out of scope; RGW-specific usage and statistics headers (3); ListBuckets ignores MaxBuckets and ContinuationToken (1); one test calls PutObjectAcl, which is 501 (1). |
-| Bucket naming | 18 | 9 | 9 | 0 | Valid names are accepted. Fail: Litmus does not validate bucket names apart from rejecting `.` and `..`, so invalid names are accepted. |
+| Bucket naming | 18 | 16 | 2 | 0 | Valid names are accepted; names that break the AWS rules (length, characters, edges, adjacent periods, IP format, reserved prefixes and suffixes) get 400 InvalidBucketName. Fail: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and `test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, and AWS's current rules allow both names, so Litmus accepts them (see Known gaps). |
 | Object operations | 28 | 25 | 3 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
@@ -216,7 +224,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **144** | **179** | **7** | |
+| **Total** | **330** | **151** | **172** | **7** | |
 
 ## AWS CLI
 
@@ -269,6 +277,27 @@ InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 (httptools), a method name the parser does not know (for example `BREW`) is rejected
 with a plain-text 400 before the request reaches the application. With
 `--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
+
+**Bucket names.** CreateBucket enforces the rules in "General purpose bucket naming
+rules" (<https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html>):
+3 to 63 characters; only lowercase letters, digits, `.` and `-`; begin and end with a
+letter or digit; no `..`; not shaped like an IP address (four dot-separated runs of
+digits, whatever their value); no prefix `xn--`, `sthree-` or `amzn-s3-demo-`; no suffix
+`-s3alias`, `--ol-s3`, `.mrap`, `--x-s3`, `--table-s3` or `-an`. An invalid name is 400
+InvalidBucketName and creates nothing, and the check runs before the existence check.
+Not enforced: the Transfer Acceleration rule (no periods), because Litmus has no
+acceleration; and global uniqueness, because Litmus has one account. `-an` is refused
+because AWS allows it only in an account regional namespace, which needs the
+`x-amz-bucket-namespace` header; Litmus does not implement namespaces. Only CreateBucket
+validates. Every other operation looks the name up as it is: a bucket in the store is
+served whatever its name (AWS keeps pre-2018 us-east-1 buckets with uppercase letters and
+underscores working, which is the case for a store written before this check), and a name
+not in the store is 404 NoSuchBucket, the answer for any missing bucket. The exceptions
+are `.` and `..`, which are 400 InvalidBucketName on every request (see
+`docs/design/storage-layout.md`, decision 16). Two selected ceph tests contradict the AWS
+rules and fail on purpose: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and
+`test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, but the current AWS
+page has no rule against a period next to a hyphen, so Litmus accepts both.
 
 **Listing parameters.** In all three listings the prefix is an exact, case sensitive
 prefix of the key (`_` and `%` are ordinary characters), read as an indexed key range,

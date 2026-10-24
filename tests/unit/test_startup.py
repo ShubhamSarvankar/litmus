@@ -52,9 +52,9 @@ def test_create_app_without_stores_touches_nothing(default_paths):
 
 def test_startup_builds_default_stores_and_tree(default_paths):
     with TestClient(create_app()) as client:
-        assert client.put("/b").status_code == 200
-        assert client.put("/b/k", content=b"hello").status_code == 200
-        assert client.get("/b/k").content == b"hello"
+        assert client.put("/bkt").status_code == 200
+        assert client.put("/bkt/k", content=b"hello").status_code == 200
+        assert client.get("/bkt/k").content == b"hello"
     blobs = default_paths / "blobs"
     assert sorted(p.name for p in blobs.iterdir()) == sorted([*FANOUT, "tmp", "LOCK", "STORE_ID"])
     assert (default_paths / "meta.db").is_file()

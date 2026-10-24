@@ -8,6 +8,7 @@ from fastapi.responses import Response
 
 from server.api.continuation_tokens import decode_token, encode_token
 from server.api.request_guard import NULL_VERSION_ID
+from server.bucket_names import bucket_name_violation
 from server.config import settings
 from server.crash_points import (
     BUCKET_DELETE_AFTER_COMMIT,
@@ -18,6 +19,7 @@ from server.errors.s3errors import (
     BucketAlreadyExists,
     BucketNotEmpty,
     InvalidArgument,
+    InvalidBucketName,
     InvalidEncodingType,
     NoSuchBucket,
     NotImplementedOperation,
@@ -408,6 +410,10 @@ async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
 
     # Configuration subresources (?versioning, ?cors, ...) never reach this handler:
     # server/api/request_guard.py answers them with 501 NotImplemented.
+    # Only CreateBucket validates the name (server/bucket_names.py), and before the
+    # existence check, so an invalid name that is somehow in the store is still refused.
+    if bucket_name_violation(bucket) is not None:
+        raise InvalidBucketName(extra={"BucketName": bucket})
     if metadata.bucket_exists(bucket):
         raise BucketAlreadyExists(extra={"BucketName": bucket})
     metadata.create_bucket(bucket, datetime.now(UTC).replace(tzinfo=None))
