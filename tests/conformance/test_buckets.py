@@ -48,7 +48,7 @@ def _error_code(response) -> str:
 
 
 def _seed_object(deps, bucket: str, key: str, body: bytes = b"data") -> None:
-    """Directly write an object via storage+metadata layers (object route not yet wired)."""
+    """Write an object through the storage and metadata layers, bypassing the HTTP route."""
     storage, metadata = deps
     blob_id = metadata.register_blob("object", bucket, key)
     etag, size = storage.write_blob(blob_id, io.BytesIO(body))

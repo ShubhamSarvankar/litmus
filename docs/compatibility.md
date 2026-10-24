@@ -258,6 +258,28 @@ object, and a DeleteObjects entry with `<VersionId>null</VersionId>` deletes the
 object. Any other version ID gets 501 (or a per-key NotImplemented error in
 DeleteObjects), and `versionId` on PUT or POST gets 501.
 
+**Chunk-framed bodies are refused.** PutObject and UploadPart with a chunk-framed
+(aws-chunked) body get 501 NotImplemented before any byte is written or any blob is
+registered, so no object, part or pending blob is left behind. Litmus identifies such a
+body the way S3 documents it: `x-amz-content-sha256` starting with `STREAMING-` (for
+example `STREAMING-UNSIGNED-PAYLOAD-TRAILER`), or an `x-amz-decoded-content-length`
+header. `Content-Encoding: aws-chunked` alone is not a marker, since S3 does not
+require it: such a request is stored as an ordinary body. botocore and boto3 1.36.0+
+and AWS CLI v2 2.23.0+ send chunk-framed bodies with a trailing checksum for
+PutObject and UploadPart by default when the endpoint URL is `https://`, including a
+custom endpoint (and so behind a TLS-terminating proxy); against a plain `http://`
+endpoint they send an ordinary body with an `x-amz-checksum-*` header. Before this
+check, Litmus answered 200 and stored the chunk sizes and trailer as object bytes.
+Clients can avoid framing by using an `http://` endpoint, or by setting
+`request_checksum_calculation = when_required` (PutObject and UploadPart do not
+require a checksum, so none is sent unless the caller sets `ChecksumAlgorithm`).
+
+**Checksums are not verified.** `x-amz-checksum-*` headers (and
+`x-amz-sdk-checksum-algorithm`) on PutObject and UploadPart are accepted but never
+checked, so a request whose body does not match its checksum still gets 200. No
+checksum is stored, and GetObject and HeadObject return no `x-amz-checksum-*` headers.
+`Content-MD5` is not checked either.
+
 **Conditional writes are 501.** PutObject with `If-Match`, `If-None-Match` or
 `x-amz-write-offset-bytes`, and CompleteMultipartUpload with `If-Match` or
 `If-None-Match`, get 501 NotImplemented. The existing object is untouched and the

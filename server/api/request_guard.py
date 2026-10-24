@@ -142,6 +142,16 @@ CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
 # supported request: CopyObject and UploadPartCopy.
 _UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
 
+# A chunk-framed (aws-chunked) body, as S3 identifies one: x-amz-content-sha256 names a
+# STREAMING- payload, and x-amz-decoded-content-length gives the size without the
+# framing (S3 User Guide, "Checking object integrity for data uploads", trailing
+# checksum headers). Content-Encoding: aws-chunked is optional there, so it is not a
+# marker. botocore 1.36+ and AWS CLI 2.23+ send such bodies for PutObject and
+# UploadPart to https endpoints. Litmus does not decode the framing; storing the body
+# as it arrives would keep the chunk sizes and trailer as object bytes.
+_STREAMING_PAYLOAD_PREFIX = "STREAMING-"
+_DECODED_LENGTH_HEADER = "x-amz-decoded-content-length"
+
 # Bucket names S3's naming rules forbid and that would read as path segments.
 _DOT_SEGMENTS = frozenset({".", ".."})
 
@@ -162,6 +172,14 @@ def _check(method: str, path: str, query, headers) -> None:
         )
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
+        if method == "PUT":  # PutObject and UploadPart
+            content_sha256 = headers.get("x-amz-content-sha256", "")
+            if content_sha256.upper().startswith(_STREAMING_PAYLOAD_PREFIX):
+                raise NotImplementedOperation(
+                    extra={"Header": "x-amz-content-sha256", "Value": content_sha256}
+                )
+            if _DECODED_LENGTH_HEADER in headers:
+                raise NotImplementedOperation(extra={"Header": _DECODED_LENGTH_HEADER})
         if method == "DELETE":
             conditional = CONDITIONAL_DELETE_HEADERS
         elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart
