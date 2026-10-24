@@ -17,7 +17,8 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
@@ -87,6 +88,38 @@ def _fsync_dir(directory: Path) -> None:
         os.close(dir_fd)
 
 
+class BlobWriter:
+    """The write side of BlobStore.open_writer: appends to the temp file and keeps the
+    MD5 and size of what was written."""
+
+    def __init__(self, out: IO[bytes], mid_write_point: str | None):
+        self._out = out
+        self._mid_write_point = mid_write_point
+        self._md5 = hashlib.md5()
+        self._first = True
+        self.size = 0
+
+    @property
+    def etag(self) -> str:
+        return f'"{self._md5.hexdigest()}"'
+
+    def write(self, data: bytes) -> None:
+        if self._out is None:
+            raise ValueError("write to a closed blob writer")
+        if not data:
+            return
+        self._out.write(data)
+        self._md5.update(data)
+        self.size += len(data)
+        if self._first and self._mid_write_point:
+            self._out.flush()
+            crash_point(self._mid_write_point)
+        self._first = False
+
+    def _close(self) -> None:
+        self._out = None
+
+
 class BlobStore:
     def __init__(self, blob_dir: Path, write_delay_ms: int = 0):
         self._root = Path(os.path.abspath(blob_dir))
@@ -145,25 +178,39 @@ class BlobStore:
         """Stream src into the blob: temp file, fsync, rename, fsync of the fanout
         directory. Returns (quoted MD5 ETag, size). On any failure no file of this
         blob is left behind and the exception propagates."""
-        md5 = hashlib.md5()
-        size = 0
+        with self.open_writer(blob_id, mid_write_point=mid_write_point) as writer:
+            while chunk := src.read(_CHUNK):
+                writer.write(chunk)
+        return writer.etag, writer.size
 
-        def copy(out: IO[bytes]) -> None:
-            nonlocal size
+    @contextmanager
+    def open_writer(
+        self,
+        blob_id: str,
+        mid_write_point: str | None = None,
+        verify: Callable[["BlobWriter"], None] | None = None,
+    ) -> Iterator["BlobWriter"]:
+        """Write a blob in several steps. The body of the with statement calls
+        writer.write(data) any number of times; leaving it normally runs verify(writer)
+        if given, then the durable sequence of write_blob (fsync, rename, fsync of the
+        fanout directory). If the body or verify raises, no file of this blob is left
+        behind and the exception propagates; verify runs before any fsync, so a
+        refusal costs no durable step. mid_write_point fires after the first write,
+        with those bytes flushed to the temp file. After a normal exit writer.etag
+        and writer.size describe the stored blob."""
+
+        def run_verify() -> None:
+            if verify is not None:
+                verify(writer)
+
+        with self._place(blob_id, before_sync=run_verify) as out:
             if self._write_delay_ms:
                 time.sleep(self._write_delay_ms / 1000)
-            first = True
-            while chunk := src.read(_CHUNK):
-                out.write(chunk)
-                md5.update(chunk)
-                size += len(chunk)
-                if first and mid_write_point:
-                    out.flush()
-                    crash_point(mid_write_point)
-                first = False
-
-        self._place(blob_id, copy)
-        return f'"{md5.hexdigest()}"', size
+            writer = BlobWriter(out, mid_write_point)
+            try:
+                yield writer
+            finally:
+                writer._close()
 
     def assemble_blob(
         self, blob_id: str, part_ids: Iterable[str], mid_write_point: str | None = None
@@ -172,9 +219,7 @@ class BlobStore:
         durable sequence as write_blob. Returns the size. Raises MissingPartBlob,
         leaving no file of the new blob, if a part file does not exist."""
         size = 0
-
-        def copy(out: IO[bytes]) -> None:
-            nonlocal size
+        with self._place(blob_id) as out:
             first = True
             for part_id in part_ids:
                 try:
@@ -188,11 +233,15 @@ class BlobStore:
                     out.flush()
                     crash_point(mid_write_point)
                 first = False
-
-        self._place(blob_id, copy)
         return size
 
-    def _place(self, blob_id: str, copy) -> None:
+    @contextmanager
+    def _place(
+        self, blob_id: str, before_sync: Callable[[], None] | None = None
+    ) -> Iterator[IO[bytes]]:
+        """The one durable write sequence: open tmp/<id>.tmp, yield it for the caller
+        to fill, then before_sync, fsync, rename to the blob path, fsync of the fanout
+        directory. On any exception no file of the blob is left."""
         temp = self.temp_path(blob_id)
         final = self.blob_path(blob_id)
         # O_EXCL: the ID is registered and tmp/ is emptied at startup, so an
@@ -201,7 +250,9 @@ class BlobStore:
         renamed = False
         try:
             with os.fdopen(fd, "wb") as out:
-                copy(out)
+                yield out
+                if before_sync is not None:
+                    before_sync()
                 out.flush()
                 os.fsync(out.fileno())
             os.rename(temp, final)
