@@ -269,16 +269,38 @@ def test_v1_marker_before_common_prefix_returns_it(client):
     assert _v1(client, delimiter="/", marker="")[1:] == (["b"], ["a/"])
 
 
+def page_cap(key_count: int, max_keys: int) -> int:
+    """The most pages a correct listing of key_count keys can take at max_keys per page.
+
+    Every entry (a key, or a common prefix covering at least one key) stands for at
+    least one distinct key, and every truncated page holds max_keys entries, so there
+    are at most ceil(key_count / max_keys) truncated pages, plus the last one. A paging
+    loop that exceeds this is looping, and must fail rather than hang the suite.
+    """
+    return -(-key_count // max_keys) + 1
+
+
+def paging_did_not_end(cap: int, key_count: int, max_keys: int) -> AssertionError:
+    return AssertionError(
+        f"paging did not end within {cap} pages for {key_count} keys at max-keys="
+        f"{max_keys}: a page restarts where an earlier one did"
+    )
+
+
 def test_v1_pages_through_common_prefixes(client):
-    _put(client, ["asdf", "boo/bar", "boo/baz/xyzzy", "cquux/thud", "cquux/bla"])
+    keys = ["asdf", "boo/bar", "boo/baz/xyzzy", "cquux/thud", "cquux/bla"]
+    _put(client, keys)
     pages, marker = [], ""
-    while True:
-        root, keys, prefixes = _v1(client, delimiter="/", marker=marker, **{"max-keys": "1"})
-        pages.append((keys, prefixes))
+    cap = page_cap(len(keys), 1)
+    for _ in range(cap):
+        root, page_keys, prefixes = _v1(client, delimiter="/", marker=marker, **{"max-keys": "1"})
+        pages.append((page_keys, prefixes))
         if root.findtext("IsTruncated") == "false":
             assert root.find("NextMarker") is None
             break
         marker = root.findtext("NextMarker")
+    else:
+        raise paging_did_not_end(cap, len(keys), 1)
     assert pages == [(["asdf"], []), ([], ["boo/"]), ([], ["cquux/"])]
 
 
@@ -346,9 +368,10 @@ def _v1_entries(root):
     return sorted(keys + prefixes, key=lambda e: e[1].encode("utf-8"))
 
 
-def _v1_all_pages(client, prefix, delimiter, max_keys):
+def _v1_all_pages(client, prefix, delimiter, max_keys, key_count):
     entries, marker = [], ""
-    for _ in range(1000):
+    cap = page_cap(key_count, max_keys)
+    for _ in range(cap):
         params = {"prefix": prefix, "marker": marker, "max-keys": str(max_keys)}
         if delimiter:
             params["delimiter"] = delimiter
@@ -366,7 +389,7 @@ def _v1_all_pages(client, prefix, delimiter, max_keys):
         else:
             assert root.find("NextMarker") is None
             marker = _contents(root)[-1]
-    raise AssertionError("paging did not end")
+    raise paging_did_not_end(cap, key_count, max_keys)
 
 
 @pytest.mark.parametrize("seed", [1, 2])
@@ -383,7 +406,7 @@ def test_v1_pages_concatenate_to_unpaged_listing(client, seed):
                 params["delimiter"] = delimiter
             assert _v1_entries(_v1(client, **params)[0]) == expected, (prefix, delimiter)
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
-                got = _v1_all_pages(client, prefix, delimiter, max_keys)
+                got = _v1_all_pages(client, prefix, delimiter, max_keys, len(keys))
                 assert got == expected, (prefix, delimiter, max_keys)
 
 
@@ -457,7 +480,8 @@ def test_v2_token_round_trips_non_ascii_keys(client):
     keys = ["é/1", "é/2", "日本", "\U0001f600", "\U0010ffff", "\U0010ffff/x"]
     _put(client, keys)
     got, token = [], None
-    while True:
+    cap = page_cap(len(keys), 1)
+    for _ in range(cap):
         params = {"max-keys": "1"}
         if token:
             params["continuation-token"] = token
@@ -466,6 +490,8 @@ def test_v2_token_round_trips_non_ascii_keys(client):
         token = root.findtext("NextContinuationToken")
         if root.findtext("IsTruncated") == "false":
             break
+    else:
+        raise paging_did_not_end(cap, len(keys), 1)
     assert got == sorted(keys, key=lambda k: k.encode("utf-8"))
 
 
@@ -542,10 +568,11 @@ def _v2_entries(root):
     return _v1_entries(root)
 
 
-def _v2_all_pages(client, prefix, delimiter, max_keys):
+def _v2_all_pages(client, prefix, delimiter, max_keys, key_count):
     """Page with continuation tokens only: no start-after and no marker."""
     entries, token = [], None
-    for _ in range(1000):
+    cap = page_cap(key_count, max_keys)
+    for _ in range(cap):
         params = {"prefix": prefix, "max-keys": str(max_keys)}
         if delimiter:
             params["delimiter"] = delimiter
@@ -560,7 +587,7 @@ def _v2_all_pages(client, prefix, delimiter, max_keys):
             return entries
         assert page, "a truncated page must not be empty"
         token = root.findtext("NextContinuationToken")
-    raise AssertionError("paging did not end")
+    raise paging_did_not_end(cap, key_count, max_keys)
 
 
 @pytest.mark.parametrize("seed", [1, 2])
@@ -577,7 +604,7 @@ def test_v2_pages_concatenate_to_unpaged_listing(client, seed):
                 params["delimiter"] = delimiter
             assert _v2_entries(_v2(client, **params)[0]) == expected, (prefix, delimiter)
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
-                got = _v2_all_pages(client, prefix, delimiter, max_keys)
+                got = _v2_all_pages(client, prefix, delimiter, max_keys, len(keys))
                 assert got == expected, (prefix, delimiter, max_keys)
 
 
@@ -693,11 +720,12 @@ def _versions_entries(root):
     return sorted(keys + prefixes, key=lambda e: e[1].encode("utf-8"))
 
 
-def _versions_all_pages(client, prefix, delimiter, max_keys):
+def _versions_all_pages(client, prefix, delimiter, max_keys, key_count):
     """Page as botocore's paginator does: pass NextKeyMarker and NextVersionIdMarker
     back as key-marker and version-id-marker, omitting whichever is absent."""
     entries, markers = [], {}
-    for _ in range(1000):
+    cap = page_cap(key_count, max_keys)
+    for _ in range(cap):
         params = {"prefix": prefix, "max-keys": str(max_keys), **markers}
         if delimiter:
             params["delimiter"] = delimiter
@@ -716,7 +744,7 @@ def _versions_all_pages(client, prefix, delimiter, max_keys):
             markers["version-id-marker"] = "null"
         else:
             assert root.find("NextVersionIdMarker") is None
-    raise AssertionError("paging did not end")
+    raise paging_did_not_end(cap, key_count, max_keys)
 
 
 @pytest.mark.parametrize("seed", [1, 2])
@@ -733,7 +761,7 @@ def test_versions_pages_concatenate_to_unpaged_listing(client, seed):
                 params["delimiter"] = delimiter
             assert _versions_entries(_versions(client, **params)[0]) == expected
             for max_keys in (1, 2, 3, 7, rng.randint(4, 40)):
-                got = _versions_all_pages(client, prefix, delimiter, max_keys)
+                got = _versions_all_pages(client, prefix, delimiter, max_keys, len(keys))
                 assert got == expected, (prefix, delimiter, max_keys)
 
 

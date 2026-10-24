@@ -245,7 +245,14 @@ def test_ceph_teardown_loop_deletes_everything(s3):
         s3.put_object(Bucket="teardown", Key=key, Body=b"")
     kwargs = {"Bucket": "teardown", "MaxKeys": 128}
     deleted, truncated = [], True
+    # ceph's loop has no bound; here a listing that restarts where an earlier page did
+    # fails instead of hanging. ceil(len / 128) truncated pages, plus the last one.
+    cap, pages = -(-len(keys) // 128) + 1, 0
     while truncated:
+        pages += 1
+        assert pages <= cap, (
+            f"paging did not end within {cap} pages for {len(keys)} keys at MaxKeys=128"
+        )
         listing = s3.list_object_versions(**kwargs)
         kwargs["KeyMarker"] = listing.get("NextKeyMarker")
         kwargs["VersionIdMarker"] = listing.get("NextVersionIdMarker")

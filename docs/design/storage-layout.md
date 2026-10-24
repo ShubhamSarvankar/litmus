@@ -1190,12 +1190,16 @@ here passed under the mutation.
    restarts at `key > cp` instead of `key >= successor(cp)`, and a marker equal to or
    inside a common prefix is a plain lower bound. Both parts are needed to cover all three
    listings: V2 continues from its token, V1 and ListObjectVersions from `marker = cp`.
-   27 tests failed and one hung:
+   28 tests failed: 27 directly, and one that hung until the paging loops in the tests
+   had caps (see V1):
    - V1: `test_v1_marker_at_or_inside_common_prefix_skips_it` for `a/`, `a/1` and
      `a/15` (3), `test_v1_pages_concatenate_to_unpaged_listing` (2) and
-     `test_v1_encoded_elements`; `test_v1_pages_through_common_prefixes` never ends,
-     because its loop pages until a response is not truncated and each page returns
-     `boo/` again. It had to be deselected for the rest of its file to run.
+     `test_v1_encoded_elements`. `test_v1_pages_through_common_prefixes` hung before
+     the paging loops in the tests had page caps: it paged until a response was not
+     truncated, and each page returned `boo/` again, so it had to be deselected for the
+     rest of its file to run. Every hand-written paging loop now stops after the most
+     pages a correct listing of its keys can take, and this test fails in under a
+     second with "paging did not end within 6 pages for 5 keys at max-keys=1".
    - V2: `test_v2_start_after_at_or_inside_common_prefix_skips_it` for `a/` and `a/1`
      (2), `test_v2_token_carries_restart_after_common_prefix`,
      `test_v2_pages_concatenate_to_unpaged_listing` (2) and `test_v2_encoded_elements`.
