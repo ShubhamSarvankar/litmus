@@ -152,7 +152,9 @@ server/
   consistency.py       startup sweep
   crash_points.py      named crash points for Tier B tests
   connection.py        closes the connection after an early error to an Expect: 100-continue request
-  api/                 bucket, object and multipart routes; request_guard.py answers 501
+  api/                 routes: buckets.py for buckets; multipart.py for every
+                       /{bucket}/{key} request, handing plain object requests to
+                       the handlers in objects.py; request_guard.py answers 501
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit
   metadata/sqlite.py   schema, blob registry and transactions

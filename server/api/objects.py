@@ -2,7 +2,7 @@ import io
 import os
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Request
+from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -26,8 +26,6 @@ from server.errors.s3errors import (
 )
 from server.metadata.base import BucketMissing, ObjectMeta
 from server.storage.lifecycle import collect_garbage, discard_new_blob
-
-router = APIRouter()
 
 _CHUNK = 65536
 # GET re-reads the row when the blob it named was already replaced and unlinked;
@@ -247,26 +245,3 @@ async def _delete_object(bucket: str, key: str, request: Request) -> Response:
     crash_point(DELETE_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)
-
-
-# --- router entry points (thin wrappers) ---
-
-
-@router.put("/{bucket}/{key:path}")
-async def put_object(bucket: str, key: str, request: Request) -> Response:
-    return await _put_object(bucket, key, request)
-
-
-@router.get("/{bucket}/{key:path}")
-async def get_object(bucket: str, key: str, request: Request) -> Response:
-    return await _get_object(bucket, key, request)
-
-
-@router.head("/{bucket}/{key:path}")
-async def head_object(bucket: str, key: str, request: Request) -> Response:
-    return await _head_object(bucket, key, request)
-
-
-@router.delete("/{bucket}/{key:path}")
-async def delete_object(bucket: str, key: str, request: Request) -> Response:
-    return await _delete_object(bucket, key, request)
