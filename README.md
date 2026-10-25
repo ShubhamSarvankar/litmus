@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 162 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 163 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -199,5 +199,5 @@ docs/
 ## Not implemented
 
 Authentication, ACLs and policies, versioning, CopyObject, the `allow-unordered`
-listing extension, system headers and user metadata on multipart uploads, and
-conditional writes and deletes. Litmus runs as one process on one machine. See [`docs/compatibility.md`](docs/compatibility.md).
+listing extension, and conditional writes and deletes. Litmus runs as one process on one
+machine. See [`docs/compatibility.md`](docs/compatibility.md).

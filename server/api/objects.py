@@ -146,6 +146,21 @@ def _response_overrides(request: Request) -> dict[str, str]:
     return overrides
 
 
+def request_object_headers(headers) -> dict:
+    """What PutObject and CreateMultipartUpload store with an object, from a request's
+    headers: Content-Type, the system headers and the user metadata, keyed by the
+    ObjectMeta and UploadMeta field names. Raises MetadataTooLarge."""
+    return {
+        "content_type": headers.get("content-type", "binary/octet-stream"),
+        "cache_control": _header_value(headers, "cache-control"),
+        "content_disposition": _header_value(headers, "content-disposition"),
+        "content_encoding": _stored_content_encoding(headers),
+        "content_language": _header_value(headers, "content-language"),
+        "expires": _header_value(headers, "expires"),
+        "user_metadata": parse_user_metadata(headers),
+    }
+
+
 def _stored_headers(meta: ObjectMeta) -> dict[str, str]:
     """The stored system headers and user metadata GET and HEAD return, besides
     Content-Type."""
@@ -172,13 +187,12 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     # Refused before the body is read and before any blob is registered.
-    user_metadata = parse_user_metadata(request.headers)
+    stored = request_object_headers(request.headers)
 
     # A framed body is decoded straight into the blob; the plain path buffers it whole.
     framed = preflight(request.headers) if is_framed(request.headers) else None
     checks = UploadChecks.from_headers(request.headers, trailer=CRC64NVME if framed else None)
     body = b"" if framed else await request.body()
-    content_type = request.headers.get("content-type", "binary/octet-stream")
 
     blob_id = metadata.register_blob("object", bucket, key)
     crash_point(PUT_AFTER_REGISTER)
@@ -206,14 +220,8 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         size=size,
         etag=etag,
         last_modified=datetime.now(UTC).replace(tzinfo=None),
-        content_type=content_type,
         blob_id=blob_id,
-        cache_control=_header_value(request.headers, "cache-control"),
-        content_disposition=_header_value(request.headers, "content-disposition"),
-        content_encoding=_stored_content_encoding(request.headers),
-        content_language=_header_value(request.headers, "content-language"),
-        expires=_header_value(request.headers, "expires"),
-        user_metadata=user_metadata,
+        **stored,
     )
     try:
         replaced = metadata.put_object_meta(bucket, key, meta)

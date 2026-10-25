@@ -67,7 +67,14 @@ class UploadMeta:
     key: str
     initiated: datetime
     state: str = "open"
+    # What CreateMultipartUpload was given; Complete copies it onto the object.
     content_type: str = "binary/octet-stream"
+    cache_control: str | None = None
+    content_disposition: str | None = None
+    content_encoding: str | None = None
+    content_language: str | None = None
+    expires: str | None = None
+    user_metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -179,7 +186,23 @@ class MetadataStore(Protocol):
     # One page of keys and common prefixes after marker (or from start_at, inclusive),
     # read in one read transaction.
 
-    def create_upload(self, upload_id: str, bucket: str, key: str, initiated: datetime) -> None: ...
+    def create_upload(
+        self,
+        upload_id: str,
+        bucket: str,
+        key: str,
+        initiated: datetime,
+        *,
+        content_type: str = "binary/octet-stream",
+        cache_control: str | None = None,
+        content_disposition: str | None = None,
+        content_encoding: str | None = None,
+        content_language: str | None = None,
+        expires: str | None = None,
+        user_metadata: dict[str, str] | None = None,
+    ) -> None: ...
+
+    # Creates the open upload with the headers and metadata it will give the object.
 
     def get_upload(self, upload_id: str) -> UploadMeta | None: ...
 

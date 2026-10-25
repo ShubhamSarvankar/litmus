@@ -127,9 +127,15 @@ async def _initiate(bucket: str, key: str, request: Request) -> Response:
     metadata = request.app.state.metadata
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
+    # The same headers and rules as PutObject; refused before the upload is created.
+    from server.api.objects import request_object_headers
+
+    stored = request_object_headers(request.headers)
     upload_id = uuid.uuid4().hex
     try:
-        metadata.create_upload(upload_id, bucket, key, datetime.now(UTC).replace(tzinfo=None))
+        metadata.create_upload(
+            upload_id, bucket, key, datetime.now(UTC).replace(tzinfo=None), **stored
+        )
     except BucketMissing:
         raise NoSuchBucket(extra={"BucketName": bucket}) from None
     return Response(

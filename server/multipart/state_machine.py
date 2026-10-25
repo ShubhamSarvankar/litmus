@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 from server.crash_points import (
     COMPLETE_AFTER_ASSEMBLE,
     COMPLETE_AFTER_COMMIT,
@@ -95,8 +93,16 @@ def complete_multipart_upload(
         key=key,
         size=size,
         etag=etag,
-        last_modified=datetime.now(UTC).replace(tzinfo=None),
+        # S3 User Guide, "System-defined object metadata": for a multipart upload, the
+        # object's date is the date the upload was initiated.
+        last_modified=upload.initiated,
         content_type=upload.content_type,
+        cache_control=upload.cache_control,
+        content_disposition=upload.content_disposition,
+        content_encoding=upload.content_encoding,
+        content_language=upload.content_language,
+        expires=upload.expires,
+        user_metadata=upload.user_metadata,
         blob_id=blob_id,
         upload_id=upload_id,
     )

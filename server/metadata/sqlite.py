@@ -202,6 +202,12 @@ def _upload(row: sqlite3.Row) -> UploadMeta:
         initiated=_str_to_dt(row["initiated"]),
         state=row["state"],
         content_type=row["content_type"],
+        cache_control=row["cache_control"],
+        content_disposition=row["content_disposition"],
+        content_encoding=row["content_encoding"],
+        content_language=row["content_language"],
+        expires=row["expires"],
+        user_metadata=json.loads(row["user_metadata"]),
     )
 
 
@@ -618,14 +624,43 @@ class SQLiteMetadataStore:
 
     # --- Multipart uploads ---
 
-    def create_upload(self, upload_id: str, bucket: str, key: str, initiated: datetime) -> None:
+    def create_upload(
+        self,
+        upload_id: str,
+        bucket: str,
+        key: str,
+        initiated: datetime,
+        *,
+        content_type: str = "binary/octet-stream",
+        cache_control: str | None = None,
+        content_disposition: str | None = None,
+        content_encoding: str | None = None,
+        content_language: str | None = None,
+        expires: str | None = None,
+        user_metadata: dict[str, str] | None = None,
+    ) -> None:
         with self._write() as conn:
             if not conn.execute("SELECT 1 FROM buckets WHERE name = ?", (bucket,)).fetchone():
                 raise BucketMissing(bucket)
             conn.execute(
-                "INSERT INTO multipart_uploads (upload_id, bucket, key, initiated, state) "
-                "VALUES (?, ?, ?, ?, 'open')",
-                (upload_id, bucket, key, _dt_to_str(initiated)),
+                """INSERT INTO multipart_uploads (upload_id, bucket, key, initiated, state,
+                                                  content_type, cache_control,
+                                                  content_disposition, content_encoding,
+                                                  content_language, expires, user_metadata)
+                   VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    upload_id,
+                    bucket,
+                    key,
+                    _dt_to_str(initiated),
+                    content_type,
+                    cache_control,
+                    content_disposition,
+                    content_encoding,
+                    content_language,
+                    expires,
+                    json.dumps(user_metadata or {}, ensure_ascii=False, sort_keys=True),
+                ),
             )
 
     def get_upload(self, upload_id: str) -> UploadMeta | None:

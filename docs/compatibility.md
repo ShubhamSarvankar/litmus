@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**162 passed, 161 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**163 passed, 160 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -73,7 +73,8 @@ storing the system headers moved 3 more (`test_object_write_cache_control`,
 `test_object_write_expires` and `test_object_content_encoding_aws_chunked`), and storing
 user metadata moved 3 more (`test_object_set_get_metadata_none_to_good`, `_none_to_empty`
 and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
-(`test_object_raw_response_headers`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+(`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
+moved 1 more (`test_multipart_upload_resend_part`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -105,6 +106,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | System headers on PutObject | 330 | 508 | 158 | PutObject stores `Cache-Control`, `Content-Disposition`, `Content-Encoding` (without `aws-chunked`), `Content-Language` and `Expires`, and GET and HEAD return them. 3 passes gained: `test_object_write_cache_control`, `test_object_write_expires` and `test_object_content_encoding_aws_chunked`, as forecast; the results file differs from the previous one in those three lines only. Recorded at the commit that adds the storage. |
 | User metadata on PutObject | 330 | 508 | 161 | PutObject stores `x-amz-meta-*` and GET and HEAD return it, with RFC 2047 decoding on store and encoding on return and a 2048 byte limit (400 MetadataTooLarge). 3 passes gained: `test_object_set_get_metadata_none_to_good`, `_none_to_empty` and `_overwrite_to_empty`, as forecast; the results file differs from the previous one in those three lines only. `test_object_set_get_unicode_metadata` stays failing, as forecast: it fails on the RFC 2047 value Litmus returns, which botocore hands back undecoded. `test_object_metadata_replaced_on_put`, which passed because Litmus stored nothing, now passes because an overwrite replaces the metadata: against a copy of the server whose overwrite keeps the old metadata it fails, so it leaves the incidental list (27 to 26). Recorded at the commit that adds the storage. |
 | `response-*` overrides on GET and HEAD | 330 | 508 | 162 | `response-cache-control`, `-content-disposition`, `-content-encoding`, `-content-language`, `-content-type` and `-expires` set the response header on GET (200 and 206) and HEAD, and are never stored. 1 pass gained: `test_object_raw_response_headers`, as forecast: it asserts the five headers the overrides set, its setup (`ACL` on CreateBucket and PutObject) already passed, and it is the only selected test that sends a `response-*` parameter. No other outcome changed; the results file differs from the previous one in that line only. Recorded at the commit that adds the overrides. |
+| Multipart upload headers | 330 | 508 | 163 | CreateMultipartUpload stores `Content-Type`, the system headers and `x-amz-meta-*` with the upload and Complete gives them to the object, which is dated by the upload's initiation time. 1 pass gained: `test_multipart_upload_resend_part`, as forecast: it completes each upload once, checks the object's Content-Type and metadata, and fails today only on `binary/octet-stream == text/bla`. `test_multipart_upload` stays failing as forecast: it fails at its second Complete (`NoSuchUpload`) before it reaches its Content-Type assertion. No selected test reads Last-Modified of a multipart object. The results file differs from the previous one in that one line only. Recorded at the commit that adds the storage. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -123,7 +125,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 162 passes are incidental**.
+is authenticated or owned. By that rule, **26 of the 163 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -224,7 +226,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). |
-| Multipart upload | 14 | 8 | 6 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object. Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); Content-Type given to CreateMultipartUpload is not applied (1); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
+| Multipart upload | 14 | 9 | 5 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
@@ -237,7 +239,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **162** | **161** | **7** | |
+| **Total** | **330** | **163** | **160** | **7** | |
 
 ## AWS CLI
 
@@ -811,8 +813,8 @@ rest is Litmus's choice, listed here:
   `=?UTF-8?B?SGVsbG8gV29ybGTDqQ==?=`, as the documentation describes, and botocore passes
   a metadata header value on undecoded (`_parse_header_map` in `botocore/parsers.py`).
   Upstream marks the test `fails_on_rgw`.
-- CreateMultipartUpload and UploadPart ignore `x-amz-meta-*`; the completed object has
-  none.
+- CreateMultipartUpload stores `x-amz-meta-*` with the upload and Complete gives it to the
+  object; UploadPart and Complete ignore it (see "Multipart upload headers").
 
 **System headers.** PutObject stores `Cache-Control`, `Content-Disposition`,
 `Content-Encoding`, `Content-Language` and `Expires` with the object, and GET and HEAD
@@ -842,10 +844,47 @@ metadata") and that GET and HEAD return them; the rest is Litmus's choice, liste
   RFC 2047 decoding or encoding is applied to these headers.
 - The 2 KB limit the documentation gives for system-defined metadata in a PUT header
   is not enforced.
-- CreateMultipartUpload does not apply any of them to the completed object yet.
+- CreateMultipartUpload stores them with the upload and Complete gives them to the
+  object (see "Multipart upload headers"); UploadPart and Complete ignore them.
 
-**Multipart details.** Content-Type and user metadata given to CreateMultipartUpload
-are not applied to the object. The minimum part size is not enforced. `partNumber`
+**Multipart upload headers.** CreateMultipartUpload takes the headers PutObject takes for
+an object's properties: `Content-Type`, `Cache-Control`, `Content-Disposition`,
+`Content-Encoding`, `Content-Language`, `Expires` and `x-amz-meta-*` (S3 API reference,
+CreateMultipartUpload, "Request Syntax"). Litmus parses them with the PutObject code, so
+every rule under "System headers" and "User metadata" applies unchanged: the `aws-chunked`
+token is dropped from `Content-Encoding`, repeated headers are joined with `, `, a blank
+system header is no value, RFC 2047 is decoded and encoded for metadata, and metadata over
+2048 bytes is refused with 400 `MetadataTooLarge`. That refusal comes after the bucket
+check and before the upload is created, so it creates no upload and no row. The headers
+are stored in the upload's row, in the transaction that creates the upload.
+CompleteMultipartUpload copies them onto the object's row in the transaction that
+completes the upload, so a kill leaves the old object with its old headers and the upload
+open, or the new object with the upload's headers and the upload completed
+(`chaos/scenarios/test_crash_multipart_headers.py`). Completing over an existing object
+replaces its headers and metadata entirely, as PutObject does: a header the upload did not
+have is cleared. The documentation does not say in so many words that the headers of
+CreateMultipartUpload become the object's; it is the one request in the multipart API
+that documents them, and the tests in ceph/s3-tests expect it.
+
+- UploadPart and CompleteMultipartUpload document none of these headers: UploadPart's
+  request syntax lists `Content-Length`, `Content-MD5`, the checksum headers and the SSE-C
+  headers, and Complete's lists the checksum headers, `x-amz-mp-object-size`, `If-Match`,
+  `If-None-Match` and the SSE-C headers. Litmus ignores them there (a client that sends
+  `Content-Type` or `x-amz-meta-*` on a part or on Complete changes nothing), and the
+  object keeps what CreateMultipartUpload was given.
+- Last-Modified. S3 User Guide, "System-defined object metadata", gives it as "the object
+  creation date or the last modified date, whichever is the latest. For multipart uploads,
+  the object creation date is the date of initiation of the multipart upload." A
+  completed object's Last-Modified is therefore the time its upload was created, not the
+  time Complete ran. GET, HEAD, ListObjects, ListObjectsV2 and ListObjectVersions all read
+  the one stored value, so they agree (a listing rounds it to the second, as for every
+  object). Completing over an object gives the new upload's initiation time, even when
+  that is earlier than the replaced object's.
+- An upload created before Litmus stored these headers has the default columns: completing
+  it gives an object with `binary/octet-stream` and no other header or metadata, dated by
+  its initiation time. No migration is needed.
+
+**Multipart details.** The minimum part size is not enforced. `partNumber`
 on GET is ignored.
 
 **Conditional GET.** Only `If-Match` is evaluated on GET. `If-None-Match`,
