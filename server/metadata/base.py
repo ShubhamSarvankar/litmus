@@ -167,7 +167,16 @@ class MetadataStore(Protocol):
 
     def get_object_meta(self, bucket: str, key: str) -> ObjectMeta | None: ...
 
-    def delete_object_meta(self, bucket: str, key: str) -> list[str]: ...
+    def delete_object_meta(
+        self,
+        bucket: str,
+        key: str,
+        precondition: Callable[[str | None], None] | None = None,
+    ) -> list[str]: ...
+
+    # Deletes the row and returns its blob (now garbage); no row is no error.
+    # precondition is called inside the transaction with the ETag of the row being
+    # deleted (None if none); what it raises rolls the commit back.
 
     def delete_objects(self, bucket: str, keys: list[str]) -> list[str]: ...
 

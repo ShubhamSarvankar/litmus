@@ -77,7 +77,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`). `If-Match` on DeleteObject moved no test (see the table). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -115,6 +115,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Conditional PutObject | 330 | 508 | 177 | `If-Match` and `If-None-Match` on PutObject are evaluated inside the commit transaction against the row it replaces (412 PreconditionFailed, or 404 NoSuchKey for `If-Match` with no object); `Last-Modified` is now assigned inside that commit. 11 passes gained, exactly the 11 forecast: `test_put_object_ifmatch_good`, `_failed`, `_overwrite_existed_good` and `_nonexisted_failed`; `test_put_object_ifnonmatch_good`, `_failed`, `_nonexisted_good` and `_overwrite_existed_failed`; `test_atomic_conditional_write_1mb`; `test_atomic_dual_conditional_write_1mb`; and `test_put_object_if_match`. The results file differs from the previous one in those 11 lines only. None is incidental (26 stays 26): each failed with 501 before. Still failing, as forecast: the six that need versioning or CompleteMultipartUpload (`test_put_current_object_if_match`, `test_put_current_object_if_none_match`, `test_put_object_current_if_match`, and the three `test_multipart_put_*if_*match`). Recorded at the commit that adds the evaluation. |
 | Conditional CompleteMultipartUpload | 330 | 508 | 178 | `If-Match` and `If-None-Match` on CompleteMultipartUpload are evaluated inside the Complete commit transaction against the row it replaces, with the same rules as PutObject (412 PreconditionFailed, or 404 NoSuchKey for `If-Match` with no object); a refused Complete leaves the upload open with all its parts. 1 pass gained, as forecast: `test_multipart_put_object_if_match`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it failed with 501 before. Still failing, as forecast: `test_multipart_put_current_object_if_match` and `test_multipart_put_current_object_if_none_match`, which enable versioning first (501) and read `VersionId`. No other selected test sends `If-Match` or `If-None-Match` on Complete. Recorded at the commit that adds the evaluation. |
 | Complete body validation | 330 | 508 | 179 | CompleteMultipartUpload no longer trusts its body. The part list was sorted and assembled as written, so a part number listed twice with the right ETag was assembled twice (size and composite ETag counted it twice) and parts out of order were silently sorted: a silent correctness bug, which this document had wrongly described as InvalidPart. Now an empty, non-UTF-8, malformed or wrong-document body, a Part without PartNumber or ETag and a non-integer PartNumber are 400 MalformedXML (were 500 or accepted); a list that is not strictly ascending, repeats included, is 400 InvalidPartOrder; a PartNumber outside 1 to 10000 is 400 InvalidPart; all decided before a blob is registered. Choices: MalformedXML for an empty body (MissingRequestBodyError is the alternative), the error order NoSuchUpload, MalformedXML, InvalidPartOrder, InvalidPart, then the conditions, InvalidPart for an out of range number, and EntityTooSmall not enforced. 1 pass gained, as forecast: `test_multipart_upload_empty`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it failed with 500 before. Still failing, as forecast: `test_multipart_upload_size_too_small` (EntityTooSmall, not implemented) and `test_multipart_resend_first_finishes_last` (lists part 1 twice, was InvalidPart, now InvalidPartOrder). Recorded at the commit that adds the validation. |
+| Conditional DeleteObject | 330 | 508 | 179 | `If-Match` on DeleteObject is evaluated inside the delete's commit transaction against the ETag of the row it deletes: 412 PreconditionFailed when it does not match (strong comparison; `*`, quoted, unquoted and lists as for PutObject; a weak tag never matches), and the object, its row and its blob stay as they were. On a key that does not exist it is 404 NoSuchKey, `*` included, and nothing changes; an unconditional delete of a missing key stays 204 ([AWS, "How to perform conditional deletes"](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.md)). `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` stay 501, and so does `If-None-Match`. 409 is never emitted. No pass gained, as forecast: the one test that exercises the feature, `test_delete_object_if_match`, expects 204 on a missing key and fails on purpose (see "Conditional DeleteObject" under Known gaps). The results file is identical to the previous one. None of the 18 conditional delete tests passes: 12 enable versioning (501), `test_delete_object_if_match_last_modified_time` and `_size` send the directory bucket headers (501, deliberate), and the three non-versioned `test_delete_objects_*` need per key conditions (a later task). Recorded at the commit that adds the evaluation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -244,7 +245,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
 | `Expect: 100-continue` | 2 | 1 | 1 | 0 | An early error response closes the connection. Fail: the other test expects 403 from a bucket protected by an ACL, and Litmus has no ACLs. |
 | Conditional PutObject and Complete | 17 | 12 | 5 | 0 | `If-Match` and `If-None-Match` on PutObject are decided in the commit: `*`, entity tags quoted and unquoted, 412 and 404 (see "Conditional PutObject" under Known gaps), including the two atomic tests that overwrite while another PUT is in flight. `If-Match` and `If-None-Match` on CompleteMultipartUpload are decided in its commit the same way (`test_multipart_put_object_if_match`). Fail: the 5 others enable versioning first, which is 501. |
-| Conditional delete | 18 | 0 | 18 | 0 | Fail: conditional headers on DeleteObject and conditional entries in DeleteObjects are 501; 12 of these tests enable versioning first, which is 501. |
+| Conditional delete | 18 | 0 | 18 | 0 | `If-Match` on DeleteObject is decided in the commit (see "Conditional DeleteObject" under Known gaps), but the one non-versioned test for it, `test_delete_object_if_match`, expects 204 on a missing key, which Litmus refuses on purpose (404 NoSuchKey, as AWS). Fail: `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` on DeleteObject and conditional entries in DeleteObjects are 501; 12 of these tests enable versioning first, which is 501. |
 | CopyObject and UploadPartCopy | 27 | 3 | 24 | 0 | Fail: 501, either for CopyObject and UploadPartCopy themselves or for an ACL or versioning call the test makes first. Of the 3 that pass, 2 expect 404 for a missing source and get it from the client's HeadObject before any copy request is sent; the third expects UploadPartCopy to fail and gets 501. |
 | Versioning, restore and read-through | 11 | 0 | 5 | 6 | Fail: PutBucketVersioning is 501, and DeleteObject sends no `x-amz-delete-marker` header. Skipped by s3-tests: 6. |
 | Anonymous and ACL-based access | 19 | 1 | 18 | 0 | The one pass, `test_object_anon_put_write_access`, is incidental: it sets the bucket ACL through the `x-amz-acl` header, which Litmus ignores, and its anonymous PUT succeeds because nothing is authenticated. Fail: requests are not authenticated, so anonymous requests are accepted, and ACL operations are 501. |
@@ -785,10 +786,44 @@ whatever the headers say, and only a request that passes them can be 412 or 404.
   because it fails against the server as of 45abd9b and the new tests fail with this
   change reverted. No new pass is `fails_on_aws`.
 
-**Conditional deletes are 501.** DeleteObject and AbortMultipartUpload with any
-precondition header get 501 and change nothing. A DeleteObjects entry with `ETag`,
-`LastModifiedTime` or `Size` gets a per-key NotImplemented error and is kept; the
-other entries are still deleted.
+**Conditional DeleteObject.** `If-Match` on DeleteObject is decided inside the delete's
+commit transaction, after the write lock, against the ETag of the row that commit deletes
+(docs/design/storage-layout.md §10). The matching is the one PutObject uses: `*`, quoted
+and unquoted tags, comma lists, repeated lines as one list, a blank value as no condition,
+strong comparison, so `W/"x"` never matches. A value that does not match is 412
+PreconditionFailed, and the object, its row and its blob are untouched. Choices:
+
+- **A missing key is 404 NoSuchKey**, whatever the value, `*` included, and nothing
+  changes. The AWS user guide page ["How to perform conditional deletes"](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.md)
+  says that if the object does not exist when either precondition is evaluated, S3
+  rejects the request with a Not Found error. An unconditional delete of a missing key
+  stays 204. A blank `If-Match` is no condition, so it is 204. The bucket is still
+  checked first, so a missing bucket is NoSuchBucket. A client that retries a delete
+  whose first attempt committed (a kill after the commit) gets 404 on the retry.
+- **`test_delete_object_if_match` fails on purpose.** The ceph test expects 204 for
+  `If-Match: *` and `If-Match: badetag` on a missing key (`-ENOENT doesn't raise error in
+  delete op`, Ceph RGW's behavior); AWS returns Not Found, and so does Litmus. The test is
+  marked `fails_on_aws` ("only supported for directory buckets"), but the marker predates
+  AWS supporting `If-Match` on DeleteObject and DeleteObjects in general purpose buckets
+  (September 2025), so it no longer says the header is unsupported there. The other 17
+  conditional delete tests fail for the reasons in the table.
+- **`x-amz-if-match-last-modified-time` and `x-amz-if-match-size` stay 501**, alone or
+  with `If-Match`, and nothing is deleted. AWS's conditional delete support on general
+  purpose buckets covers `If-Match` only; these two headers are still documented for
+  directory buckets only, and Litmus has no directory buckets, so the 501 is a deliberate
+  choice, not a gap.
+- **`If-None-Match` on DeleteObject is unchanged: 501** (as are `If-Modified-Since` and
+  `If-Unmodified-Since`, which the reference does not list for DeleteObject either), so no
+  precondition on a DELETE is silently dropped.
+- 409 ConditionalRequestConflict is never emitted. AWS documents it for a concurrent
+  DELETE or PUT that succeeds first. Litmus serializes commits on the write lock and each
+  one is decided on the row the previous one left, so there is no in-flight conflict to
+  report: a delete that loses finds a different ETag (412) or no key (404).
+- AbortMultipartUpload still refuses every conditional header, `If-Match` included: it is
+  501 and the upload stays open.
+- **DeleteObjects is unchanged.** A DeleteObjects entry with `ETag`, `LastModifiedTime` or
+  `Size` gets a per-key NotImplemented error and is kept; the other entries are still
+  deleted. Per key ETag conditions come in a later task.
 
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The

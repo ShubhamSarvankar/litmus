@@ -542,9 +542,26 @@ class SQLiteMetadataStore:
         rows = self._read("SELECT * FROM objects WHERE bucket = ? AND key = ?", (bucket, key))
         return _object(rows[0]) if rows else None
 
-    def delete_object_meta(self, bucket: str, key: str) -> list[str]:
-        """The DeleteObject commit (§6.3 D2). Returns the blob that became garbage."""
-        return self.delete_objects(bucket, [key])
+    def delete_object_meta(
+        self,
+        bucket: str,
+        key: str,
+        precondition: Callable[[str | None], None] | None = None,
+    ) -> list[str]:
+        """The DeleteObject commit (§6.3 D2). Returns the blob that became garbage.
+
+        precondition, when given, is called with the ETag of the row being deleted
+        (None when there is none) after the write lock is taken; what it raises rolls
+        the commit back and propagates (§10)."""
+        garbage = []
+        with self._write() as conn:
+            old = self._current(conn, bucket, key)
+            if precondition is not None:
+                precondition(old["etag"] if old else None)
+            if old is not None:
+                conn.execute("DELETE FROM objects WHERE bucket = ? AND key = ?", (bucket, key))
+                garbage.append(self._retire_object(conn, old))
+        return garbage
 
     def delete_objects(self, bucket: str, keys: list[str]) -> list[str]:
         """Delete every key in one transaction (§6.4 X2). Returns the blobs that

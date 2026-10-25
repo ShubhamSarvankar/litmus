@@ -1,5 +1,6 @@
 """Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), If-Range, and the
-If-Match and If-None-Match preconditions of PutObject (write_precondition()).
+If-Match and If-None-Match preconditions of PutObject (write_precondition()) and the
+If-Match precondition of DeleteObject (delete_precondition()).
 
 evaluate_read_conditions() takes the request headers and the one row the response will
 be built from, and answers whether the response is 304 Not Modified. It raises
@@ -186,6 +187,36 @@ def write_precondition(headers, key: str) -> Callable[[str | None], None] | None
             and current_etag is not None
             and _matches(if_none_match, current_etag, strong=False)
         ):
+            raise PreconditionFailed()
+
+    return check
+
+
+def delete_precondition(headers, key: str) -> Callable[[str | None], None] | None:
+    """The If-Match check of a DeleteObject, as a function of the ETag of the key's
+    current row (None when there is none), or None when the request carries no
+    If-Match (or a blank one, which is no condition). The store calls it inside its
+    commit transaction, against the row that transaction deletes; it raises, and the
+    commit rolls back.
+
+    - With no current row the delete is 404 NoSuchKey whatever the value, "*" included,
+      and nothing changes. An unconditional delete of a missing key is still 204. The S3
+      user guide ("How to perform conditional deletes") says S3 rejects a conditional
+      delete with Not Found when the object does not exist when the precondition is
+      evaluated. ceph's test_delete_object_if_match expects 204 and fails on purpose.
+    - A row whose ETag does not match is 412 PreconditionFailed (strong comparison, so
+      a weak tag never matches; "*" matches any row).
+
+    Only If-Match is evaluated. The other conditional headers of a DELETE are refused
+    by request_guard before a handler runs."""
+    if_match = _entity_tags(headers, "if-match")
+    if if_match is None:
+        return None
+
+    def check(current_etag: str | None) -> None:
+        if current_etag is None:
+            raise NoSuchKey(extra={"Key": key})
+        if not _matches(if_match, current_etag, strong=True):
             raise PreconditionFailed()
 
     return check

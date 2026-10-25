@@ -107,8 +107,8 @@ rename, fsync of the parent directory, then the SQLite commit).
     CopyObject) must be checked in the same transaction as the metadata commit, after
     the new bytes are durable at a fresh path. A failed precondition must leave the
     old object's bytes and metadata untouched. PutObject and CompleteMultipartUpload
-    now do this (§10, §6.7 C4.c). Conditional deletes (still 501) should follow the same
-    model.
+    now do this (§10, §6.7 C4.c), and so does If-Match on DeleteObject (§10, D2.c).
+    The other conditional deletes (still 501) should follow the same model.
 
 16. **(asked) Lift the `.` / `..` key segment rejection.** S3 keys are opaque, but keys
     with `.` or `..` segments are rejected with 400 InvalidArgument (and bucket names
@@ -1071,8 +1071,9 @@ Other races, each decided by commit order:
 ### §10. Conditional writes and deletes (R15)
 
 Status: `If-Match` and `If-None-Match` on PutObject and on CompleteMultipartUpload are
-implemented as below. `x-amz-write-offset-bytes` and the conditional deletes are not;
-they still return 501 (docs/compatibility.md).
+implemented as below, and so is `If-Match` on DeleteObject (end of this section).
+`x-amz-write-offset-bytes` and the other conditional deletes are not; they still return
+501 (docs/compatibility.md).
 
 The authoritative check always runs inside the commit transaction (P4.b, C4.c), against
 the row as it is at that moment, after the new bytes are durable at their fresh path.
@@ -1157,12 +1158,38 @@ exactly one creator. An `If-Match` Complete whose commit comes after a DeleteObj
 holding the old bytes plus the appended ones, committed only if the current size still
 equals the offset, but nothing asks for it yet.
 
-Conditional deletes use the same model: `If-Match`, `x-amz-if-match-last-modified-time`
-and `x-amz-if-match-size` are evaluated against the row at D2.c, a DeleteObjects
-entry's `ETag`, `LastModifiedTime` and `Size` inside the batch transaction at X2, and
-AbortMultipartUpload's `x-amz-if-match-initiated-time` at A2.b. `docs/compatibility.md`
-defers real support until after the conditional-header work (category e); this design
-does not block it and needs no further layout change for it.
+**DeleteObject (implemented).** `delete_object_meta` takes the same optional
+`precondition` as `put_object_meta`, called inside BEGIN IMMEDIATE, after the write lock,
+with the ETag of the row the transaction deletes (None when there is none). It is built by
+`delete_precondition` in `server/api/conditions.py` from the request headers and reuses the
+ETag parsing and strong comparison of `If-Match` on PutObject (`*`, quoted, unquoted,
+lists, repeated lines, a blank value is no condition, a weak tag never matches). What it
+raises rolls the transaction back, so a refused delete leaves the row, its registry entry
+and its blob file as they were; the handler collects garbage only after a commit.
+
+| `If-Match` | Current row exists | No current row |
+|---|---|---|
+| `*` | delete, 204 | 404 NoSuchKey |
+| `<etag>` | delete, 204 if the ETag matches (strong comparison), else 412 | 404 NoSuchKey |
+
+A missing key is 404 NoSuchKey, as for PutObject, and rolls the transaction back; an
+unconditional delete of a missing key stays 204 (D2.b). The AWS user guide ("How to
+perform conditional deletes") says S3 rejects a conditional delete with Not Found when
+the object does not exist when the precondition is evaluated. So D2.b answers 204 only
+when the request has no `If-Match`: with one, the precondition runs on "no row" first.
+ceph's `test_delete_object_if_match` expects 204 there and fails on purpose. 409 is never
+emitted, as above: AWS documents it for a concurrent DELETE or PUT that succeeds first,
+and commits here are serialized on the write lock, so the loser is decided on committed
+state (412 or 404). A kill before the commit leaves the object, and the same request then
+succeeds; a kill after it leaves the object gone and the blob garbage for the sweep, and
+the same request retried is 404 (D2, D3).
+
+`x-amz-if-match-last-modified-time` and `x-amz-if-match-size` stay 501 on
+purpose (AWS documents them for directory buckets only), and so does `If-None-Match`. They would
+be evaluated against the same row at D2.c. A DeleteObjects entry's `ETag`, `LastModifiedTime`
+and `Size` (inside the batch transaction at X2) and AbortMultipartUpload's
+`x-amz-if-match-initiated-time` (at A2.b) are not implemented and need no further layout
+change.
 
 ### §11. CopyObject and UploadPartCopy (R13)
 
@@ -1580,9 +1607,10 @@ which returns 501), and `test_copy_object_ifmatch_good` / `_failed` (CopyObject)
 `test_multipart_upload` need Content-Type and user metadata carried from
 CreateMultipartUpload to the object (the schema has the columns; the handlers are
 category d / j1 work), and `test_multipart_upload` also re-completes a completed upload
-(j3). The 6 non-versioned conditional delete tests (`test_delete_object_if_match`,
-`test_delete_object_if_match_last_modified_time`, `test_delete_object_if_match_size`
-and their `test_delete_objects_*` counterparts) fit §10 but wait for category e; the
+(j3). Of the 6 non-versioned conditional delete tests, `test_delete_object_if_match` is
+evaluated (§10) but fails on purpose: it expects 204 for `If-Match` on a missing key and
+Litmus answers 404. `test_delete_object_if_match_last_modified_time` and `_size` (501) and
+the three `test_delete_objects_*` counterparts (per key conditions) still wait; the
 `current` and `version` variants enable bucket versioning and stay failing.
 `test_multipart_resend_first_finishes_last` is not helped: its Complete request lists
 part 1 twice, and the stale ETag gets InvalidPart.

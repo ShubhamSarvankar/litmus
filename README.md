@@ -45,7 +45,7 @@ parameters as follows.
 | PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | HEAD | `/{bucket}/{key}` | HeadObject |
-| DELETE | `/{bucket}/{key}` | DeleteObject. With `uploadId`: AbortMultipartUpload. |
+| DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match` |
 | GET | `/health` | Health check |
@@ -199,5 +199,5 @@ docs/
 ## Not implemented
 
 Authentication, ACLs and policies, versioning, CopyObject, the `allow-unordered`
-listing extension, append writes, and conditional deletes. Litmus runs as one process on one
+listing extension, append writes, and conditional deletes other than `If-Match` on DeleteObject. Litmus runs as one process on one
 machine. See [`docs/compatibility.md`](docs/compatibility.md).

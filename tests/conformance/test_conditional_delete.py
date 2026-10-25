@@ -1,4 +1,7 @@
-"""Conditional deletes are not evaluated yet, so they are refused rather than ignored.
+"""Conditional deletes that are not evaluated are refused rather than ignored.
+
+DeleteObject evaluates If-Match (tests/conformance/test_conditional_delete_object.py);
+every other conditional header on it, and all of them on AbortMultipartUpload, are 501.
 
 Ignoring a precondition would delete an object (or abort an upload) the client asked
 to keep. Header and element names are from the S3 API reference: DeleteObject
@@ -64,19 +67,16 @@ def test_header_list_covers_the_reference_and_rfc_7232_preconditions():
     assert set(CONDITIONAL_DELETE_HEADERS) == set(SATISFIED)
 
 
-@pytest.mark.parametrize("header", sorted(SATISFIED))
+@pytest.mark.parametrize("header", sorted(set(SATISFIED) - {"if-match"}))
 def test_delete_object_with_condition_returns_501_and_keeps_object(client, header):
     _assert_not_implemented(client.delete(f"/{BUCKET}/{KEY}", headers={header: SATISFIED[header]}))
     _assert_intact(client)
 
 
-def test_delete_object_with_if_match_star_returns_501(client):
-    _assert_not_implemented(client.delete(f"/{BUCKET}/{KEY}", headers={"if-match": "*"}))
-    _assert_intact(client)
-
-
 def test_delete_with_null_version_and_condition_returns_501(client):
-    resp = client.delete(f"/{BUCKET}/{KEY}?versionId=null", headers={"if-match": ETAG})
+    resp = client.delete(
+        f"/{BUCKET}/{KEY}?versionId=null", headers={"x-amz-if-match-size": str(len(BODY))}
+    )
     _assert_not_implemented(resp)
     _assert_intact(client)
 

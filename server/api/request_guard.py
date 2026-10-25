@@ -119,13 +119,14 @@ _ALLOWED_MUTATING_OBJECT = {
 NULL_VERSION_ID = "null"
 _NULL_VERSION_METHODS = frozenset({"GET", "HEAD", "DELETE"})
 
-# Conditional DELETE headers. Litmus does not evaluate them, and ignoring one would
-# delete an object (or abort an upload) the client asked to keep. From the S3 API
-# reference: DeleteObject takes If-Match, x-amz-if-match-last-modified-time and
-# x-amz-if-match-size; AbortMultipartUpload takes x-amz-if-match-initiated-time. The
+# Conditional DELETE headers. Litmus does not evaluate them on every DELETE, and
+# ignoring one would delete an object (or abort an upload) the client asked to keep. From
+# the S3 API reference: DeleteObject takes If-Match, x-amz-if-match-last-modified-time
+# and x-amz-if-match-size; AbortMultipartUpload takes x-amz-if-match-initiated-time. The
 # reference lists no other conditional headers for these operations; If-None-Match,
 # If-Modified-Since and If-Unmodified-Since (RFC 7232 preconditions) are refused too,
-# so no precondition on a DELETE is ever silently dropped.
+# so no precondition on a DELETE is ever silently dropped. All of them are refused on
+# AbortMultipartUpload.
 CONDITIONAL_DELETE_HEADERS = (
     "if-match",
     "x-amz-if-match-last-modified-time",
@@ -135,6 +136,12 @@ CONDITIONAL_DELETE_HEADERS = (
     "if-modified-since",
     "if-unmodified-since",
 )
+
+# DeleteObject evaluates If-Match in its commit (docs/design/storage-layout.md §10), so
+# it refuses the rest. AWS supports only If-Match on DeleteObject in general purpose
+# buckets; x-amz-if-match-last-modified-time and x-amz-if-match-size are documented for
+# directory buckets only, and Litmus has none, so refusing them is deliberate.
+UNEVALUATED_DELETE_OBJECT_HEADERS = tuple(h for h in CONDITIONAL_DELETE_HEADERS if h != "if-match")
 
 # Conditional write headers, from the S3 API reference: PutObject takes If-Match,
 # If-None-Match and x-amz-write-offset-bytes (append at an offset that must equal the
@@ -222,7 +229,11 @@ def _check(method: str, path: str, query, headers) -> None:
         if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
             raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
         if method == "DELETE":
-            conditional = CONDITIONAL_DELETE_HEADERS
+            conditional = (
+                CONDITIONAL_DELETE_HEADERS
+                if "uploadId" in query_keys
+                else UNEVALUATED_DELETE_OBJECT_HEADERS
+            )
         elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart
             conditional = UNEVALUATED_PUT_OBJECT_HEADERS
         else:

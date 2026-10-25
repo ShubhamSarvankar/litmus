@@ -8,7 +8,12 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
-from server.api.conditions import evaluate_read_conditions, if_range_holds, write_precondition
+from server.api.conditions import (
+    delete_precondition,
+    evaluate_read_conditions,
+    if_range_holds,
+    write_precondition,
+)
 from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
@@ -380,7 +385,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
 
 async def _delete_object(bucket: str, key: str, request: Request) -> Response:
     """DeleteObject (docs/design/storage-layout.md §6.3): the row goes in one
-    commit, the blob file after it."""
+    commit, the blob file after it. If-Match is decided in that commit (§10)."""
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
@@ -388,7 +393,9 @@ async def _delete_object(bucket: str, key: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     crash_point(DELETE_BEFORE_COMMIT)
-    garbage = metadata.delete_object_meta(bucket, key)
+    garbage = metadata.delete_object_meta(
+        bucket, key, precondition=delete_precondition(request.headers, key)
+    )
     crash_point(DELETE_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
     return Response(status_code=204)
