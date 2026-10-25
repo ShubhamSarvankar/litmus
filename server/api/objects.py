@@ -1,5 +1,6 @@
 import io
 import os
+import re
 from datetime import UTC, datetime
 
 from fastapi import Request
@@ -35,26 +36,41 @@ _CHUNK = 65536
 _GET_RETRIES = 3
 
 
-def _parse_range(range_header: str, total: int) -> tuple[int, int]:
-    """Parse 'bytes=start-end' → (start, end) inclusive. Raises ValueError on bad input."""
-    if not range_header.startswith("bytes="):
-        raise ValueError("malformed Range header")
-    spec = range_header[6:]
-    if "," in spec:
-        raise ValueError("multi-range not supported")
-    if spec.startswith("-"):
-        n = int(spec[1:])
-        if n <= 0:
-            raise ValueError("invalid suffix range")
-        start = max(0, total - n)
-        end = total - 1
-    else:
-        parts = spec.split("-", 1)
-        start = int(parts[0])
-        end = int(parts[1]) if parts[1] else total - 1
-    if start > end or end >= total:
-        raise ValueError("range out of bounds")
-    return start, end
+_BYTE_RANGE = re.compile(r"(?:(\d+)-(\d*)|-(\d+))", re.ASCII)
+# A numeral this long is not a client asking for bytes; it is read as an invalid
+# specifier, which is ignored, rather than handed to int() (RFC 9110 14.1.2).
+_MAX_DIGITS = 4000
+
+
+def _resolve_range(range_header: str, total: int) -> tuple[int, int] | None:
+    """Resolve a Range header against an object of total bytes (RFC 9110 14.1.2, 14.2).
+
+    Returns the inclusive (start, end) to send as a 206, with end clamped to the last
+    byte, or None when the header is to be ignored and the whole object served: a unit
+    other than bytes, a set of ranges, a specifier that is not valid, and a suffix range
+    on an empty object. Raises InvalidRange when the one range is valid and no byte of
+    the object satisfies it."""
+    unit, eq, spec = range_header.partition("=")
+    if not eq or unit.lower() != "bytes" or "," in spec:
+        return None
+    m = _BYTE_RANGE.fullmatch(spec)
+    if m is None or any(g is not None and len(g) > _MAX_DIGITS for g in m.groups()):
+        return None
+    unsatisfied = InvalidRange(headers={"Content-Range": f"bytes */{total}"})
+    if m.group(3) is not None:  # suffix-range: the last N bytes
+        n = int(m.group(3))
+        if n == 0:
+            raise unsatisfied
+        if total == 0:
+            return None
+        return max(0, total - n), total - 1
+    first = int(m.group(1))
+    last = int(m.group(2)) if m.group(2) else None
+    if last is not None and last < first:
+        return None
+    if first >= total:
+        raise unsatisfied
+    return first, total - 1 if last is None else min(last, total - 1)
 
 
 def _stream(f, start: int, length: int):
@@ -173,15 +189,9 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
             raise InternalError()
 
         range_header = request.headers.get("range")
-        if range_header:
-            try:
-                start, end = _parse_range(range_header, meta.size)
-            except ValueError as e:
-                if "multi-range" in str(e):
-                    f.close()
-                    return Response(status_code=400, content="Multi-range not supported")
-                # The handler below closes f on the way out.
-                raise InvalidRange(headers={"Content-Range": f"bytes */{meta.size}"}) from None
+        resolved = _resolve_range(range_header, meta.size) if range_header else None
+        if resolved is not None:
+            start, end = resolved
             length = end - start + 1
             return StreamingResponse(
                 _stream(f, start, length),
@@ -228,13 +238,9 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
 
     range_header = request.headers.get("range")
     if range_header:
-        try:
-            _parse_range(range_header, meta.size)
-        except ValueError as e:
-            # GET answers a multi-range with a 400 whose body is not an S3 error, and
-            # HEAD has no such answer to mirror; it ignores the header, as before.
-            if "multi-range" not in str(e):
-                raise InvalidRange(headers={"Content-Range": f"bytes */{meta.size}"}) from None
+        # Raises InvalidRange for a range that GET would refuse. A range GET would
+        # serve is ignored here, as before: HEAD does not narrow Content-Length.
+        _resolve_range(range_header, meta.size)
 
     return Response(
         status_code=200,

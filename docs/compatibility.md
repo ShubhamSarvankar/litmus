@@ -96,6 +96,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | DeleteObjects MalformedXML | 330 | 508 | 151 | A DeleteObjects body that is not well-formed XML gets 400 MalformedXML instead of 500. No outcome changed, and none was expected to: the results file is identical to the previous one, and the one selected test that expects MalformedXML, `test_multipart_upload_empty`, is CompleteMultipartUpload, which this change does not touch. All 195 DeleteObjects requests in the run were answered 200. Recorded at the commit that adds the error. |
 | DeleteObjects document validation | 330 | 508 | 153 | The Delete document is validated whole before anything is deleted: root, 1 to 1000 Objects, one Key each, Quiet. More than 1000 Objects is 400 MalformedXML. 2 passes gained: `test_multi_object_delete_key_limit` and `test_multi_objectv2_delete_key_limit`, as forecast; no other outcome changed. Recorded at the commit that adds the validation. |
 | InvalidRange error body | 330 | 508 | 155 | An unsatisfiable Range on GET is raised as the `InvalidRange` S3 error (416) instead of a bare 416, so it carries `Code`, `Message`, `RequestId` and `HostId`. 2 passes gained: `test_ranged_request_invalid_range` and `test_ranged_request_empty_object`, as forecast before the change; no other outcome changed. Recorded at the commit that adds the error. |
+| RFC 9110 Range handling | 330 | 508 | 155 | A range whose last byte is past the object is clamped and served as 206; a Range that does not parse, a unit other than `bytes`, and a set of ranges are ignored (200, whole object). No outcome changed, and none was expected to: the results file is identical to the previous one. Every Range in a selected GET test either ends inside the object or expects `bytes=40-50` to be 416, and the copy-range tests fail on 501. Recorded at the commit that adds the handling. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -213,7 +214,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Object operations | 28 | 25 | 3 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
 | User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
-| Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
+| Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges, a last byte past the end clamped; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). |
@@ -293,25 +294,55 @@ InternalError. One case is outside Litmus: with uvicorn's default HTTP parser
 with a plain-text 400 before the request reaches the application. With
 `--http h11`, such a request reaches Litmus and gets 405 MethodNotAllowed.
 
-**Range.** One `bytes=` range per GET. A range with no byte in the object is 416
-`InvalidRange`, with the standard error body (`Code`, `Message`, `RequestId`, `HostId`)
-and a `Content-Range: bytes */{size}` header. That includes every range on an empty
-object. HEAD with such a range is 416 too, without a body. Documented: the GetObject
-reference says "Amazon S3 doesn't support retrieving multiple ranges of data per `GET`
-request"; the Error reference lists `InvalidRange`, "The requested range cannot be
-satisfied.", 416; the HeadObject reference says "If the Range is not satisfiable, S3
-returns a `416 - Requested Range Not Satisfiable` error" and that an error to HEAD
-carries no exact code (HEAD has no body). Undocumented choices, none compared with S3:
-every Range form on an empty object is unsatisfiable (the AWS pages say nothing about
-empty objects; RFC 9110 defines no byte position in a zero-length representation); the
-416 carries `Content-Range: bytes */{size}`, which the AWS pages do not mention; the
-`InvalidRange` body holds no `ActualObjectSize` or `RangeRequested`; `bytes=-0` is
-unsatisfiable. Known gaps, unchanged by this: a range whose end is past the last byte
-(`bytes=5-999` on 10 bytes) is answered 416, where RFC 9110 clamps the end and S3 is
-expected to answer 206; a Range that does not parse (`bytes=abc`, a unit other than
-`bytes`) is 416 where RFC 9110 says to ignore it; more than one range is 400 with a
-plain-text body, not an S3 error; HEAD with a satisfiable range ignores the Range
-(S3 narrows `Content-Length`) and HEAD with several ranges ignores them.
+**Range.** GET serves one `bytes=` range, per RFC 9110 (sections 14.1.1, 14.1.2 and
+14.2). The unit is matched without regard to case. A range with no byte in the object is
+416 `InvalidRange`, with the standard error body (`Code`, `Message`, `RequestId`,
+`HostId`) and `Content-Range: bytes */{size}`: an int-range whose first byte is at or
+past the length (so every int-range on an empty object), and a suffix of length 0. A
+last byte at or past the end is clamped to the last byte (`bytes=5-999` on 10 bytes is
+206 `bytes 5-9/10`), and a suffix longer than the object returns all of it. HEAD with a
+range GET refuses is 416 too, without a body. Documented: the GetObject reference says
+"Amazon S3 doesn't support retrieving multiple ranges of data per `GET` request"; the
+Error reference lists `InvalidRange`, "The requested range cannot be satisfied.", 416;
+the HeadObject reference says "If the Range is not satisfiable, S3 returns a `416 -
+Requested Range Not Satisfiable` error" and that an error to HEAD carries no exact code
+(HEAD has no body).
+
+Undocumented choices, none compared with S3. The AWS pages say nothing on any of them.
+
+- A Range GET ignores is answered 200 with the whole object and no `Content-Range`.
+  GET ignores a range when: the unit is not `bytes` or the header has no `=` (RFC 9110
+  14.2: "An origin server MUST ignore a Range header field that contains a range unit it
+  does not understand"); the specifier is not valid, meaning it does not match
+  `first-pos "-" [last-pos]` or `"-" suffix-length` in ASCII digits (so `bytes=abc`,
+  `bytes=`, `bytes=1-2-3`, `bytes=+1-5` and `bytes= 0-9`), or has a last byte below its
+  first (`bytes=50-10`), or has a numeral of more than 4000 digits (RFC 9110 14.2: a
+  server "MAY ignore or reject" an invalid ranges-specifier; ignoring was chosen over a
+  416 because 416 says a valid range cannot be satisfied, and RFC 9110 14.2 asks for it
+  only when "the received Range field-value contains a valid ranges-specifier"; the
+  digit cap keeps a hostile numeral from reaching integer conversion, per the MUST in
+  14.1.2 to prevent parsing errors on large numerals; any numeral shorter than that is
+  exact, so the clamp holds for values past 64 bits).
+- More than one range (`bytes=0-9,20-29`) is ignored the same way. The basis is RFC
+  9110 14.2, "A server that supports range requests MAY ignore the Range header field"
+  and "MAY ignore or reject" a set of many small ranges, with the GetObject statement
+  that S3 does not support multiple ranges. Ignoring was chosen over an S3 error because
+  the error list has no code for it, and 200 with the whole object is a correct answer
+  that no client has to special-case. Multi-range used to be 400 with a plain-text body.
+- A suffix range with a non-zero length on an empty object is satisfiable under RFC
+  9110 14.1.2 ("the only satisfiable form of range-spec in a GET request is a
+  suffix-range with a non-zero suffix-length"), but no 206 can describe zero bytes
+  (`Content-Range` would need a last byte below its first). RFC 9110 14.2 lets a server
+  ignore Range for a zero-length representation, so it is answered 200 with an empty
+  body. Every other range on an empty object is 416.
+- The 416 carries `Content-Range: bytes */{size}` (RFC 9110 14.4: a server "SHOULD
+  send" it); the AWS pages do not mention it. Its `InvalidRange` body holds no
+  `ActualObjectSize` or `RangeRequested`.
+- `bytes=-0` is unsatisfiable (RFC 9110 14.1.2: a suffix needs a non-zero length).
+
+Known gaps. HEAD does not narrow `Content-Length` for a range it could satisfy (S3
+does), and it ignores the ranges GET ignores; it is 416 only where GET is. RFC 9110
+14.2 defines Range for GET only.
 
 **Bucket names.** CreateBucket enforces the rules in "General purpose bucket naming
 rules" (<https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html>):

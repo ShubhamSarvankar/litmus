@@ -110,10 +110,13 @@ def test_range_start_equals_size_returns_416(client, obj):
     assert resp.status_code == 416
 
 
-def test_multi_range_returns_400(client, obj):
-    bucket, key, _ = obj
+def test_multi_range_is_ignored(client, obj):
+    bucket, key, body = obj
     resp = client.get(f"/{bucket}/{key}", headers={"Range": "bytes=0-9,20-29"})
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert resp.content == body
+    assert resp.headers["content-length"] == str(len(body))
+    assert "content-range" not in resp.headers
 
 
 # --- no Range header returns 200 ---
