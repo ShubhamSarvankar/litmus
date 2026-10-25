@@ -23,6 +23,7 @@ from server.crash_points import (
 )
 from server.errors.s3errors import (
     InternalError,
+    InvalidArgument,
     InvalidRange,
     NoSuchBucket,
     NoSuchKey,
@@ -110,6 +111,39 @@ def _stored_content_encoding(headers) -> str | None:
     framing, not an encoding of the object; None when nothing else is left."""
     tokens = [t.strip() for v in headers.getlist("content-encoding") for t in v.split(",")]
     return ", ".join(t for t in tokens if t and t.lower() != _AWS_CHUNKED) or None
+
+
+# GetObject and HeadObject: the query parameters that set a response header for one
+# request (S3 API reference, GetObject "Overriding response header values").
+_RESPONSE_OVERRIDES = {
+    "response-cache-control": "Cache-Control",
+    "response-content-disposition": "Content-Disposition",
+    "response-content-encoding": "Content-Encoding",
+    "response-content-language": "Content-Language",
+    "response-content-type": "Content-Type",
+    "response-expires": "Expires",
+}
+
+
+def _response_overrides(request: Request) -> dict[str, str]:
+    """The response headers this request overrides: header name to the value to send.
+
+    A repeated parameter reads as its last value, as every other query parameter does
+    here, and an empty value is no override. A value with a control character other
+    than a tab (RFC 9110 5.5: a field value must not hold CR, LF or NUL) is refused with
+    400 InvalidArgument, which names the parameter and not the value. Anything else is
+    sent as the UTF-8 bytes of the decoded value. Parameters not listed are ignored."""
+    params = dict(request.query_params)
+    overrides = {}
+    for param, header in _RESPONSE_OVERRIDES.items():
+        value = params.get(param)
+        if not value:
+            continue
+        if any((c < " " and c != "\t") or c == "\x7f" for c in value):
+            raise InvalidArgument(extra={"ArgumentName": param})
+        # Starlette writes header values as ISO-8859-1: pass the UTF-8 bytes through it.
+        overrides[header] = value.encode("utf-8").decode("latin-1")
+    return overrides
 
 
 def _stored_headers(meta: ObjectMeta) -> dict[str, str]:
@@ -229,12 +263,15 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
+    overrides = _response_overrides(request)
     meta, f = _open_current(metadata, storage, bucket, key, request.headers.get("if-match"))
     try:
         if os.fstat(f.fileno()).st_size != meta.size:
             # Never send a truncated or padded body under this row's ETag.
             raise InternalError()
 
+        # The stored headers, with this request's overrides over them; never stored.
+        headers = {"Content-Type": meta.content_type, **_stored_headers(meta), **overrides}
         range_header = request.headers.get("range")
         resolved = _resolve_range(range_header, meta.size) if range_header else None
         if resolved is not None:
@@ -249,10 +286,9 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                     "Accept-Ranges": "bytes",
                     "ETag": meta.etag,
                     "Last-Modified": _http_date(meta.last_modified),
-                    "Content-Type": meta.content_type,
-                    **_stored_headers(meta),
+                    **headers,
                 },
-                media_type=meta.content_type,
+                media_type=headers["Content-Type"],
                 background=BackgroundTask(f.close),
             )
 
@@ -264,10 +300,9 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                 "Accept-Ranges": "bytes",
                 "ETag": meta.etag,
                 "Last-Modified": _http_date(meta.last_modified),
-                "Content-Type": meta.content_type,
-                **_stored_headers(meta),
+                **headers,
             },
-            media_type=meta.content_type,
+            media_type=headers["Content-Type"],
             background=BackgroundTask(f.close),
         )
     except BaseException:
@@ -281,6 +316,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
+    overrides = _response_overrides(request)
     meta = metadata.get_object_meta(bucket, key)
     if meta is None:
         raise NoSuchKey(extra={"Key": key})
@@ -300,6 +336,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
             "Content-Type": meta.content_type,
             "Accept-Ranges": "bytes",
             **_stored_headers(meta),
+            **overrides,
         },
     )
 
