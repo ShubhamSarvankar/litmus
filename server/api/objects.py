@@ -1,14 +1,14 @@
 import io
 import os
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
-from server.api.conditions import evaluate_read_conditions, if_range_holds
+from server.api.conditions import evaluate_read_conditions, if_range_holds, write_precondition
 from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
@@ -219,12 +219,17 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         key=key,
         size=size,
         etag=etag,
-        last_modified=datetime.now(UTC).replace(tzinfo=None),
+        last_modified=None,  # stamped inside the commit (§9)
         blob_id=blob_id,
         **stored,
     )
+    # If-Match and If-None-Match are decided in the commit, against the row it replaces
+    # (§10); a refusal there is discarded like any other failed write. There is no early
+    # check: the bytes of a refused PUT are written and discarded.
+    precondition = write_precondition(request.headers, key)
+    commit = {"precondition": precondition} if precondition else {}
     try:
-        replaced = metadata.put_object_meta(bucket, key, meta)
+        replaced = metadata.put_object_meta(bucket, key, meta, **commit)
     except BucketMissing:
         discard_new_blob(storage, metadata, blob_id)
         raise NoSuchBucket(extra={"BucketName": bucket}) from None

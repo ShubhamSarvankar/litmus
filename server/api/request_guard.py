@@ -138,13 +138,14 @@ CONDITIONAL_DELETE_HEADERS = (
 
 # Conditional write headers, from the S3 API reference: PutObject takes If-Match,
 # If-None-Match and x-amz-write-offset-bytes (append at an offset that must equal the
-# current size); CompleteMultipartUpload takes If-Match and If-None-Match. Litmus does
-# not evaluate them, and ignoring one would overwrite an object the client asked to
-# keep (or replace it with only the appended bytes). The storage layout now writes new
-# bytes to a fresh path and checks nothing in the commit yet; evaluating preconditions
-# in that commit (docs/design/storage-layout.md §10) is later work.
+# current size); CompleteMultipartUpload takes If-Match and If-None-Match. Ignoring one
+# would overwrite an object the client asked to keep (or replace it with only the
+# appended bytes), so those Litmus does not evaluate are refused. PutObject evaluates
+# If-Match and If-None-Match in its commit (docs/design/storage-layout.md §10), so only
+# x-amz-write-offset-bytes is refused there; CompleteMultipartUpload refuses both.
 CONDITIONAL_PUT_OBJECT_HEADERS = ("if-match", "if-none-match", "x-amz-write-offset-bytes")
 CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
+UNEVALUATED_PUT_OBJECT_HEADERS = ("x-amz-write-offset-bytes",)
 
 # Headers that select an operation Litmus does not implement on an otherwise
 # supported request: CopyObject and UploadPartCopy.
@@ -224,7 +225,7 @@ def _check(method: str, path: str, query, headers) -> None:
         if method == "DELETE":
             conditional = CONDITIONAL_DELETE_HEADERS
         elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart
-            conditional = CONDITIONAL_PUT_OBJECT_HEADERS
+            conditional = UNEVALUATED_PUT_OBJECT_HEADERS
         elif method == "POST" and "uploadId" in query_keys:  # CompleteMultipartUpload
             conditional = CONDITIONAL_COMPLETE_HEADERS
         else:

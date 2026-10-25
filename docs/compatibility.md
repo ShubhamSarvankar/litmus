@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**166 passed, 157 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**177 passed, 146 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -76,7 +76,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -111,6 +111,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Multipart upload headers | 330 | 508 | 163 | CreateMultipartUpload stores `Content-Type`, the system headers and `x-amz-meta-*` with the upload and Complete gives them to the object, which is dated by the upload's initiation time. 1 pass gained: `test_multipart_upload_resend_part`, as forecast: it completes each upload once, checks the object's Content-Type and metadata, and fails today only on `binary/octet-stream == text/bla`. `test_multipart_upload` stays failing as forecast: it fails at its second Complete (`NoSuchUpload`) before it reaches its Content-Type assertion. No selected test reads Last-Modified of a multipart object. The results file differs from the previous one in that one line only. Recorded at the commit that adds the storage. |
 | Conditional GET and HEAD | 330 | 508 | 166 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD in RFC 9110 13.2.2 order; a 304 carries the ETag and the stored Cache-Control and Expires. 3 passes gained: `test_get_object_ifnonematch_good` (304), `test_get_object_ifmodifiedsince_failed` (304) and `test_get_object_ifunmodifiedsince_good` (412), as forecast; the results file differs from the previous one in those three lines only. The three passing conditional GET tests on the incidental list stay there: they pass on a copy of the server from before this change as well (26 stays 26). Recorded at the commit that adds the evaluation. |
 | `If-Range` on GET | 330 | 508 | 166 | A `Range` is applied when `If-Range` holds (strong entity tag, or a date equal to `Last-Modified` once the object is a second old) and ignored otherwise (200, whole object). No outcome changed, and none was expected to: no selected test sends `If-Range`; the results file is identical to the previous one. Recorded at the commit that adds the evaluation. |
+| Conditional PutObject | 330 | 508 | 177 | `If-Match` and `If-None-Match` on PutObject are evaluated inside the commit transaction against the row it replaces (412 PreconditionFailed, or 404 NoSuchKey for `If-Match` with no object); `Last-Modified` is now assigned inside that commit. 11 passes gained, exactly the 11 forecast: `test_put_object_ifmatch_good`, `_failed`, `_overwrite_existed_good` and `_nonexisted_failed`; `test_put_object_ifnonmatch_good`, `_failed`, `_nonexisted_good` and `_overwrite_existed_failed`; `test_atomic_conditional_write_1mb`; `test_atomic_dual_conditional_write_1mb`; and `test_put_object_if_match`. The results file differs from the previous one in those 11 lines only. None is incidental (26 stays 26): each failed with 501 before. Still failing, as forecast: the six that need versioning or CompleteMultipartUpload (`test_put_current_object_if_match`, `test_put_current_object_if_none_match`, `test_put_object_current_if_match`, and the three `test_multipart_put_*if_*match`). Recorded at the commit that adds the evaluation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -129,7 +130,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 166 passes are incidental**.
+is authenticated or owned. By that rule, **26 of the 177 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -238,7 +239,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
 | `Expect: 100-continue` | 2 | 1 | 1 | 0 | An early error response closes the connection. Fail: the other test expects 403 from a bucket protected by an ACL, and Litmus has no ACLs. |
-| Conditional PutObject and Complete | 17 | 0 | 17 | 0 | Fail: `If-Match` and `If-None-Match` on PutObject and CompleteMultipartUpload are 501; several of these tests also enable versioning, which is 501. |
+| Conditional PutObject and Complete | 17 | 11 | 6 | 0 | `If-Match` and `If-None-Match` on PutObject are decided in the commit: `*`, entity tags quoted and unquoted, 412 and 404 (see "Conditional PutObject" under Known gaps), including the two atomic tests that overwrite while another PUT is in flight. Fail: 3 send `If-Match` or `If-None-Match` on CompleteMultipartUpload, which is 501 (2 of them also enable versioning first); the other 3 enable versioning first, which is 501. |
 | Conditional delete | 18 | 0 | 18 | 0 | Fail: conditional headers on DeleteObject and conditional entries in DeleteObjects are 501; 12 of these tests enable versioning first, which is 501. |
 | CopyObject and UploadPartCopy | 27 | 3 | 24 | 0 | Fail: 501, either for CopyObject and UploadPartCopy themselves or for an ACL or versioning call the test makes first. Of the 3 that pass, 2 expect 404 for a missing source and get it from the client's HeadObject before any copy request is sent; the third expects UploadPartCopy to fail and gets 501. |
 | Versioning, restore and read-through | 11 | 0 | 5 | 6 | Fail: PutBucketVersioning is 501, and DeleteObject sends no `x-amz-delete-marker` header. Skipped by s3-tests: 6. |
@@ -246,7 +247,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **166** | **157** | **7** | |
+| **Total** | **330** | **177** | **146** | **7** | |
 
 ## AWS CLI
 
@@ -701,10 +702,43 @@ Not done:
 - The algorithms S3's documentation now lists beyond these five (MD5, SHA512 and the
   XXHash family) are not computed.
 
-**Conditional writes are 501.** PutObject with `If-Match`, `If-None-Match` or
+**Conditional writes: PutObject is evaluated, the rest is 501.** PutObject with
 `x-amz-write-offset-bytes`, and CompleteMultipartUpload with `If-Match` or
 `If-None-Match`, get 501 NotImplemented. The existing object is untouched and the
-upload stays open.
+upload stays open. PutObject with `If-Match` or `If-None-Match` is evaluated (below).
+
+**Conditional PutObject.** `If-Match` and `If-None-Match` are decided inside the commit
+transaction (docs/design/storage-layout.md §10), against the row the commit replaces,
+after the new bytes are durable. A refused request rolls the commit back and discards
+its bytes; the object, its Last-Modified, the blob registry and `tmp/` are as before.
+`If-Match: *` or an ETag with no current object is 404 NoSuchKey, as ceph's tests expect.
+A failed condition is 412 PreconditionFailed. Concurrent requests are decided in commit
+order: of 8 `If-None-Match: *` PUTs to a new key exactly one wins, and of two `If-Match`
+PUTs with the same ETag one gets 200 and one 412.
+
+Choices where the S3 documentation is silent or differs:
+
+- `If-None-Match` with an entity tag is evaluated as RFC 9110 13.1.2 defines it (weak
+  comparison: 412 if the object has that ETag, else the write proceeds), not refused.
+  The S3 API reference documents `If-None-Match` on PutObject with the value `*` only.
+  The ceph tests that send an entity tag are `test_put_object_ifnonmatch_failed`, which
+  is marked `fails_on_aws`, and `test_put_object_if_match`, which is not.
+- ETags are matched as for GET: `*`, comma lists, quoted and unquoted values; `If-Match`
+  uses strong comparison, so a weak tag never matches it.
+- With both headers, both are evaluated, `If-Match` first: with no object that is 404
+  even when `If-None-Match` would pass; with an object, either failing is 412.
+- 409 ConditionalRequestConflict is never emitted. S3 documents it for a conditional
+  write that conflicts with another request in flight on the same key. Commits here
+  serialize on the database write lock and the later one is decided on the committed
+  result of the earlier, so the answer is a plain 412 (or 404), which is also what
+  ceph's `test_atomic_dual_conditional_write_1mb` expects. A client that retries on 409
+  will not see one.
+- There is no early check before the body is read: a refused PUT writes and discards
+  its bytes, and a body that fails its checksum is BadDigest whatever the conditions.
+- `Last-Modified` of a PUT is now taken inside the commit, under the write lock, so
+  concurrent PUTs to a key leave the latest Last-Modified on the one that commits last
+  (unless the wall clock steps back). CompleteMultipartUpload still dates the object
+  with the upload's initiation time.
 
 **Conditional deletes are 501.** DeleteObject and AbortMultipartUpload with any
 precondition header get 501 and change nothing. A DeleteObjects entry with `ETag`,

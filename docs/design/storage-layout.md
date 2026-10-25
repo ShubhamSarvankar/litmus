@@ -571,9 +571,10 @@ FULL and one commit per GC call.
 
 #### §6.2 PutObject (new key and overwrite)
 
-P1. Read-only checks: the bucket exists (else NoSuchBucket). If the request has
-    `If-Match` / `If-None-Match`, an early check against the current row may refuse
-    before any bytes are written (§10); it is an optimization, not the decision.
+P1. Read-only checks: the bucket exists (else NoSuchBucket). An early check of
+    `If-Match` / `If-None-Match` against the current row may refuse before any bytes
+    are written (§10); it is an optimization, never the decision. PutObject has none:
+    the bytes of a refused request are written and discarded.
 
 P2. `id = REGISTER('object', bucket, key)` **[C]**. `⚡put-after-register`
 
@@ -582,9 +583,10 @@ P3. `WRITE_BLOB(id, body)` **[Ff] [Fd]** (`⚡put-mid-write` inside). `⚡put-af
 P4. BEGIN IMMEDIATE
 
     a. old = SELECT blob_id, etag, upload_id FROM objects WHERE bucket = ? AND key = ?
-    b. Evaluate If-Match / If-None-Match against old (§10). On failure: ROLLBACK,
+    b. Evaluate If-Match / If-None-Match against old's ETag (§10). On failure: ROLLBACK,
        unlink the blob, RELEASE(id), answer 412 PreconditionFailed or 404 NoSuchKey.
-    c. INSERT INTO objects (..., blob_id = id, size, etag, last_modified = now,
+    c. now = the clock, read here, under the write lock (§9).
+       INSERT INTO objects (..., blob_id = id, size, etag, last_modified = now,
        headers, user_metadata, upload_id = NULL)
        ON CONFLICT (bucket, key) DO UPDATE SET <all of these>.
        A foreign key failure on bucket (deleted mid-request): ROLLBACK, unlink,
@@ -1015,9 +1017,15 @@ the blob it replaced `garbage`, so every blob is superseded exactly once and no
 write is lost or unlinked twice. **The winner is the request whose commit takes the
 write lock last**, not the one that started last or finished sending its body last.
 Both clients get 200 (unless a precondition fails, §10), and a GET afterwards sees one
-complete body with its ETag. `last_modified` is assigned inside the commit, so the
-winner also has the latest Last-Modified, unless the wall clock steps backwards (open
-question 5).
+complete body with its ETag. For PutObject, `last_modified` is assigned inside the
+commit, after the write lock is taken (the handler builds the row with
+`last_modified = None` and `put_object_meta` stamps it), so the winner also has the
+latest Last-Modified, unless the wall clock steps backwards (open question 5). It used
+to be assigned in the handler before the commit, which let a request that took the lock
+later carry an earlier timestamp; moving it into the commit made this paragraph true
+rather than weakening the paragraph, because the cost is one clock read under a lock
+that is already held. CompleteMultipartUpload does not stamp the time of its commit: an
+assembled object's date is the date the upload was initiated.
 
 **No reliance on the event loop.** Today handlers do blocking file and SQLite I/O
 inside `async` functions, so the event loop runs them one at a time (R14). Nothing in
@@ -1044,31 +1052,61 @@ Other races, each decided by commit order:
 
 ### §10. Conditional writes and deletes (R15)
 
-Scope: not part of the implementation (decision 15). Conditional writes come later, in
-an order you set. This section records how they fit, so that steps (a) and (b) leave
-them needing no layout change. Until then the 501 responses stay as they are.
+Status: PutObject `If-Match` and `If-None-Match` are implemented as below. The same
+two headers on CompleteMultipartUpload, `x-amz-write-offset-bytes` and the conditional
+deletes are not; they still return 501 (docs/compatibility.md).
 
 The authoritative check always runs inside the commit transaction (P4.b, C4.c), against
 the row as it is at that moment, after the new bytes are durable at their fresh path.
-A failure rolls back, releases the new blob and leaves the old object's bytes and row
-untouched. For Complete the upload stays open, so the client can retry without
-re-uploading parts. An optional early check before the body is read (P1, C1) only
-saves writing bytes that are bound to be refused; it never decides success.
+`put_object_meta` takes an optional `precondition` function; it is called inside BEGIN
+IMMEDIATE, after the write lock is taken, with the ETag of the row being replaced (None
+when there is none). What it raises (PreconditionFailed, NoSuchKey) rolls the
+transaction back, and the handler discards the new blob through the same path as any
+failed commit (unlink, RELEASE). The old object's bytes and row are untouched. For
+Complete the upload stays open, so the client can retry without re-uploading parts.
+
+There is no early check before the body is read. One would only save writing bytes that
+are bound to be refused, and it could never decide success. Leaving it out keeps one
+decision point and the order of errors the same with and without a condition (a body
+that fails its checksum is BadDigest whatever the conditions say). The cost is that a
+refused PUT writes and discards its bytes. An early check may be added later as a
+refusal only.
 
 | Header | Current row exists | No current row |
 |---|---|---|
 | `If-None-Match: *` | 412 PreconditionFailed | proceed |
-| `If-None-Match: <etag>` | 412 if the ETag matches, else proceed | proceed |
+| `If-None-Match: <etag>` | 412 if the ETag matches (weak comparison), else proceed | proceed |
 | `If-Match: *` | proceed | 404 NoSuchKey |
-| `If-Match: <etag>` | proceed if the ETag matches, else 412 | 404 NoSuchKey |
+| `If-Match: <etag>` | proceed if the ETag matches (strong comparison), else 412 | 404 NoSuchKey |
 
-ETags are compared without surrounding quotes. The 404 cases follow ceph's
-`test_put_object_if_match` and `test_multipart_put_object_if_match`. Two concurrent
-`If-None-Match: *` PUTs to a new key produce exactly one creator: the first commit
-inserts the row, and the second's check sees it and gets 412. If a conflicting write
-commits between the early check and the commit, the answer is 412, which is what
-ceph's `test_atomic_dual_conditional_write_1mb` expects (S3 also documents 409
-ConditionalRequestConflict for some conflicts; open question 6).
+Choices, all in `server/api/conditions.py`:
+
+- Matching is the evaluator GET and HEAD use: `*`, comma lists, quoted and unquoted
+  values are accepted, repeated header lines are one list, and a blank value is no
+  condition. `If-Match` uses strong comparison, so `W/"x"` never matches it.
+  `If-None-Match` uses weak comparison (RFC 9110 13.1.2).
+- `If-None-Match: <etag>` is evaluated as RFC 9110 defines it, not refused. The S3 API
+  reference documents `If-None-Match` on writes with the value `*` only. The pinned
+  ceph tests send an entity tag: `test_put_object_ifnonmatch_failed` (marked
+  `fails_on_aws`) and `test_put_object_if_match` (not marked).
+- When both headers are present both are evaluated, `If-Match` first. With no current
+  row the answer is therefore 404 even when `If-None-Match` would pass; with a row, a
+  failure of either is 412.
+- 409 ConditionalRequestConflict is never emitted. S3 documents it for a conditional
+  write that conflicts with another request in flight on the same key, so that a client
+  retries. Litmus serializes commits on the write lock and each one sees the row the
+  previous one left, so there is no in-flight conflict to report: the later request is
+  decided on committed state, and 412 (or 404) is a true answer about it. ceph's
+  `test_atomic_dual_conditional_write_1mb` expects 412 for this case.
+- The 404 cases follow ceph's `test_put_object_if_match` and
+  `test_multipart_put_object_if_match`.
+
+Two concurrent `If-None-Match: *` PUTs to a new key produce exactly one creator: the
+first commit inserts the row, and the second's check sees it and gets 412. Two
+`If-Match` PUTs with the same ETag produce one 200 and one 412, because the first
+commit changes the ETag. An `If-Match` PUT against a concurrent DeleteObject is 200
+(the PUT committed first, then the delete) or 404 (the delete committed first); a 404
+PUT creates nothing.
 
 `x-amz-write-offset-bytes` (append) stays 501. It would fit this design as a new blob
 holding the old bytes plus the appended ones, committed only if the current size still
@@ -1550,10 +1588,11 @@ written. Each is marked **Resolved** (with the decision that settled it) or **Op
    that matches the S3 User Guide's "latest timestamp wins" wording (from memory), and
    the fact that a backwards wall-clock step can give the winner an earlier
    Last-Modified.
-6. **Open. R15: 412 vs 409.** S3 documents 409 ConditionalRequestConflict for some
-   conflicting conditional writes; ceph's `test_atomic_dual_conditional_write_1mb`
-   expects 412 for what looks like that case. §10 returns 412. This waits for the
-   conditional-write work, which is outside steps (a) and (b).
+6. **Resolved (§10). R15: 412 vs 409.** S3 documents 409 ConditionalRequestConflict
+   for some conflicting conditional writes; ceph's
+   `test_atomic_dual_conditional_write_1mb` expects 412 for what looks like that case.
+   PutObject returns 412 and never emits 409: commits serialize on the write lock, so
+   a conditional write is always decided on committed state.
 7. **Resolved (decision 10). R16 vs the rule on test changes.** The
    `test_path_safety.py` tests are converted, not deleted (§16), in step (b).
 8. **Resolved (decision 4). R12 "migration".** No migration; the server refuses to start

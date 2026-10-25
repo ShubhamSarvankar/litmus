@@ -1,4 +1,5 @@
-"""Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), and If-Range.
+"""Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), If-Range, and the
+If-Match and If-None-Match preconditions of PutObject (write_precondition()).
 
 evaluate_read_conditions() takes the request headers and the one row the response will
 be built from, and answers whether the response is 304 Not Modified. It raises
@@ -22,9 +23,10 @@ If-Modified-Since true is 304. A missing bucket or key is answered before any co
 """
 
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from server.errors.s3errors import PreconditionFailed
+from server.errors.s3errors import NoSuchKey, PreconditionFailed
 
 # One member of an ETag list: "*", an entity-tag (RFC 9110 8.8.3: an optional W/ and a
 # quoted opaque tag, which may hold a comma), or a bare token, which is read as an
@@ -151,3 +153,39 @@ def if_range_holds(
     if tags is None or len(tags) != 1 or tags[0][2]:
         return False
     return _matches(tags, etag, strong=True)
+
+
+def write_precondition(headers, key: str) -> Callable[[str | None], None] | None:
+    """The If-Match and If-None-Match check of a PutObject, as a function of the ETag of
+    the key's current row (None when there is none), or None when the request carries
+    neither header. The store calls it inside its commit transaction, against the row
+    that transaction replaces; it raises, and the commit rolls back.
+
+    - If-Match is evaluated first, with strong comparison. With no current row it is
+      404 NoSuchKey (the S3 API reference, and ceph's test_put_object_if_match), with a
+      row that does not match it is 412 PreconditionFailed.
+    - If-None-Match then fails with 412 when there is a current row and the value is
+      "*" or the ETag of that row (weak comparison, RFC 9110 13.1.2). No row passes.
+    - When both are present, both must hold.
+
+    The S3 API reference documents If-None-Match on PutObject with the value "*" only.
+    An entity tag is evaluated as RFC 9110 defines it instead of being refused."""
+    if_match = _entity_tags(headers, "if-match")
+    if_none_match = _entity_tags(headers, "if-none-match")
+    if if_match is None and if_none_match is None:
+        return None
+
+    def check(current_etag: str | None) -> None:
+        if if_match is not None:
+            if current_etag is None:
+                raise NoSuchKey(extra={"Key": key})
+            if not _matches(if_match, current_etag, strong=True):
+                raise PreconditionFailed()
+        if (
+            if_none_match is not None
+            and current_etag is not None
+            and _matches(if_none_match, current_etag, strong=False)
+        ):
+            raise PreconditionFailed()
+
+    return check

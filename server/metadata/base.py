@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -151,10 +152,18 @@ class MetadataStore(Protocol):
 
     def purge_garbage(self, blob_ids: list[str]) -> None: ...
 
-    def put_object_meta(self, bucket: str, key: str, meta: ObjectMeta) -> str | None: ...
+    def put_object_meta(
+        self,
+        bucket: str,
+        key: str,
+        meta: ObjectMeta,
+        precondition: Callable[[str | None], None] | None = None,
+    ) -> str | None: ...
 
     # Points the key at meta.blob_id, makes it live, and returns the replaced blob
-    # (now garbage), if any. Raises BucketMissing.
+    # (now garbage), if any. Raises BucketMissing. precondition is called inside the
+    # transaction with the ETag of the row being replaced (None if none); what it raises
+    # rolls the commit back. A meta with last_modified None is stamped inside the commit.
 
     def get_object_meta(self, bucket: str, key: str) -> ObjectMeta | None: ...
 

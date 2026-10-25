@@ -1,8 +1,10 @@
-"""Conditional writes are not evaluated yet, so they are refused rather than ignored.
+"""Conditional writes that are not evaluated yet are refused rather than ignored.
 
 Ignoring a write precondition would overwrite an object the client asked to keep.
 Header names are from the S3 API reference: PutObject (If-Match, If-None-Match,
 x-amz-write-offset-bytes) and CompleteMultipartUpload (If-Match, If-None-Match).
+PutObject evaluates If-Match and If-None-Match (test_conditional_put.py), so only
+x-amz-write-offset-bytes is refused there; CompleteMultipartUpload refuses both.
 """
 
 import hashlib
@@ -33,6 +35,8 @@ SATISFIED_ON_EXISTING = {
     "x-amz-write-offset-bytes": str(len(BODY)),
 }
 SATISFIED_ON_MISSING = {"if-match": "*", "if-none-match": "*", "x-amz-write-offset-bytes": "0"}
+# What PutObject still refuses.
+PUT_REFUSED = ["x-amz-write-offset-bytes"]
 
 
 @pytest.fixture
@@ -69,7 +73,7 @@ def test_header_lists_match_the_reference():
 # --- PutObject ---
 
 
-@pytest.mark.parametrize("header", sorted(SATISFIED_ON_EXISTING))
+@pytest.mark.parametrize("header", PUT_REFUSED)
 def test_conditional_put_over_existing_object_returns_501_and_keeps_it(client, header):
     resp = client.put(
         f"/{BUCKET}/{KEY}", content=b"overwrite", headers={header: SATISFIED_ON_EXISTING[header]}
@@ -78,7 +82,7 @@ def test_conditional_put_over_existing_object_returns_501_and_keeps_it(client, h
     _assert_intact(client)
 
 
-@pytest.mark.parametrize("header", sorted(SATISFIED_ON_MISSING))
+@pytest.mark.parametrize("header", PUT_REFUSED)
 def test_conditional_put_of_new_key_returns_501_and_creates_nothing(client, header):
     resp = client.put(
         f"/{BUCKET}/new.txt", content=b"new", headers={header: SATISFIED_ON_MISSING[header]}

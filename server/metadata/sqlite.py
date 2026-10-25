@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -509,15 +509,31 @@ class SQLiteMetadataStore:
     @staticmethod
     def _current(conn: sqlite3.Connection, bucket: str, key: str) -> sqlite3.Row | None:
         return conn.execute(
-            "SELECT blob_id, upload_id FROM objects WHERE bucket = ? AND key = ?", (bucket, key)
+            "SELECT blob_id, upload_id, etag FROM objects WHERE bucket = ? AND key = ?",
+            (bucket, key),
         ).fetchone()
 
-    def put_object_meta(self, bucket: str, key: str, meta: ObjectMeta) -> str | None:
-        """The PutObject commit (§6.2 P4). Returns the replaced blob, now garbage."""
+    def put_object_meta(
+        self,
+        bucket: str,
+        key: str,
+        meta: ObjectMeta,
+        precondition: Callable[[str | None], None] | None = None,
+    ) -> str | None:
+        """The PutObject commit (§6.2 P4). Returns the replaced blob, now garbage.
+
+        precondition, when given, is called with the ETag of the row being replaced
+        (None when there is none) after the write lock is taken; what it raises rolls
+        the commit back and propagates. A meta whose last_modified is None gets the
+        time of this commit, taken under the lock (§9)."""
         with self._write() as conn:
             if not conn.execute("SELECT 1 FROM buckets WHERE name = ?", (bucket,)).fetchone():
                 raise BucketMissing(bucket)
             old = self._current(conn, bucket, key)
+            if precondition is not None:
+                precondition(old["etag"] if old else None)
+            if meta.last_modified is None:
+                meta.last_modified = datetime.now(UTC).replace(tzinfo=None)
             self._upsert_object(conn, meta)
             self._make_live(conn, meta.blob_id)
             return self._retire_object(conn, old) if old else None
