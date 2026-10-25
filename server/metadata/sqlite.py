@@ -566,15 +566,31 @@ class SQLiteMetadataStore:
     def delete_objects(self, bucket: str, keys: list[str]) -> list[str]:
         """Delete every key in one transaction (§6.4 X2). Returns the blobs that
         became garbage."""
+        return self.delete_objects_checked(bucket, [(key, None) for key in keys])[0]
+
+    def delete_objects_checked(
+        self,
+        bucket: str,
+        entries: list[tuple[str, Callable[[str | None], Exception | None] | None]],
+    ) -> tuple[list[str], list[Exception | None]]:
+        """delete_objects with a condition per key (§6.4 X2, §10). One transaction for
+        the request, as for delete_objects. Each key's condition is decided after the
+        write lock, against that key's row as the earlier entries left it, and before
+        anything is written for the key, so a refused key leaves nothing to undo and
+        the other keys' deletes commit. Returns the blobs that became garbage and each
+        entry's refusal (None when the condition held or there was none)."""
         garbage = []
+        refusals: list[Exception | None] = []
         with self._write() as conn:
-            for key in keys:
+            for key, precondition in entries:
                 old = self._current(conn, bucket, key)
-                if old is None:
+                refusal = precondition(old["etag"] if old else None) if precondition else None
+                refusals.append(refusal)
+                if refusal is not None or old is None:
                     continue
                 conn.execute("DELETE FROM objects WHERE bucket = ? AND key = ?", (bucket, key))
                 garbage.append(self._retire_object(conn, old))
-        return garbage
+        return garbage, refusals
 
     def list_objects(
         self,

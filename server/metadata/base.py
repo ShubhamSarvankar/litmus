@@ -180,6 +180,19 @@ class MetadataStore(Protocol):
 
     def delete_objects(self, bucket: str, keys: list[str]) -> list[str]: ...
 
+    def delete_objects_checked(
+        self,
+        bucket: str,
+        entries: list[tuple[str, Callable[[str | None], Exception | None] | None]],
+    ) -> tuple[list[str], list[Exception | None]]: ...
+
+    # delete_objects with a condition per key, in one transaction. Each entry's
+    # precondition is called after the write lock, in request order, with the ETag of
+    # that key's row (None if none). Unlike put_object_meta's, it returns the refusal
+    # instead of raising it: a refused key is left untouched and the others still
+    # commit. Returns the blobs that became garbage and, per entry, its refusal (None
+    # when the key was deleted or had no row and no condition).
+
     def list_objects(
         self,
         bucket: str,

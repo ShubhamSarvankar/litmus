@@ -240,10 +240,14 @@ def test_abort_multipart_upload_still_refuses_if_match(env):
     assert env.metadata.upload_exists(uid)
 
 
-def test_delete_objects_is_unchanged(env):
-    """Per key ETag conditions come later: an ETag on a DeleteObjects entry is still a
-    per-key NotImplemented error, and the object stays."""
-    body = f"<Delete><Object><Key>{KEY}</Key><ETag>{ETAG}</ETag></Object></Delete>".encode()
+@pytest.mark.parametrize(
+    "element",
+    ["<LastModifiedTime>2020-01-01T00:00:00.000Z</LastModifiedTime>", f"<Size>{len(BODY)}</Size>"],
+)
+def test_delete_objects_directory_bucket_elements_stay_per_key_errors(env, element):
+    """LastModifiedTime and Size on a DeleteObjects entry are a per-key NotImplemented
+    error, and the object stays (per key ETag conditions: test_delete_objects_etag.py)."""
+    body = f"<Delete><Object><Key>{KEY}</Key>{element}</Object></Delete>".encode()
     root = ET.fromstring(env.client.post(f"/{BUCKET}?delete", content=body).text)
     assert [e.findtext("Code") for e in root.findall("Error")] == ["NotImplemented"]
     assert env.client.get(URL).content == BODY

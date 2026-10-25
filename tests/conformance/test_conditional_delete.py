@@ -2,12 +2,15 @@
 
 DeleteObject evaluates If-Match (tests/conformance/test_conditional_delete_object.py);
 every other conditional header on it, and all of them on AbortMultipartUpload, are 501.
+DeleteObjects evaluates the ETag of an entry (tests/conformance/test_delete_objects_etag.py);
+its LastModifiedTime and Size are a per-key NotImplemented error.
 
 Ignoring a precondition would delete an object (or abort an upload) the client asked
 to keep. Header and element names are from the S3 API reference: DeleteObject
 (If-Match, x-amz-if-match-last-modified-time, x-amz-if-match-size),
 AbortMultipartUpload (x-amz-if-match-initiated-time) and the DeleteObjects
-ObjectIdentifier (ETag, LastModifiedTime, Size). If-None-Match, If-Modified-Since and
+ObjectIdentifier (ETag, LastModifiedTime, Size; the last two for directory buckets
+only). If-None-Match, If-Modified-Since and
 If-Unmodified-Since are refused on DELETE as well.
 """
 
@@ -96,7 +99,7 @@ def test_abort_upload_with_condition_returns_501_and_keeps_upload(client, header
     assert client.delete(f"/{BUCKET}/mp?uploadId={uid}").status_code == 204
 
 
-# --- DeleteObjects: per-key conditions ---
+# --- DeleteObjects: per-key conditions that are not evaluated ---
 
 
 def _delete_objects(client: TestClient, inner: str, namespaced: bool = True):
@@ -110,11 +113,8 @@ def _delete_objects(client: TestClient, inner: str, namespaced: bool = True):
 @pytest.mark.parametrize(
     "condition",
     [
-        f"<ETag>{ETAG}</ETag>",
-        "<ETag>*</ETag>",
         "<LastModifiedTime>2020-01-01T00:00:00.000Z</LastModifiedTime>",
         f"<Size>{len(BODY)}</Size>",
-        "<ETag></ETag>",
     ],
 )
 def test_delete_objects_conditional_entry_gets_error_and_keeps_object(
@@ -131,7 +131,7 @@ def test_delete_objects_mixed_batch_deletes_only_unconditional_entries(client):
     assert client.put(f"/{BUCKET}/plain.txt", content=b"p").status_code == 200
     root = _delete_objects(
         client,
-        f"<Object><Key>{KEY}</Key><ETag>{ETAG}</ETag></Object>"
+        f"<Object><Key>{KEY}</Key><Size>{len(BODY)}</Size></Object>"
         "<Object><Key>plain.txt</Key></Object>",
     )
     assert [d.findtext("Key") for d in root.findall("Deleted")] == ["plain.txt"]

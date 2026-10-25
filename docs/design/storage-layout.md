@@ -650,11 +650,14 @@ There is never a row without a file: the row goes in the commit, the file afterw
 #### §6.4 DeleteObjects
 
 X1. Parse the body. Per-entry checks that need no database (unsupported version IDs,
-    unsupported conditions, the 1000-key limit) produce per-key errors as today.
+    `LastModifiedTime` and `Size`, the 1000-key limit) produce per-key errors as today.
+    An entry's `ETag` is not decided here (§10). `⚡delete-objects-before-commit`
 
 X2. BEGIN IMMEDIATE; for each remaining entry, in request order: steps D2.a to D2.f,
-    recording a `Deleted` or per-key `Error` entry. COMMIT **[C]** once for the whole
-    request. `⚡delete-objects-after-commit`
+    recording a `Deleted` or per-key `Error` entry. An entry with an `ETag` condition
+    has it decided after D2.a, against that key's row as the earlier entries left it
+    (§10); a refused entry writes nothing. COMMIT **[C]** once for the whole request.
+    `⚡delete-objects-after-commit`
 
 X3. `GC(<every old blob_id>)` **[C]**.
 
@@ -668,7 +671,7 @@ as S3 reports missing keys. Decision 12.
 
 | Kill at | State left behind | Sweep at restart | Clients see after restart |
 |---|---|---|---|
-| before X2's COMMIT | unchanged | nothing | every object still present |
+| `delete-objects-before-commit` (before X2) | unchanged | nothing | every object still present |
 | `delete-objects-after-commit` | rows gone; their blobs `garbage`, files present | unlink each, delete rows; one `InterruptedCleanup` per file | every deleted key 404; keys that got per-key errors untouched |
 
 #### §6.5 CreateMultipartUpload
@@ -1071,7 +1074,8 @@ Other races, each decided by commit order:
 ### §10. Conditional writes and deletes (R15)
 
 Status: `If-Match` and `If-None-Match` on PutObject and on CompleteMultipartUpload are
-implemented as below, and so is `If-Match` on DeleteObject (end of this section).
+implemented as below, and so are `If-Match` on DeleteObject and the per key `ETag` of
+DeleteObjects (end of this section).
 `x-amz-write-offset-bytes` and the other conditional deletes are not; they still return
 501 (docs/compatibility.md).
 
@@ -1186,10 +1190,44 @@ the same request retried is 404 (D2, D3).
 
 `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` stay 501 on
 purpose (AWS documents them for directory buckets only), and so does `If-None-Match`. They would
-be evaluated against the same row at D2.c. A DeleteObjects entry's `ETag`, `LastModifiedTime`
-and `Size` (inside the batch transaction at X2) and AbortMultipartUpload's
+be evaluated against the same row at D2.c. A DeleteObjects entry's `LastModifiedTime` and
+`Size` (inside the batch transaction at X2) and AbortMultipartUpload's
 `x-amz-if-match-initiated-time` (at A2.b) are not implemented and need no further layout
 change.
+
+**DeleteObjects (implemented).** An `Object` may carry an `ETag` element, read as an
+`If-Match` value (`*`, quoted, unquoted, lists, strong comparison; `delete_objects_precondition`
+in `server/api/conditions.py` shares the parsing and the comparison with
+`delete_precondition`). The store's `delete_objects_checked` takes a precondition per key
+and runs the batch in the one transaction of §6.4. Each key's condition is called after
+the write lock, in request order, with the ETag of that key's row at that moment (None
+when there is none), and before anything is written for the key.
+
+Unlike the single key preconditions it does not raise: it returns the refusal, or None.
+A raise would roll the transaction back, and a refused key must not undo the other keys'
+deletes. Because the decision comes before the key's first write, a refused key leaves
+nothing to undo, and the transaction commits the keys that passed. The handler turns the
+refusal into that key's `Error` entry.
+
+| `ETag` of the entry | Current row exists | No current row |
+|---|---|---|
+| none, or blank | `Deleted` | `Deleted` (as S3 reports missing keys) |
+| `*` | `Deleted` | `Error` NoSuchKey |
+| `<etag>` | `Deleted` if the ETag matches (strong comparison), else `Error` PreconditionFailed | `Error` NoSuchKey |
+
+A refused key is left untouched: its row, registry entry and blob are as before, and no
+blob goes to garbage. A key listed twice is decided twice, in order, against the row the
+first entry left, so `{ETag: e}` twice on one key is `Deleted` then `Error` NoSuchKey.
+`LastModifiedTime` and `Size` stay a per key NotImplemented error, decided at X1 before the
+`ETag`, so an entry with either is kept whatever its `ETag` says. Quiet mode lists every
+`Error` and omits `Deleted`. The batch is 200 whatever the per key results; 409 is never
+emitted, for the reason given for DeleteObject.
+
+The kill points are those of §6.4. At `delete-objects-before-commit` nothing is committed, so every
+object is still there and the same request then succeeds. At `delete-objects-after-commit`
+the keys whose conditions held are gone and their blobs are garbage for the sweep; the
+same request retried is NoSuchKey for those keys, and PreconditionFailed for a key that
+still fails.
 
 ### §11. CopyObject and UploadPartCopy (R13)
 
@@ -1382,6 +1420,8 @@ new meaning described in §6.
 | `delete-before-commit` | `test_delete_killed_before_commit_keeps_object` | **R3**: object and bytes intact (fails on today's code) |
 | `delete-after-commit` | `test_delete_killed_after_commit` | 404; blob removed; no `OrphanedMetadata` |
 | `delete-objects-after-commit` | `test_delete_objects_killed_after_commit` | all deleted keys 404, keys with per-key errors intact; every blob removed |
+| `delete-objects-before-commit` | `test_delete_objects_with_a_passing_etag_killed_before_commit_keeps_the_objects` | both objects intact; the same request then deletes the key whose ETag holds (§10) |
+| `delete-objects-after-commit` (ETag) | `test_delete_objects_with_a_passing_etag_killed_after_commit_removes_the_object` | the passing key gone, the refused key intact; the retry is NoSuchKey and PreconditionFailed |
 | `part-after-register` | `test_upload_part_killed_after_register` | part not recorded; upload open |
 | `part-mid-write` | `test_upload_part_killed_mid_write` | partial temp removed |
 | `part-after-bytes` | `test_reupload_part_killed_after_bytes_keeps_old_part` | re-upload: old part still recorded; Complete with the old ETag gives the old bytes |
@@ -1610,8 +1650,9 @@ category d / j1 work), and `test_multipart_upload` also re-completes a completed
 (j3). Of the 6 non-versioned conditional delete tests, `test_delete_object_if_match` is
 evaluated (§10) but fails on purpose: it expects 204 for `If-Match` on a missing key and
 Litmus answers 404. `test_delete_object_if_match_last_modified_time` and `_size` (501) and
-the three `test_delete_objects_*` counterparts (per key conditions) still wait; the
-`current` and `version` variants enable bucket versioning and stay failing.
+their `test_delete_objects_*` counterparts stay failing on purpose (directory buckets only);
+`test_delete_objects_if_match` is evaluated (§10) and passes. The `current` and `version`
+variants enable bucket versioning and stay failing.
 `test_multipart_resend_first_finishes_last` is not helped: its Complete request lists
 part 1 twice, and the stale ETag gets InvalidPart.
 

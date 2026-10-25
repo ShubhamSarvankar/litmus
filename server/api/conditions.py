@@ -1,6 +1,7 @@
 """Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), If-Range, and the
 If-Match and If-None-Match preconditions of PutObject (write_precondition()) and the
-If-Match precondition of DeleteObject (delete_precondition()).
+If-Match precondition of DeleteObject (delete_precondition()) and the per key ETag
+condition of DeleteObjects (delete_objects_precondition()).
 
 evaluate_read_conditions() takes the request headers and the one row the response will
 be built from, and answers whether the response is 304 Not Modified. It raises
@@ -43,7 +44,12 @@ def _entity_tags(headers, name: str) -> list[tuple[bool, str, bool]] | None:
     """The members of an If-Match or If-None-Match header (repeated lines are one list,
     RFC 9110 5.3) as (weak, opaque tag, is "*"). None when the header is absent or
     blank, which is no condition."""
-    values = [v for v in headers.getlist(name) if v.strip()]
+    return _tag_list(headers.getlist(name))
+
+
+def _tag_list(values: list[str]) -> list[tuple[bool, str, bool]] | None:
+    """_entity_tags over the field values themselves; None when all are blank."""
+    values = [v for v in values if v.strip()]
     if not values:
         return None
     tags = []
@@ -209,7 +215,19 @@ def delete_precondition(headers, key: str) -> Callable[[str | None], None] | Non
 
     Only If-Match is evaluated. The other conditional headers of a DELETE are refused
     by request_guard before a handler runs."""
-    if_match = _entity_tags(headers, "if-match")
+    return _if_match_check(_entity_tags(headers, "if-match"), key)
+
+
+def delete_objects_precondition(etag: str | None, key: str) -> Callable[[str | None], None] | None:
+    """The condition of one DeleteObjects entry: the text of its ETag element, read as an
+    If-Match value (so "*", quoted, unquoted and lists, strong comparison), as a function
+    of the ETag of the key's current row. None when the entry has no ETag element or it
+    is blank, which is no condition. Same answers as delete_precondition: no current row
+    is NoSuchKey, a row that does not match is PreconditionFailed."""
+    return _if_match_check(None if etag is None else _tag_list([etag]), key)
+
+
+def _if_match_check(if_match, key: str) -> Callable[[str | None], None] | None:
     if if_match is None:
         return None
 

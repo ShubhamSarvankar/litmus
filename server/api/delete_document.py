@@ -25,16 +25,18 @@ S3_NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 # "The request can contain a list of up to 1,000 keys that you want to delete."
 MAX_OBJECTS = 1000
 
-# Per-key conditions an <Object> may carry (ObjectIdentifier). Litmus does not
-# evaluate them; the handler answers a per-key NotImplemented error for them.
-CONDITIONAL_ELEMENTS = ("ETag", "LastModifiedTime", "Size")
+# Per-key conditions an <Object> may carry (ObjectIdentifier). ETag is evaluated
+# (DeleteEntry.etag). AWS documents LastModifiedTime and Size for directory buckets only,
+# and Litmus has none: the handler answers a per-key NotImplemented error for them.
+UNEVALUATED_ELEMENTS = ("LastModifiedTime", "Size")
 
 
 @dataclass(frozen=True)
 class DeleteEntry:
     key: str
     version_id: str | None
-    conditional: bool
+    etag: str | None  # text of the ETag element; None without one, "" when empty
+    unevaluated: bool  # carries a LastModifiedTime or Size, or an ETag with no single value
 
 
 @dataclass(frozen=True)
@@ -89,13 +91,16 @@ def parse_delete_document(body: bytes) -> DeleteDocument:
         if len(keys) != 1:
             raise MalformedXML()
         version = obj.find(f"{prefix}VersionId")
+        etag = obj.find(f"{prefix}ETag")
         entries.append(
             DeleteEntry(
                 key=_text(keys[0]),
                 version_id=None if version is None else _text(version),
-                conditional=any(
-                    obj.find(f"{prefix}{tag}") is not None for tag in CONDITIONAL_ELEMENTS
-                ),
+                # An ETag holding an element has no value to compare; as before this
+                # change it is a per-key NotImplemented, not a MalformedXML.
+                etag=None if etag is None or len(etag) else _text(etag),
+                unevaluated=(etag is not None and len(etag) > 0)
+                or any(obj.find(f"{prefix}{tag}") is not None for tag in UNEVALUATED_ELEMENTS),
             )
         )
     return DeleteDocument(entries, quiet)

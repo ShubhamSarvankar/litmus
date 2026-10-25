@@ -225,7 +225,7 @@ def test_quiet_true_still_lists_errors(seeded, client):
     body = _doc(
         "<Object><Key>k1</Key></Object>"
         "<Object><Key>k2</Key><VersionId>v1</VersionId></Object>"
-        "<Object><Key>k3</Key><ETag>abc</ETag></Object><Quiet>true</Quiet>"
+        "<Object><Key>k3</Key><Size>1</Size></Object><Quiet>true</Quiet>"
     )
     resp = _delete(client, body)
     assert resp.status_code == 200

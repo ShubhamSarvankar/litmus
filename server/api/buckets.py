@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from server.api.conditions import delete_objects_precondition
 from server.api.continuation_tokens import decode_token, encode_token
 from server.api.delete_document import parse_delete_document
 from server.api.request_guard import NULL_VERSION_ID
@@ -15,6 +16,7 @@ from server.config import settings
 from server.crash_points import (
     BUCKET_DELETE_AFTER_COMMIT,
     DELETE_OBJECTS_AFTER_COMMIT,
+    DELETE_OBJECTS_BEFORE_COMMIT,
     crash_point,
 )
 from server.errors.s3errors import (
@@ -25,6 +27,7 @@ from server.errors.s3errors import (
     InvalidEncodingType,
     NoSuchBucket,
     NotImplementedOperation,
+    S3Error,
 )
 from server.metadata.base import BucketHasObjects, BucketMissing, ListPage
 from server.storage.lifecycle import collect_garbage
@@ -342,9 +345,25 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
         ET.SubElement(e, "Message").text = message
         return e
 
-    # Entries in request order; keys to delete are collected and deleted together in
-    # one transaction after every entry is checked (docs/design/storage-layout.md §6.4).
-    entries = []
+    def _verdict(check):
+        """check (raises) as a function that returns what it raises, so a refused key
+        is reported and the transaction still commits the others."""
+        if check is None:
+            return None
+
+        def run(etag):
+            try:
+                check(etag)
+            except S3Error as refusal:
+                return refusal
+            return None
+
+        return run
+
+    # Entries in request order: a finished element, or the index of the key's turn in
+    # the one transaction that deletes every remaining key after every entry is checked
+    # (docs/design/storage-layout.md §6.4, §10).
+    entries: list = []
     to_delete = []
     for item in document.entries:
         key, version_id = item.key, item.version_id
@@ -356,31 +375,43 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
                 _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
             )
             continue
-        # Per-key delete conditions (ObjectIdentifier in the S3 API reference). Litmus
+        # LastModifiedTime and Size are documented for directory buckets only. Litmus
         # does not evaluate them; deleting anyway could delete an object the client
-        # asked to keep, so the key gets an error and is kept.
-        if item.conditional:
+        # asked to keep, so the key gets an error and is kept, ETag or not.
+        if item.unevaluated:
             entries.append(
                 _error(key, version_id, "NotImplemented", NotImplementedOperation.message)
             )
             continue
-        to_delete.append(key)
-        # Quiet mode reports only the keys that failed.
-        if document.quiet:
-            continue
-        d = ET.Element("Deleted")
-        ET.SubElement(d, "Key").text = key
-        if version_id is not None:
-            ET.SubElement(d, "VersionId").text = version_id
-        entries.append(d)
+        entries.append(len(to_delete))
+        to_delete.append((key, _verdict(delete_objects_precondition(item.etag, key))))
 
-    garbage = metadata.delete_objects(bucket, to_delete)
+    crash_point(DELETE_OBJECTS_BEFORE_COMMIT)
+    garbage, refusals = metadata.delete_objects_checked(bucket, to_delete)
     crash_point(DELETE_OBJECTS_AFTER_COMMIT)
     collect_garbage(storage, metadata, garbage)
 
+    items = iter(document.entries)
+    for i, entry in enumerate(entries):
+        item = next(items)
+        if not isinstance(entry, int):
+            continue
+        refusal = refusals[entry]
+        if refusal is not None:
+            entries[i] = _error(item.key, item.version_id, refusal.code, refusal.message)
+        elif document.quiet:  # Quiet mode reports only the keys that failed.
+            entries[i] = None
+        else:
+            d = ET.Element("Deleted")
+            ET.SubElement(d, "Key").text = item.key
+            if item.version_id is not None:
+                ET.SubElement(d, "VersionId").text = item.version_id
+            entries[i] = d
+
     result = ET.Element("DeleteResult")
     for entry in entries:
-        result.append(entry)
+        if entry is not None:
+            result.append(entry)
 
     return Response(
         content=ET.tostring(result, encoding="unicode", xml_declaration=True),

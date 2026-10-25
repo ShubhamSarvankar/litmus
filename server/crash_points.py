@@ -27,6 +27,7 @@ PUT_AFTER_GC_UNLINK = "put-after-gc-unlink"
 # DeleteObject (§6.3) and DeleteObjects (§6.4)
 DELETE_BEFORE_COMMIT = "delete-before-commit"
 DELETE_AFTER_COMMIT = "delete-after-commit"
+DELETE_OBJECTS_BEFORE_COMMIT = "delete-objects-before-commit"
 DELETE_OBJECTS_AFTER_COMMIT = "delete-objects-after-commit"
 # UploadPart (§6.6)
 PART_AFTER_REGISTER = "part-after-register"
@@ -61,6 +62,7 @@ CRASH_POINTS = frozenset(
         PUT_AFTER_GC_UNLINK,
         DELETE_BEFORE_COMMIT,
         DELETE_AFTER_COMMIT,
+        DELETE_OBJECTS_BEFORE_COMMIT,
         DELETE_OBJECTS_AFTER_COMMIT,
         PART_AFTER_REGISTER,
         PART_MID_WRITE,
