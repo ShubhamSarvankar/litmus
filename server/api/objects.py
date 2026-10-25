@@ -227,9 +227,8 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     # (§10); a refusal there is discarded like any other failed write. There is no early
     # check: the bytes of a refused PUT are written and discarded.
     precondition = write_precondition(request.headers, key)
-    commit = {"precondition": precondition} if precondition else {}
     try:
-        replaced = metadata.put_object_meta(bucket, key, meta, **commit)
+        replaced = metadata.put_object_meta(bucket, key, meta, precondition=precondition)
     except BucketMissing:
         discard_new_blob(storage, metadata, blob_id)
         raise NoSuchBucket(extra={"BucketName": bucket}) from None

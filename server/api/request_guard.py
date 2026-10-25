@@ -143,7 +143,6 @@ CONDITIONAL_DELETE_HEADERS = (
 # appended bytes), so those Litmus does not evaluate are refused. PutObject evaluates
 # If-Match and If-None-Match in its commit (docs/design/storage-layout.md §10), so only
 # x-amz-write-offset-bytes is refused there; CompleteMultipartUpload refuses both.
-CONDITIONAL_PUT_OBJECT_HEADERS = ("if-match", "if-none-match", "x-amz-write-offset-bytes")
 CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
 UNEVALUATED_PUT_OBJECT_HEADERS = ("x-amz-write-offset-bytes",)
 

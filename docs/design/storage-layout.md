@@ -106,8 +106,8 @@ rename, fsync of the parent directory, then the SQLite commit).
     If-Match / If-None-Match on PutObject and CompleteMultipartUpload (and later
     CopyObject) must be checked in the same transaction as the metadata commit, after
     the new bytes are durable at a fresh path. A failed precondition must leave the
-    old object's bytes and metadata untouched. They currently return 501
-    (`CONDITIONAL_PUT_OBJECT_HEADERS` and `CONDITIONAL_COMPLETE_HEADERS` in
+    old object's bytes and metadata untouched. PutObject now does this (§10);
+    CompleteMultipartUpload still returns 501 (`CONDITIONAL_COMPLETE_HEADERS` in
     `server/api/request_guard.py`). Conditional deletes (also 501 today) should follow
     the same model.
 
@@ -755,7 +755,8 @@ C4. BEGIN IMMEDIATE
        (§10). On failure: ROLLBACK, unlink, RELEASE(id), 412 or 404. The upload stays
        open.
     d. INSERT INTO objects (..., blob_id = id, size = sum of part sizes, etag =
-       composite ETag, last_modified = now, headers and user_metadata copied from the
+       composite ETag, last_modified = the upload's `initiated` time (not the time of
+       this commit), headers and user_metadata copied from the
        upload row, upload_id = this upload) ON CONFLICT (bucket, key) DO UPDATE ...
     e. UPDATE blobs SET state = 'live' WHERE blob_id = id AND state = 'pending'
     f. If old: its blob becomes 'garbage'; if old.upload_id (an earlier completed
@@ -1019,13 +1020,20 @@ write lock last**, not the one that started last or finished sending its body la
 Both clients get 200 (unless a precondition fails, §10), and a GET afterwards sees one
 complete body with its ETag. For PutObject, `last_modified` is assigned inside the
 commit, after the write lock is taken (the handler builds the row with
-`last_modified = None` and `put_object_meta` stamps it), so the winner also has the
-latest Last-Modified, unless the wall clock steps backwards (open question 5). It used
-to be assigned in the handler before the commit, which let a request that took the lock
-later carry an earlier timestamp; moving it into the commit made this paragraph true
-rather than weakening the paragraph, because the cost is one clock read under a lock
-that is already held. CompleteMultipartUpload does not stamp the time of its commit: an
-assembled object's date is the date the upload was initiated.
+`last_modified = None` and `put_object_meta` stamps it), so among writes stamped at
+commit the winner also has the latest Last-Modified. It used to be assigned in the
+handler before the commit, which let a request that took the lock later carry an
+earlier timestamp; moving it into the commit made this paragraph true rather than
+weakening the paragraph, because the cost is one clock read under a lock that is
+already held.
+
+Two limits on that claim. It does not cover CompleteMultipartUpload, which does not
+stamp the time of its commit: an assembled object's date is the date the upload was
+initiated (`last_modified=upload.initiated`, `server/multipart/state_machine.py`), so a
+Complete that commits after a PutObject can carry an earlier Last-Modified than the
+PutObject it replaced. And it assumes the wall clock never steps backward: Litmus reads
+the wall clock and does not clamp it to the replaced row's time, so a backward step
+can give the winner an earlier Last-Modified (open question 5).
 
 **No reliance on the event loop.** Today handlers do blocking file and SQLite I/O
 inside `async` functions, so the event loop runs them one at a time (R14). Nothing in

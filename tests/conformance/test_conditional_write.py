@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from server.api.request_guard import (
     CONDITIONAL_COMPLETE_HEADERS,
-    CONDITIONAL_PUT_OBJECT_HEADERS,
+    UNEVALUATED_PUT_OBJECT_HEADERS,
 )
 from server.app import create_app
 from server.metadata.sqlite import SQLiteMetadataStore
@@ -62,11 +62,7 @@ def _assert_not_implemented(resp) -> None:
 
 
 def test_header_lists_match_the_reference():
-    assert set(CONDITIONAL_PUT_OBJECT_HEADERS) == {
-        "if-match",
-        "if-none-match",
-        "x-amz-write-offset-bytes",
-    }
+    assert set(UNEVALUATED_PUT_OBJECT_HEADERS) == {"x-amz-write-offset-bytes"}
     assert set(CONDITIONAL_COMPLETE_HEADERS) == {"if-match", "if-none-match"}
 
 

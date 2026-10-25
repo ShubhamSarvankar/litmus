@@ -384,7 +384,7 @@ def test_same_key_puts_commit_one_after_the_other_and_the_later_wins(env, monkey
     real_current = metadata._current
     real_connect = metadata._connect
 
-    def put_object_meta(bucket, key, meta):
+    def put_object_meta(bucket, key, meta, *args, **kwargs):
         me = "A" if meta.etag == _md5(body_a) else "B"
         role[threading.get_ident()] = me
         both_wrote_bytes.wait()
@@ -392,7 +392,7 @@ def test_same_key_puts_commit_one_after_the_other_and_the_later_wins(env, monkey
             assert a_read_row.wait(WAIT), "A never read the row inside its commit"
         in_commit.active = True
         try:
-            return real_commit(bucket, key, meta)
+            return real_commit(bucket, key, meta, *args, **kwargs)
         finally:
             in_commit.active = False
 

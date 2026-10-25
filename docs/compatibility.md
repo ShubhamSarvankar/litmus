@@ -131,6 +131,7 @@ implement the behavior it exercises: because Litmus ignores a header or paramete
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
 is authenticated or owned. By that rule, **26 of the 177 passes are incidental**.
+Of the 177 passes, 26 are incidental and 18 are borderline, which leaves 133 genuine.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -723,6 +724,17 @@ Choices where the S3 documentation is silent or differs:
   The S3 API reference documents `If-None-Match` on PutObject with the value `*` only.
   The ceph tests that send an entity tag are `test_put_object_ifnonmatch_failed`, which
   is marked `fails_on_aws`, and `test_put_object_if_match`, which is not.
+
+  Which passes depend on this. Two passing tests send an entity tag in `If-None-Match`
+  and are marked `fails_on_aws`: `test_put_object_ifnonmatch_good` (a tag that does not
+  match, expects 200) and `test_put_object_ifnonmatch_failed` (the current ETag
+  unquoted, expects 412). `test_put_object_if_match` depends on it too (the current ETag
+  gives 412, a bad tag gives 200) and is not marked `fails_on_aws`, so the suite's own
+  markers disagree. `test_put_object_ifnonmatch_nonexisted_good` and
+  `test_put_object_ifnonmatch_overwrite_existed_failed` send `*`, which AWS documents
+  for PutObject, so their `fails_on_aws` markers predate that support. All of these
+  count as genuine: each fails against the server as of dfe4d20, and the new tests fail
+  with the a0f0bde server change reverted.
 - ETags are matched as for GET: `*`, comma lists, quoted and unquoted values; `If-Match`
   uses strong comparison, so a weak tag never matches it.
 - With both headers, both are evaluated, `If-Match` first: with no object that is 404
