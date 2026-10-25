@@ -213,3 +213,39 @@ def test_write_after_the_block_is_refused(store):
         w.write(b"x")
     with pytest.raises(ValueError):
         w.write(b"y")
+
+
+# --- write_blob forwards verify to open_writer ---
+
+
+def test_write_blob_verify_runs_once_after_all_bytes_and_before_any_fsync(store, calls):
+    seen = []
+
+    def verify(writer):
+        seen.append((writer.size, writer.etag, writer.md5_digest, list(calls)))
+
+    blob_id = new_blob_id()
+    etag, size = store.write_blob(blob_id, io.BytesIO(b"abcde" * 40000), verify=verify)
+    data = b"abcde" * 40000  # more than one read of the source
+    assert seen == [(len(data), _md5(data), hashlib.md5(data).digest(), [])]
+    assert (etag, size) == (_md5(data), len(data))
+    assert _read(store, blob_id) == data
+    assert calls == ["fsync-file", "rename", "fsync-dir"]
+
+
+def test_write_blob_verify_that_raises_leaves_nothing_and_does_no_fsync(store, calls):
+    def verify(writer):
+        raise _Boom("checksum mismatch")
+
+    blob_id = new_blob_id()
+    with pytest.raises(_Boom, match="checksum mismatch"):
+        store.write_blob(blob_id, io.BytesIO(b"some bytes"), verify=verify)
+    assert not _files(store.root)
+    assert not store.has_files(blob_id)
+    assert calls == []
+
+
+def test_write_blob_without_verify_is_unchanged(store, calls):
+    blob_id = new_blob_id()
+    assert store.write_blob(blob_id, io.BytesIO(b"x")) == (_md5(b"x"), 1)
+    assert calls == ["fsync-file", "rename", "fsync-dir"]

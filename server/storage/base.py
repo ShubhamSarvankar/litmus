@@ -1,7 +1,7 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Protocol
+from typing import IO, Any, Protocol
 
 
 @dataclass
@@ -17,10 +17,15 @@ class StorageBackend(Protocol):
     def create_tree(self) -> None: ...
 
     def write_blob(
-        self, blob_id: str, src: IO[bytes], mid_write_point: str | None = None
+        self,
+        blob_id: str,
+        src: IO[bytes],
+        mid_write_point: str | None = None,
+        verify: Callable[[Any], None] | None = None,
     ) -> tuple[str, int]: ...
 
-    # Returns (quoted MD5 ETag, size)
+    # Returns (quoted MD5 ETag, size). verify(writer) runs after the last byte is
+    # written and before any fsync; if it raises, no file of the blob is left.
 
     def assemble_blob(
         self, blob_id: str, part_ids: Iterable[str], mid_write_point: str | None = None

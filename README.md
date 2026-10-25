@@ -63,7 +63,9 @@ STREAMING-UNSIGNED-PAYLOAD-TRAILER` with a CRC64NVME trailer (`x-amz-trailer:
 x-amz-checksum-crc64nvme`). Litmus decodes it as it arrives, verifies the checksum, and
 stores the decoded bytes. The signed `STREAMING-AWS4-HMAC-SHA256-*` variants and other
 trailers get 501. Plain request bodies are still read whole into memory before they
-are written. See [`docs/compatibility.md`](docs/compatibility.md).
+are written. PutObject and UploadPart also verify `Content-MD5` and one
+`x-amz-checksum-{crc32,crc32c,crc64nvme,sha1,sha256}` header before the data is made
+durable; nothing is stored or returned yet. See [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
 its default settings: `mb`, `ls`, `cp` (including multipart uploads), `sync`, `rm`, `rb`
@@ -171,6 +173,7 @@ server/
                        /{bucket}/{key} request, handing plain object requests to
                        the handlers in objects.py; request_guard.py answers 501;
                        aws_chunked.py decodes aws-chunked bodies
+  checksums.py         the checksums a PutObject or UploadPart claims, and their check
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit

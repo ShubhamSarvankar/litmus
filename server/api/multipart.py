@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
     ABORT_AFTER_COMMIT,
     ABORT_BEFORE_COMMIT,
@@ -157,6 +158,7 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     import io
 
     framed = preflight(request.headers) if is_framed(request.headers) else None
+    checks = UploadChecks.from_headers(request.headers, trailer=CRC64NVME if framed else None)
     body = b"" if framed else await request.body()
     # docs/design/storage-layout.md §6.6: a fresh blob per attempt; the previous
     # part stays recorded and intact until the commit that replaces it.
@@ -167,11 +169,15 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     try:
         if framed:
             part_etag, size = await write_framed_body(
-                request, storage, blob_id, framed, armed_point(PART_MID_WRITE)
+                request, storage, blob_id, framed, armed_point(PART_MID_WRITE), checks
             )
         else:
+            checks.feed(body)
             part_etag, size = storage.write_blob(
-                blob_id, io.BytesIO(body), mid_write_point=armed_point(PART_MID_WRITE)
+                blob_id,
+                io.BytesIO(body),
+                mid_write_point=armed_point(PART_MID_WRITE),
+                verify=checks.verify,
             )
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)

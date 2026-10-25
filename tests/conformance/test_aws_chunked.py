@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from pathlib import Path
 
 import boto3
@@ -168,9 +169,11 @@ def test_botocore_chunked_upload_part_is_refused(server):
 
 
 def test_plain_put_object_still_stored(server):
-    # The same client over plain http sends an ordinary body with a checksum header.
+    # The same client over plain http sends an ordinary body with a checksum header,
+    # which is verified against the body (tests/conformance/test_upload_checksums.py).
     port, metadata, _ = server
-    status, _ = _send(port, "PUT", f"/{BUCKET}/k", {"x-amz-checksum-crc32": "AAAAAA=="}, BODY)
+    crc32 = base64.b64encode(zlib.crc32(BODY).to_bytes(4, "big")).decode()
+    status, _ = _send(port, "PUT", f"/{BUCKET}/k", {"x-amz-checksum-crc32": crc32}, BODY)
     assert status == 200
     assert _send(port, "GET", f"/{BUCKET}/k", {}, b"") == (200, BODY)
 

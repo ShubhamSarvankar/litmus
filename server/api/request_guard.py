@@ -28,6 +28,7 @@ from server.api.aws_chunked import (
     is_framed,
     trailer_is_supported,
 )
+from server.checksums import unsupported_value_header
 from server.errors.s3errors import (
     InvalidBucketName,
     NotImplementedOperation,
@@ -199,6 +200,8 @@ def _check(method: str, path: str, query, headers) -> None:
         # PutObject (no subresource) and UploadPart (partNumber and uploadId).
         is_object_write = bool(key) and (query_keys - _IGNORED) in _ALLOWED_MUTATING_OBJECT["PUT"]
         _check_framing(headers, decodable=is_object_write)
+        if is_object_write and (name := unsupported_value_header(headers)):
+            raise NotImplementedOperation(extra={"Header": name})
 
     if key:
         subresources, implemented, allowed = (

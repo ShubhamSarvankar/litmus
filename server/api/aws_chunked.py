@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from fastapi import Request
 from starlette.datastructures import Headers
 
-from server.crc64nvme import Crc64Nvme, decode_b64_digest
+from server.checksums import UploadChecks
+from server.crc64nvme import decode_b64_digest
 from server.errors.s3errors import (
-    BadDigest,
     IncompleteBody,
     InvalidDigest,
     InvalidRequest,
@@ -212,13 +212,14 @@ async def write_framed_body(
     blob_id: str,
     framed: FramedRequest,
     mid_write_point: str | None,
+    checks: UploadChecks,
 ) -> tuple[str, int]:
     """Decode request.stream() into the blob, writing each received buffer as it
     arrives. Returns (ETag, size) of the decoded bytes. Nothing is made durable unless
-    the framing, both lengths and the checksum all check out; on any failure no file of
-    the blob is left (BlobStore.open_writer)."""
+    the framing, both lengths, the trailer checksum and the claims in checks (made with
+    trailer=CRC64NVME) all check out; on any failure no file of the blob is left
+    (BlobStore.open_writer)."""
     decoder = ChunkDecoder(framed.decoded_length)
-    crc = Crc64Nvme()
 
     def verify(writer: BlobWriter) -> None:
         if not decoder.done:
@@ -227,13 +228,11 @@ async def write_framed_body(
             raise _framing("framed body does not match Content-Length")
         if decoder.decoded != framed.decoded_length:
             raise IncompleteBody(extra={"Reason": "decoded length differs from the header"})
-        expected = decoder.trailer_checksum()
-        if crc.digest() != expected:
-            raise BadDigest(extra={"Header": CHECKSUM_TRAILER})
+        checks.verify(writer, trailer_value=decoder.trailer_checksum())
 
     with storage.open_writer(blob_id, mid_write_point=mid_write_point, verify=verify) as writer:
         async for received in request.stream():
             for piece in decoder.feed(received):
                 writer.write(piece)
-                crc.update(piece)
+                checks.feed(piece)
     return writer.etag, writer.size

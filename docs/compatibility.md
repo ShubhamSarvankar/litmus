@@ -546,7 +546,7 @@ responses. The status for more than 1000 Objects is 400, which is what
 Also not done: S3 requires `Content-MD5` or another checksum header on DeleteObjects
 ("The Content-MD5 request header is required for all Multi-Object Delete requests"),
 and Litmus accepts a request without one and checks none that it receives; see
-"Checksums are mostly not verified" below. An internal DTD entity
+"Checksums: verified on PutObject and UploadPart" below. An internal DTD entity
 (`<!ENTITY e "x">`) in the body is expanded, within the parser's limits.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
@@ -575,7 +575,8 @@ it: such a request is stored as an ordinary body.
   chunks, `0`, CRLF, one trailer line `x-amz-checksum-crc64nvme:<base64 of the 8 byte
   big endian CRC64NVME>`, CRLF, and a final CRLF. The decoded bytes are what is stored:
   the ETag is their MD5, and the framing, the trailer and the checksum are not kept.
-  The trailer is verified before the blob is made durable.
+  The trailer, and any `Content-MD5` or `x-amz-sdk-checksum-algorithm`, is verified
+  before the blob is made durable (see "Checksums" below).
 - Still 501 NotImplemented, before the body is read and before anything is registered or
   written: the signed variants `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and
   `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` (and any other `STREAMING-` value);
@@ -617,12 +618,61 @@ it: such a request is stored as an ordinary body.
   memory does not grow with the object. Plain bodies are not streamed: they are still
   read whole into memory before they are written, as before.
 
-**Checksums are mostly not verified.** The one checksum Litmus verifies is the CRC64NVME
-trailer of a framed body, above. `x-amz-checksum-*` headers (and
-`x-amz-sdk-checksum-algorithm`) on a plain PutObject or UploadPart are accepted but never
-checked, so a request whose body does not match its checksum still gets 200. No
-checksum is stored, and GetObject and HeadObject return no `x-amz-checksum-*` headers.
-`Content-MD5` is not checked either.
+**Checksums: verified on PutObject and UploadPart, not stored.** A PutObject or
+UploadPart body is checked against the checksums its request claims, before the blob is
+made durable, so a refused request leaves no object, part or file. Checked:
+
+- `Content-MD5`: base64 of the 16 byte MD5 of the body. It may accompany one checksum,
+  and both are verified.
+- One of `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`: base64 of
+  the digest (4, 4, 8, 20 and 32 bytes), checked against the body.
+- The CRC64NVME trailer of a framed body, as before. On a framed body `Content-MD5` is
+  checked against the decoded bytes, not the framed ones.
+- `x-amz-sdk-checksum-algorithm`, which must name the algorithm of the checksum header
+  (or of the trailer) in the request, in any letter case.
+
+Errors AWS documents (S3 API reference, PutObject): a value that does not match the body,
+or an `x-amz-sdk-checksum-algorithm` that differs from the checksum header, is 400
+BadDigest. The reference says an SDK header with no matching checksum header or trailer
+fails with "400 Bad Request" and names no code. AWS's error list describes InvalidDigest
+as a Content-MD5 or checksum value that is not valid, and BadDigest as one that did not
+match, which is how Litmus uses them (the page's table could not be fetched when this was
+written; the descriptions are as given by the project owner). The rest are Litmus's own
+choices, not documented by AWS:
+
+- A checksum or `Content-MD5` value that is not strict base64 of the right size
+  (including an empty one) is 400 InvalidDigest, found before the body is read.
+- `x-amz-sdk-checksum-algorithm` with no checksum header or trailer to match (also when
+  only `Content-MD5` is present), or sent twice: 400 InvalidRequest.
+- More than one `x-amz-checksum-<algorithm>` value header (also the same one twice), or
+  a value header together with a trailer: 400 InvalidRequest. Because a framed body
+  always has its trailer, a framed request with any `x-amz-checksum-<algorithm>` header is
+  refused; `Content-MD5` is the one header claim a framed request can make.
+- An `x-amz-checksum-<name>` value header naming any other algorithm (`md5`, `sha512`,
+  `xxhash64`, `xxhash3`, `xxhash128`, or a name AWS does not list) is 501 NotImplemented,
+  before the body is read. `x-amz-checksum-mode`, `-algorithm` and `-type` carry no
+  value and are not covered by this rule.
+- A repeated `Content-MD5` header reads as one comma separated value, so it is 400
+  InvalidDigest.
+
+Not done:
+
+- Nothing is stored and nothing is returned: PutObject and UploadPart answer with `ETag`
+  only, and GetObject and HeadObject return no `x-amz-checksum-*` header whatever
+  `x-amz-checksum-mode` says. S3 stores the checksum and, without one from the client,
+  adds CRC64NVME.
+- DeleteObjects does not check `Content-MD5` or a checksum header, and does not require
+  one (see "Also not done" above).
+- Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
+  `x-amz-checksum-type` on CreateMultipartUpload, the `Checksum*` elements of the
+  CompleteMultipartUpload body, `x-amz-checksum-*` and `x-amz-mp-object-size` on
+  Complete are all ignored, and composite and full object checksums are not computed.
+  The 501 for other algorithms applies to PutObject and UploadPart only.
+- The trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256`, which botocore
+  sends over `https://`, are still 501 (see above); only CRC64NVME is decoded.
+- `x-amz-content-sha256` holding a hex digest is not compared with the body.
+- The algorithms S3's documentation now lists beyond these five (MD5, SHA512 and the
+  XXHash family) are not computed.
 
 **Conditional writes are 501.** PutObject with `If-Match`, `If-None-Match` or
 `x-amz-write-offset-bytes`, and CompleteMultipartUpload with `If-Match` or

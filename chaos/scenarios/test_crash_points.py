@@ -20,11 +20,13 @@ the upload), the dead server's directory is copied first and (d) runs on the cop
 so both start from the same crash state.
 """
 
+import base64
 import hashlib
 import os
 import shutil
 import signal
 import xml.etree.ElementTree as ET
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -189,11 +191,35 @@ def framed(request) -> bool:
     return request.param
 
 
-def _put(client: httpx.Client, url: str, data: bytes, framed: bool = False) -> httpx.Response:
+@pytest.fixture(params=[pytest.param(False, id="no-claims"), pytest.param(True, id="claims")])
+def claimed(request) -> bool:
+    """Whether the request under test carries checksum claims, which are verified
+    before the blob is made durable (server/checksums.py)."""
+    return request.param
+
+
+def _claims(data: bytes, framed: bool) -> dict[str, str]:
+    """Headers claiming the digests of data. A framed body carries its checksum in the
+    trailer, so it gets Content-MD5 and the SDK header for that trailer; a plain body
+    also gets an x-amz-checksum-crc32 value."""
+    claims = {"content-md5": base64.b64encode(hashlib.md5(data).digest()).decode()}
+    if framed:
+        claims["x-amz-sdk-checksum-algorithm"] = "CRC64NVME"
+    else:
+        crc32 = base64.b64encode(zlib.crc32(data).to_bytes(4, "big")).decode()
+        claims["x-amz-checksum-crc32"] = crc32
+        claims["x-amz-sdk-checksum-algorithm"] = "CRC32"
+    return claims
+
+
+def _put(
+    client: httpx.Client, url: str, data: bytes, framed: bool = False, claimed: bool = False
+) -> httpx.Response:
+    extra = _claims(data, framed) if claimed else {}
     if framed:
         headers, body = framed_request(data)
-        return client.put(url, content=body, headers=headers)
-    return client.put(url, content=data)
+        return client.put(url, content=body, headers=headers | extra)
+    return client.put(url, content=data, headers=extra)
 
 
 # --- tests ---
@@ -578,11 +604,11 @@ def test_put_killed_after_register(tmp_path: Path, framed):
         _assert_object(client2, NEW, _md5(NEW))
 
 
-def test_put_killed_mid_write(tmp_path: Path, framed):
+def test_put_killed_mid_write(tmp_path: Path, framed, claimed):
     body = os.urandom(200 * 1024)
     server, client = _start(tmp_path, crash_point=PUT_MID_WRITE)
     assert client.put(f"/{BUCKET}").status_code == 200
-    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", body, framed))
+    _request_into_crash(server, lambda: _put(client, f"/{BUCKET}/{KEY}", body, framed, claimed))
     client.close()
 
     # (a) A partial temp file and no blob.
@@ -610,7 +636,7 @@ def test_put_killed_mid_write(tmp_path: Path, framed):
 
     with _restarted(tmp_path) as client2:
         assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
-        assert _put(client2, f"/{BUCKET}/{KEY}", body, framed).status_code == 200
+        assert _put(client2, f"/{BUCKET}/{KEY}", body, framed, claimed).status_code == 200
         _assert_object(client2, body, _md5(body))
 
 
@@ -807,18 +833,25 @@ def test_delete_objects_killed_after_commit(tmp_path: Path):
 # UploadPart
 
 
-def _part_killed_before_commit(tmp_path: Path, point: str, body: bytes, framed: bool = False):
+def _part_killed_before_commit(
+    tmp_path: Path, point: str, body: bytes, framed: bool = False, claimed: bool = False
+):
     server, client = _start(tmp_path, crash_point=point)
     assert client.put(f"/{BUCKET}").status_code == 200
     upload_id, _ = _open_upload(client, [])
     url = f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"
-    _request_into_crash(server, lambda: _put(client, url, body, framed))
+    _request_into_crash(server, lambda: _put(client, url, body, framed, claimed))
     client.close()
     return upload_id, url
 
 
 def _part_retry(
-    tmp_path: Path, upload_id: str, url: str, body: bytes, framed: bool = False
+    tmp_path: Path,
+    upload_id: str,
+    url: str,
+    body: bytes,
+    framed: bool = False,
+    claimed: bool = False,
 ) -> None:
     with _restarted(tmp_path) as client2:
         # (c) The part was never recorded: Complete with its ETag is refused, and the
@@ -828,7 +861,7 @@ def _part_retry(
         assert ET.fromstring(resp.text).findtext("Code") == "InvalidPart"
         assert _store(tmp_path).upload_exists(upload_id)
         # (d)
-        retry = _put(client2, url, body, framed)
+        retry = _put(client2, url, body, framed, claimed)
         assert retry.status_code == 200
         assert _complete(client2, upload_id, [retry.headers["etag"]]).status_code == 200
         _assert_object(client2, body, _multipart_etag([body]))
@@ -860,9 +893,9 @@ def test_upload_part_killed_after_register(tmp_path: Path, framed):
     _part_retry(tmp_path, upload_id, url, body, framed)
 
 
-def test_upload_part_killed_mid_write(tmp_path: Path, framed):
+def test_upload_part_killed_mid_write(tmp_path: Path, framed, claimed):
     body = os.urandom(200 * 1024)
-    upload_id, url = _part_killed_before_commit(tmp_path, PART_MID_WRITE, body, framed)
+    upload_id, url = _part_killed_before_commit(tmp_path, PART_MID_WRITE, body, framed, claimed)
 
     # (a)
     (row,) = _registry(tmp_path, "pending")
@@ -887,7 +920,7 @@ def test_upload_part_killed_mid_write(tmp_path: Path, framed):
     ]
     assert _temp_files(tmp_path) == [] and _registry(tmp_path) == []
 
-    _part_retry(tmp_path, upload_id, url, body, framed)
+    _part_retry(tmp_path, upload_id, url, body, framed, claimed)
 
 
 X = b"first attempt " * 1000

@@ -26,10 +26,11 @@ class Crc64Nvme:
         return base64.b64encode(self.digest()).decode("ascii")
 
 
-def decode_b64_digest(value: str) -> bytes | None:
-    """The 8 bytes a trailer value encodes, or None if it is not strict base64 of 8 bytes."""
+def decode_b64_digest(value: str, size: int = DIGEST_SIZE) -> bytes | None:
+    """The size bytes a checksum value encodes (8 for a CRC64NVME trailer), or None if
+    it is not strict base64 of exactly that many bytes."""
     try:
         raw = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
         return None
-    return raw if len(raw) == DIGEST_SIZE else None
+    return raw if len(raw) == size else None

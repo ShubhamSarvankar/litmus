@@ -109,7 +109,7 @@ def test_failed_put_whose_temp_cannot_be_removed_leaves_it_for_the_sweep(tmp_pat
         def __getattr__(self, name):
             return getattr(self._inner, name)
 
-        def write_blob(self, blob_id, src, mid_write_point=None):
+        def write_blob(self, blob_id, src, mid_write_point=None, verify=None):
             class Src(io.RawIOBase):
                 calls = 0
 
@@ -119,7 +119,7 @@ def test_failed_put_whose_temp_cannot_be_removed_leaves_it_for_the_sweep(tmp_pat
                         return b"x" * 100
                     raise OSError(28, "No space left on device")
 
-            return self._inner.write_blob(blob_id, Src(), mid_write_point)
+            return self._inner.write_blob(blob_id, Src(), mid_write_point, verify)
 
     storage = BlobStore(tmp_path / "blobs")
     metadata = SQLiteMetadataStore(db_path=tmp_path / "meta.db")

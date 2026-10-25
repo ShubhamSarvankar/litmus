@@ -103,6 +103,11 @@ class BlobWriter:
     def etag(self) -> str:
         return f'"{self._md5.hexdigest()}"'
 
+    @property
+    def md5_digest(self) -> bytes:
+        """The MD5 of what was written so far, as the 16 raw bytes."""
+        return self._md5.digest()
+
     def write(self, data: bytes) -> None:
         if self._out is None:
             raise ValueError("write to a closed blob writer")
@@ -173,12 +178,17 @@ class BlobStore:
     # --- writing ---
 
     def write_blob(
-        self, blob_id: str, src: IO[bytes], mid_write_point: str | None = None
+        self,
+        blob_id: str,
+        src: IO[bytes],
+        mid_write_point: str | None = None,
+        verify: Callable[["BlobWriter"], None] | None = None,
     ) -> tuple[str, int]:
-        """Stream src into the blob: temp file, fsync, rename, fsync of the fanout
-        directory. Returns (quoted MD5 ETag, size). On any failure no file of this
-        blob is left behind and the exception propagates."""
-        with self.open_writer(blob_id, mid_write_point=mid_write_point) as writer:
+        """Stream src into the blob: temp file, verify(writer) if given, fsync, rename,
+        fsync of the fanout directory. Returns (quoted MD5 ETag, size). On any failure,
+        including a verify that raises, no file of this blob is left behind and the
+        exception propagates; verify runs before any fsync (see open_writer)."""
+        with self.open_writer(blob_id, mid_write_point=mid_write_point, verify=verify) as writer:
             while chunk := src.read(_CHUNK):
                 writer.write(chunk)
         return writer.etag, writer.size

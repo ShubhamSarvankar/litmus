@@ -8,6 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
     DELETE_AFTER_COMMIT,
     DELETE_BEFORE_COMMIT,
@@ -106,6 +107,7 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
     # A framed body is decoded straight into the blob; the plain path buffers it whole.
     framed = preflight(request.headers) if is_framed(request.headers) else None
+    checks = UploadChecks.from_headers(request.headers, trailer=CRC64NVME if framed else None)
     body = b"" if framed else await request.body()
     content_type = request.headers.get("content-type", "binary/octet-stream")
 
@@ -114,11 +116,15 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     try:
         if framed:
             etag, size = await write_framed_body(
-                request, storage, blob_id, framed, armed_point(PUT_MID_WRITE)
+                request, storage, blob_id, framed, armed_point(PUT_MID_WRITE), checks
             )
         else:
+            checks.feed(body)
             etag, size = storage.write_blob(
-                blob_id, io.BytesIO(body), mid_write_point=armed_point(PUT_MID_WRITE)
+                blob_id,
+                io.BytesIO(body),
+                mid_write_point=armed_point(PUT_MID_WRITE),
+                verify=checks.verify,
             )
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)
