@@ -580,9 +580,12 @@ it: such a request is stored as an ordinary body.
   written: the signed variants `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and
   `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` (and any other `STREAMING-` value);
   `x-amz-decoded-content-length` with any other `x-amz-content-sha256`; the supported
-  streaming value on any PUT other than PutObject and UploadPart (a framed CreateBucket,
-  for one, which would otherwise ignore the body); the supported streaming value without
-  `x-amz-trailer`; and an `x-amz-trailer` that lists more than
+  streaming value on any request other than PutObject and UploadPart (a framed
+  CreateBucket, which would otherwise ignore the body, or a framed DeleteObjects,
+  CreateMultipartUpload or CompleteMultipartUpload, which would otherwise be read as plain
+  XML), and an `x-amz-content-sha256` naming a `STREAMING-` payload or an
+  `x-amz-decoded-content-length` on any such request, whatever its method; the supported
+  streaming value without `x-amz-trailer`; and an `x-amz-trailer` that lists more than
   one entry or names anything but `x-amz-checksum-crc64nvme`, so CRC32, CRC32C, SHA-1
   and SHA-256 trailers, which botocore sends over `https://` by default, are refused.
   The AWS CLI v2 sends the supported framing over `http://` with its default settings

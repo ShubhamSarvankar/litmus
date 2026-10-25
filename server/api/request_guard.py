@@ -169,10 +169,11 @@ _DOT_SEGMENTS = frozenset({".", ".."})
 
 
 def _check_framing(headers, decodable: bool) -> None:
-    """Refuse every chunk-framed PUT except the one framing Litmus decodes, and that one
-    only where it is decoded: decodable is true for PutObject and UploadPart alone. A
-    framed CreateBucket, or any other PUT, is refused like an unsupported framing, since
-    its body would otherwise be ignored or stored with the framing in it."""
+    """Refuse every chunk-framed request except the one framing Litmus decodes, and that
+    one only where it is decoded: decodable is true for PutObject and UploadPart alone. A
+    framed CreateBucket, DeleteObjects, CreateMultipartUpload or CompleteMultipartUpload,
+    or any other request, is refused like an unsupported framing, since its body would
+    otherwise be ignored, parsed as plain XML or stored with the framing in it."""
     content_sha256 = headers.get(CONTENT_SHA256_HEADER, "")
     if decodable and is_framed(headers):
         if not trailer_is_supported(headers):
@@ -190,18 +191,22 @@ def _check_framing(headers, decodable: bool) -> None:
 
 def _check(method: str, path: str, query, headers) -> None:
     query_keys = set(query.keys())
-    if path in ("", "/") or path == "/health":
+    if path == "/health":
         return
     bucket, _, key = path.lstrip("/").partition("/")
     if bucket in _DOT_SEGMENTS:
         raise InvalidBucketName(extra={"BucketName": bucket})
 
-    if method == "PUT":
-        # PutObject (no subresource) and UploadPart (partNumber and uploadId).
-        is_object_write = bool(key) and (query_keys - _IGNORED) in _ALLOWED_MUTATING_OBJECT["PUT"]
-        _check_framing(headers, decodable=is_object_write)
-        if is_object_write and (name := unsupported_value_header(headers)):
-            raise NotImplementedOperation(extra={"Header": name})
+    # PutObject (no subresource) and UploadPart (partNumber and uploadId) are the only
+    # requests whose framed body is decoded.
+    is_object_write = (
+        method == "PUT" and bool(key) and (query_keys - _IGNORED) in _ALLOWED_MUTATING_OBJECT["PUT"]
+    )
+    _check_framing(headers, decodable=is_object_write)
+    if path in ("", "/"):
+        return
+    if is_object_write and (name := unsupported_value_header(headers)):
+        raise NotImplementedOperation(extra={"Header": name})
 
     if method == "POST" and not key and (query_keys - _IGNORED) == {"delete"}:
         # DeleteObjects: checksum claims over the XML body, the same algorithms.

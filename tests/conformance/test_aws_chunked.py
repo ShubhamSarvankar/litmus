@@ -232,11 +232,14 @@ def test_ordinary_content_sha256_values_accepted(client):
         assert resp.status_code == 200, value
 
 
-def test_chunk_framing_headers_on_other_methods_ignored(client):
+def test_chunk_framing_headers_on_other_methods_refused(client):
+    # Framing is decoded for PutObject and UploadPart alone; on every other request the
+    # headers are refused, GET and HEAD included (test_framing_other_requests.py).
     client.put(f"/{BUCKET}/k", content=b"x")
     headers = {"x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER"}
-    assert client.get(f"/{BUCKET}/k", headers=headers).status_code == 200
-    assert client.head(f"/{BUCKET}/k", headers=headers).status_code == 200
+    assert client.get(f"/{BUCKET}/k", headers=headers).status_code == 501
+    assert client.head(f"/{BUCKET}/k", headers=headers).status_code == 501
+    assert client.get(f"/{BUCKET}/k").content == b"x"
 
 
 def test_trailer_checksum_is_base64():
