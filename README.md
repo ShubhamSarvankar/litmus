@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 177 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 178 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -47,7 +47,7 @@ parameters as follows.
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload |
-| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload |
+| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match` |
 | GET | `/health` | Health check |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
@@ -199,5 +199,5 @@ docs/
 ## Not implemented
 
 Authentication, ACLs and policies, versioning, CopyObject, the `allow-unordered`
-listing extension, conditional CompleteMultipartUpload and append writes, and conditional deletes. Litmus runs as one process on one
+listing extension, append writes, and conditional deletes. Litmus runs as one process on one
 machine. See [`docs/compatibility.md`](docs/compatibility.md).

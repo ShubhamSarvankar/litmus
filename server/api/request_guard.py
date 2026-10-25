@@ -140,10 +140,10 @@ CONDITIONAL_DELETE_HEADERS = (
 # If-None-Match and x-amz-write-offset-bytes (append at an offset that must equal the
 # current size); CompleteMultipartUpload takes If-Match and If-None-Match. Ignoring one
 # would overwrite an object the client asked to keep (or replace it with only the
-# appended bytes), so those Litmus does not evaluate are refused. PutObject evaluates
-# If-Match and If-None-Match in its commit (docs/design/storage-layout.md §10), so only
-# x-amz-write-offset-bytes is refused there; CompleteMultipartUpload refuses both.
-CONDITIONAL_COMPLETE_HEADERS = ("if-match", "if-none-match")
+# appended bytes), so those Litmus does not evaluate are refused. PutObject and
+# CompleteMultipartUpload evaluate If-Match and If-None-Match in their commit
+# (docs/design/storage-layout.md §10), so only x-amz-write-offset-bytes, on PutObject,
+# is refused.
 UNEVALUATED_PUT_OBJECT_HEADERS = ("x-amz-write-offset-bytes",)
 
 # Headers that select an operation Litmus does not implement on an otherwise
@@ -225,8 +225,6 @@ def _check(method: str, path: str, query, headers) -> None:
             conditional = CONDITIONAL_DELETE_HEADERS
         elif method == "PUT" and "uploadId" not in query_keys:  # PutObject, not UploadPart
             conditional = UNEVALUATED_PUT_OBJECT_HEADERS
-        elif method == "POST" and "uploadId" in query_keys:  # CompleteMultipartUpload
-            conditional = CONDITIONAL_COMPLETE_HEADERS
         else:
             conditional = ()
         for h in conditional:

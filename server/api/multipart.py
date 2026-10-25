@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.api.conditions import write_precondition
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
     ABORT_AFTER_COMMIT,
@@ -225,6 +226,8 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
         requested_parts=requested_parts,
         storage=storage,
         metadata=metadata,
+        # Decided in the commit, after every other Complete error (§10); no early check.
+        precondition=write_precondition(request.headers, key),
     )
     return Response(
         content=_complete_xml(bucket, key, composite_etag),

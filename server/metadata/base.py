@@ -227,12 +227,16 @@ class MetadataStore(Protocol):
         meta: ObjectMeta,
         part_blob_ids: dict[int, str] | None = None,
         released: list[str] | None = None,
+        precondition: Callable[[str | None], None] | None = None,
     ) -> bool: ...
 
     # Marks the open upload complete and commits its object row in one transaction.
     # Returns False, changing nothing, if the upload is not open; raises PartsChanged
     # if a listed part no longer names the blob that was assembled. Blobs it makes
-    # garbage are appended to released.
+    # garbage are appended to released. precondition is called inside the transaction,
+    # after those two checks, with the ETag of the row being replaced (None if none);
+    # what it raises rolls the whole commit back, the upload's state change included,
+    # so the upload stays open with its parts.
 
     def abort_upload(self, upload_id: str) -> list[str] | None: ...
 

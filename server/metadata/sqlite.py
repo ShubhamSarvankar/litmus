@@ -735,6 +735,7 @@ class SQLiteMetadataStore:
         meta: ObjectMeta,
         part_blob_ids: dict[int, str] | None = None,
         released: list[str] | None = None,
+        precondition: Callable[[str | None], None] | None = None,
     ) -> bool:
         """The Complete commit (§6.7 C4): mark the open upload complete and commit
         its object row in one transaction, so a crash or error leaves either both or
@@ -744,6 +745,11 @@ class SQLiteMetadataStore:
         PartsChanged if a part in part_blob_ids no longer names that blob. Blobs this
         makes garbage (the replaced object blob and every part blob) are appended to
         released.
+
+        precondition, when given, is called with the ETag of the row being replaced
+        (None when there is none) after the upload and part checks above, under the
+        write lock; what it raises rolls the commit back and propagates, and the
+        rollback undoes the state change, so the upload stays open with its parts.
         """
         part_blob_ids = part_blob_ids or {}
         with self._write() as conn:
@@ -764,6 +770,8 @@ class SQLiteMetadataStore:
                 if row is None or row["blob_id"] != blob_id:
                     raise PartsChanged(part_number)
             old = self._current(conn, meta.bucket, meta.key)
+            if precondition is not None:
+                precondition(old["etag"] if old else None)
             self._upsert_object(conn, meta)
             self._make_live(conn, meta.blob_id)
             garbage = [self._retire_object(conn, old, keep_upload=upload_id)] if old else []

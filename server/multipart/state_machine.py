@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from server.crash_points import (
     COMPLETE_AFTER_ASSEMBLE,
     COMPLETE_AFTER_COMMIT,
@@ -39,12 +41,18 @@ def complete_multipart_upload(
     requested_parts: list[dict],  # [{"PartNumber": int, "ETag": str}, ...]
     storage,
     metadata,
+    precondition: Callable[[str | None], None] | None = None,
 ) -> str:
     """CompleteMultipartUpload (docs/design/storage-layout.md §6.7).
 
     Validates parts, assembles them into a fresh blob, then commits the object row
     and the upload completion in a single SQLite transaction, then unlinks the part
     blobs and any replaced object blob. Returns the composite ETag.
+
+    precondition (the If-Match and If-None-Match check, §10) runs inside the commit
+    transaction against the object row it replaces. If it raises, the transaction rolls
+    back, so the upload is still open with all its parts; the assembled blob is
+    discarded and the error propagates.
 
     Raises InvalidPart if any listed part is missing or has a mismatched ETag.
     """
@@ -108,7 +116,11 @@ def complete_multipart_upload(
     )
     try:
         committed = metadata.commit_completed_upload(
-            upload_id, meta, part_blob_ids=part_blob_ids, released=released
+            upload_id,
+            meta,
+            part_blob_ids=part_blob_ids,
+            released=released,
+            precondition=precondition,
         )
     except PartsChanged as changed:
         discard_new_blob(storage, metadata, blob_id)

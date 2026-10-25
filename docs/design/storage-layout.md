@@ -106,10 +106,9 @@ rename, fsync of the parent directory, then the SQLite commit).
     If-Match / If-None-Match on PutObject and CompleteMultipartUpload (and later
     CopyObject) must be checked in the same transaction as the metadata commit, after
     the new bytes are durable at a fresh path. A failed precondition must leave the
-    old object's bytes and metadata untouched. PutObject now does this (§10);
-    CompleteMultipartUpload still returns 501 (`CONDITIONAL_COMPLETE_HEADERS` in
-    `server/api/request_guard.py`). Conditional deletes (also 501 today) should follow
-    the same model.
+    old object's bytes and metadata untouched. PutObject and CompleteMultipartUpload
+    now do this (§10, §6.7 C4.c). Conditional deletes (still 501) should follow the same
+    model.
 
 16. **(asked) Lift the `.` / `..` key segment rejection.** S3 keys are opaque, but keys
     with `.` or `..` segments are rejected with 400 InvalidArgument (and bucket names
@@ -726,7 +725,8 @@ C1. Read-only: parse and validate the body (an empty body is MalformedXML, separ
     the bucket and key part comes with the multipart work, decision 17).
     Read the part rows and validate the requested list: ascending part numbers, every
     part recorded with a matching ETag (else InvalidPart / InvalidPartOrder). Remember
-    each requested part's `blob_id` and size. Optional early conditional check (§10).
+    each requested part's `blob_id` and size. No early conditional check (§10): the
+    condition is decided at C4.c, so a refused Complete costs a full assembly.
 
 C2. `id = REGISTER('object', bucket, key, upload_id)` **[C]**. `⚡complete-after-register`
 
@@ -753,7 +753,10 @@ C4. BEGIN IMMEDIATE
        unlink, RELEASE(id), InvalidPart.
     c. old = the current object row; evaluate If-Match / If-None-Match against it
        (§10). On failure: ROLLBACK, unlink, RELEASE(id), 412 or 404. The upload stays
-       open.
+       open, with every part row and part blob as before. The precondition is
+       `commit_completed_upload`'s `precondition` argument, called after (a) and (b),
+       so NoSuchUpload and InvalidPart come first; the ROLLBACK undoes (a), so the upload
+       is `open` again, and there is no state to restore by hand.
     d. INSERT INTO objects (..., blob_id = id, size = sum of part sizes, etag =
        composite ETag, last_modified = the upload's `initiated` time (not the time of
        this commit), headers and user_metadata copied from the
@@ -1060,9 +1063,9 @@ Other races, each decided by commit order:
 
 ### §10. Conditional writes and deletes (R15)
 
-Status: PutObject `If-Match` and `If-None-Match` are implemented as below. The same
-two headers on CompleteMultipartUpload, `x-amz-write-offset-bytes` and the conditional
-deletes are not; they still return 501 (docs/compatibility.md).
+Status: `If-Match` and `If-None-Match` on PutObject and on CompleteMultipartUpload are
+implemented as below. `x-amz-write-offset-bytes` and the conditional deletes are not;
+they still return 501 (docs/compatibility.md).
 
 The authoritative check always runs inside the commit transaction (P4.b, C4.c), against
 the row as it is at that moment, after the new bytes are durable at their fresh path.
@@ -1073,12 +1076,29 @@ transaction back, and the handler discards the new blob through the same path as
 failed commit (unlink, RELEASE). The old object's bytes and row are untouched. For
 Complete the upload stays open, so the client can retry without re-uploading parts.
 
-There is no early check before the body is read. One would only save writing bytes that
-are bound to be refused, and it could never decide success. Leaving it out keeps one
-decision point and the order of errors the same with and without a condition (a body
-that fails its checksum is BadDigest whatever the conditions say). The cost is that a
-refused PUT writes and discards its bytes. An early check may be added later as a
-refusal only.
+CompleteMultipartUpload takes the same function: `commit_completed_upload` has the
+same optional `precondition`, called at C4.c with the ETag of the object row the
+Complete would replace (None when there is none). It is built by `write_precondition`
+from the request headers, exactly as for PutObject, and the rules below are the same.
+Complete has no separate "completing" state: the upload's `open` to `completed` change
+is the compare-and-set at C4.a, inside the same transaction, so the rollback that
+undoes a refused precondition also puts the state back. The upload is left `open` with
+every part row and part blob as before the request. Only the assembled blob (a fresh
+one, registered at C2) is discarded; nothing else was written. Every other Complete
+error is decided before the condition: NoSuchUpload (before assembly, and at C4.a),
+InvalidPart (C1, C3 and C4.b), so a request that is both invalid and refused by its
+condition gets the invalid answer. `Last-Modified` of a Complete stays the upload's
+initiation time, taken from the upload row, not the time of the commit.
+
+There is no early check before the body is read (PutObject) or before the parts are
+assembled (Complete). One would only save writing bytes that are bound to be refused,
+and it could never decide success. Leaving it out keeps one decision point and the
+order of errors the same with and without a condition (a body that fails its checksum
+is BadDigest whatever the conditions say). The cost is that a refused PUT writes and
+discards its bytes, and a refused Complete assembles a whole new blob, a copy of every
+listed part, and discards it. For a large upload that is the full size of the object
+in I/O for nothing, and it is repeated by every retry that is refused again. An early
+check may be added later as a refusal only (C1 already names the place).
 
 | Header | Current row exists | No current row |
 |---|---|---|
@@ -1108,6 +1128,10 @@ Choices, all in `server/api/conditions.py`:
   `test_atomic_dual_conditional_write_1mb` expects 412 for this case.
 - The 404 cases follow ceph's `test_put_object_if_match` and
   `test_multipart_put_object_if_match`.
+- A refused Complete leaves the upload open, with its parts, so the client can retry
+  with another condition. The alternatives (closing the upload, or dropping the
+  unlisted parts) would cost the client its uploaded bytes for a failure that says
+  nothing about the upload.
 
 Two concurrent `If-None-Match: *` PUTs to a new key produce exactly one creator: the
 first commit inserts the row, and the second's check sees it and gets 412. Two
@@ -1115,6 +1139,12 @@ first commit inserts the row, and the second's check sees it and gets 412. Two
 commit changes the ETag. An `If-Match` PUT against a concurrent DeleteObject is 200
 (the PUT committed first, then the delete) or 404 (the delete committed first); a 404
 PUT creates nothing.
+
+The same holds for Complete. Two uploads to one key completed concurrently with
+`If-None-Match: *` produce one 200 and one 412, and the loser's upload stays open with
+its parts. A Complete and a PutObject, both `If-None-Match: *`, on a new key produce
+exactly one creator. An `If-Match` Complete whose commit comes after a DeleteObject is
+404 NoSuchKey and does not bring the object back; its upload is still open.
 
 `x-amz-write-offset-bytes` (append) stays 501. It would fit this design as a new blob
 holding the old bytes plus the appended ones, committed only if the current size still

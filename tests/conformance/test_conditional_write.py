@@ -3,8 +3,9 @@
 Ignoring a write precondition would overwrite an object the client asked to keep.
 Header names are from the S3 API reference: PutObject (If-Match, If-None-Match,
 x-amz-write-offset-bytes) and CompleteMultipartUpload (If-Match, If-None-Match).
-PutObject evaluates If-Match and If-None-Match (test_conditional_put.py), so only
-x-amz-write-offset-bytes is refused there; CompleteMultipartUpload refuses both.
+PutObject and CompleteMultipartUpload evaluate If-Match and If-None-Match
+(test_conditional_put.py, test_conditional_complete.py), so only
+x-amz-write-offset-bytes, on PutObject, is refused.
 """
 
 import hashlib
@@ -14,10 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from server.api.request_guard import (
-    CONDITIONAL_COMPLETE_HEADERS,
-    UNEVALUATED_PUT_OBJECT_HEADERS,
-)
+from server.api.request_guard import UNEVALUATED_PUT_OBJECT_HEADERS
 from server.app import create_app
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.blobs import BlobStore
@@ -63,7 +61,6 @@ def _assert_not_implemented(resp) -> None:
 
 def test_header_lists_match_the_reference():
     assert set(UNEVALUATED_PUT_OBJECT_HEADERS) == {"x-amz-write-offset-bytes"}
-    assert set(CONDITIONAL_COMPLETE_HEADERS) == {"if-match", "if-none-match"}
 
 
 # --- PutObject ---
@@ -106,24 +103,29 @@ def _prepare_upload(client: TestClient, key: str) -> tuple[str, bytes]:
     return uid, body
 
 
-@pytest.mark.parametrize("header", sorted(CONDITIONAL_COMPLETE_HEADERS))
-def test_conditional_complete_over_existing_object_returns_501_and_keeps_it(client, header):
+@pytest.mark.parametrize("header", ["if-match", "if-none-match"])
+def test_complete_with_a_satisfied_condition_over_existing_object_is_evaluated(client, header):
     uid, body = _prepare_upload(client, KEY)
     value = SATISFIED_ON_EXISTING[header]
     resp = client.post(f"/{BUCKET}/{KEY}?uploadId={uid}", content=body, headers={header: value})
-    _assert_not_implemented(resp)
-    _assert_intact(client)
-    # The upload is still open: completing it without the condition works.
-    assert client.post(f"/{BUCKET}/{KEY}?uploadId={uid}", content=body).status_code == 200
+    assert resp.status_code == 200
     assert client.get(f"/{BUCKET}/{KEY}").content == b"part one"
 
 
-@pytest.mark.parametrize("header", sorted(CONDITIONAL_COMPLETE_HEADERS))
-def test_conditional_complete_of_new_key_returns_501_and_creates_nothing(client, header):
+def test_complete_if_none_match_of_new_key_is_evaluated(client):
     uid, body = _prepare_upload(client, "new.txt")
-    value = SATISFIED_ON_MISSING[header]
-    resp = client.post(f"/{BUCKET}/new.txt?uploadId={uid}", content=body, headers={header: value})
-    _assert_not_implemented(resp)
+    headers = {"if-none-match": SATISFIED_ON_MISSING["if-none-match"]}
+    resp = client.post(f"/{BUCKET}/new.txt?uploadId={uid}", content=body, headers=headers)
+    assert resp.status_code == 200
+    assert client.get(f"/{BUCKET}/new.txt").content == b"part one"
+
+
+def test_complete_if_match_of_new_key_is_404_and_creates_nothing(client):
+    uid, body = _prepare_upload(client, "new.txt")
+    headers = {"if-match": SATISFIED_ON_MISSING["if-match"]}
+    resp = client.post(f"/{BUCKET}/new.txt?uploadId={uid}", content=body, headers=headers)
+    assert resp.status_code == 404
+    assert ET.fromstring(resp.text).findtext("Code") == "NoSuchKey"
     assert client.get(f"/{BUCKET}/new.txt").status_code == 404
 
 
