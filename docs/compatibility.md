@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**155 passed, 168 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**158 passed, 165 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -68,7 +68,9 @@ pages through ListObjectVersions; `encoding-type=url` moved 2 more
 (`test_bucket_list_encoding_basic` and `test_bucket_listv2_encoding_basic`), and the
 DeleteObjects limit of 1000 Objects moved 2 more (`test_multi_object_delete_key_limit`
 and `test_multi_objectv2_delete_key_limit`), and the `InvalidRange` error body moved 2
-more (`test_ranged_request_invalid_range` and `test_ranged_request_empty_object`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+more (`test_ranged_request_invalid_range` and `test_ranged_request_empty_object`), and
+storing the system headers moved 3 more (`test_object_write_cache_control`,
+`test_object_write_expires` and `test_object_content_encoding_aws_chunked`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -97,6 +99,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | DeleteObjects document validation | 330 | 508 | 153 | The Delete document is validated whole before anything is deleted: root, 1 to 1000 Objects, one Key each, Quiet. More than 1000 Objects is 400 MalformedXML. 2 passes gained: `test_multi_object_delete_key_limit` and `test_multi_objectv2_delete_key_limit`, as forecast; no other outcome changed. Recorded at the commit that adds the validation. |
 | InvalidRange error body | 330 | 508 | 155 | An unsatisfiable Range on GET is raised as the `InvalidRange` S3 error (416) instead of a bare 416, so it carries `Code`, `Message`, `RequestId` and `HostId`. 2 passes gained: `test_ranged_request_invalid_range` and `test_ranged_request_empty_object`, as forecast before the change; no other outcome changed. Recorded at the commit that adds the error. |
 | RFC 9110 Range handling | 330 | 508 | 155 | A range whose last byte is past the object is clamped and served as 206; a Range that does not parse, a unit other than `bytes`, and a set of ranges are ignored (200, whole object). No outcome changed, and none was expected to: the results file is identical to the previous one. Every Range in a selected GET test either ends inside the object or expects `bytes=40-50` to be 416, and the copy-range tests fail on 501. Recorded at the commit that adds the handling. |
+| System headers on PutObject | 330 | 508 | 158 | PutObject stores `Cache-Control`, `Content-Disposition`, `Content-Encoding` (without `aws-chunked`), `Content-Language` and `Expires`, and GET and HEAD return them. 3 passes gained: `test_object_write_cache_control`, `test_object_write_expires` and `test_object_content_encoding_aws_chunked`, as forecast; the results file differs from the previous one in those three lines only. Recorded at the commit that adds the storage. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -115,7 +118,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 155 passes are incidental**.
+is authenticated or owned. By that rule, **27 of the 158 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -211,8 +214,8 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 |---|---|---|---|---|---|
 | Bucket operations | 17 | 9 | 7 | 1 | Create, delete, head, list buckets, deleting a non-empty bucket refused, missing-bucket errors. Fail: re-creating a bucket you own expects success or BucketAlreadyOwnedByYou, and Litmus answers 409 BucketAlreadyExists (2 tests). That answer is deliberate: telling the owner apart needs authentication, which is out of scope; RGW-specific usage and statistics headers (3); ListBuckets ignores MaxBuckets and ContinuationToken (1); one test calls PutObjectAcl, which is 501 (1). |
 | Bucket naming | 18 | 16 | 2 | 0 | Valid names are accepted; names that break the AWS rules (length, characters, edges, adjacent periods, IP format, reserved prefixes and suffixes) get 400 InvalidBucketName. Fail: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and `test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, and AWS's current rules allow both names, so Litmus accepts them (see Known gaps). |
-| Object operations | 28 | 25 | 3 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `Content-Encoding: aws-chunked` is not handled; `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
-| User metadata and stored headers | 6 | 0 | 6 | 0 | Fail: `x-amz-meta-*`, `Cache-Control` and `Expires` are not stored or returned. |
+| Object operations | 28 | 26 | 2 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, `Content-Encoding` with its `aws-chunked` token removed, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
+| User metadata and stored headers | 6 | 2 | 4 | 0 | `Cache-Control` and `Expires` are stored and returned (see "System headers" under Known gaps). Fail: `x-amz-meta-*` is not stored or returned (4). |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges, a last byte past the end clamped; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
@@ -231,7 +234,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **155** | **168** | **7** | |
+| **Total** | **330** | **158** | **165** | **7** | |
 
 ## AWS CLI
 
@@ -564,7 +567,8 @@ DeleteObjects), and `versionId` on PUT or POST gets 501.
 a trailing checksum by default. Litmus identifies such a body the way S3 documents it:
 `x-amz-content-sha256` starting with `STREAMING-`, or an `x-amz-decoded-content-length`
 header. `Content-Encoding: aws-chunked` alone is not a marker, since S3 does not require
-it: such a request is stored as an ordinary body.
+it: such a request is stored as an ordinary body. Its `aws-chunked` token is dropped
+from the stored `Content-Encoding` (see "System headers" below).
 
 - Supported, on PutObject and UploadPart only: `x-amz-content-sha256:
   STREAMING-UNSIGNED-PAYLOAD-TRAILER` (compared exactly) with `x-amz-trailer:
@@ -714,6 +718,36 @@ one: no other path in Litmus stores an empty key.
 the body is not parsed as XML. S3 answers 400 MalformedXML. So does any other body
 that is not well-formed XML or not UTF-8: Complete has its own parser, which still
 lets the error escape, though DeleteObjects now answers 400 for the same bodies.
+
+**System headers.** PutObject stores `Cache-Control`, `Content-Disposition`,
+`Content-Encoding`, `Content-Language` and `Expires` with the object, and GET and HEAD
+return them, on 200 and on 206, beside `Content-Type`. An overwrite replaces all of them:
+a header the new PUT lacks is cleared. They commit in the same transaction as the object
+row, so a kill leaves the old object with its old headers or the new object with its new
+ones (`chaos/scenarios/test_crash_system_headers.py`). The S3 documentation says what each
+header is (PutObject, "Request Parameters"; S3 User Guide, "System-defined object
+metadata") and that GET and HEAD return them; the rest is Litmus's choice, listed here:
+
+- `Content-Encoding` loses every `aws-chunked` token, compared without regard to case,
+  and keeps the others in order, joined with `, `. If none is left, nothing is stored and
+  no `Content-Encoding` is returned. S3's documentation says only that `aws-chunked` may
+  appear in the header of a chunked upload (S3 User Guide, "Checking object integrity
+  for data uploads", "Trailing checksum headers"); that it is not kept comes from
+  `test_object_content_encoding_aws_chunked`, which expects `gzip, aws-chunked` and
+  `aws-chunked, gzip` to read back as `gzip` and `aws-chunked` as no header.
+- A header sent more than once is read as one comma separated list (RFC 9110 5.3), and
+  returned joined with `, `.
+- A blank value is stored as no value, and nothing is returned.
+- `Expires` is stored and returned exactly as sent, whether or not it parses as a date.
+  The S3 documentation is silent on an `Expires` that is not a date. The only basis is
+  botocore (1.43.118, the pinned version): `handle_expires_header` in `botocore/handlers.py`
+  keeps an unparseable `Expires` response header as `ExpiresString` instead of failing,
+  which suggests S3 can return one.
+- Header bytes pass through as latin-1, as the server reads and writes headers; no
+  RFC 2047 decoding or encoding is applied to these headers.
+- The 2 KB limit the documentation gives for system-defined metadata in a PUT header
+  is not enforced.
+- CreateMultipartUpload does not apply any of them to the completed object yet.
 
 **Multipart details.** Content-Type and user metadata given to CreateMultipartUpload
 are not applied to the object. The minimum part size is not enforced. `partNumber`

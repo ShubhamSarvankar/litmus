@@ -220,7 +220,9 @@ def test_content_encoding_alone_is_not_chunk_framing(client, encoding):
     # not treat it as one without the other headers: the body is stored as sent.
     resp = client.put(f"/{BUCKET}/k", content=b"plain body", headers={"content-encoding": encoding})
     assert resp.status_code == 200
-    assert client.get(f"/{BUCKET}/k").content == b"plain body"
+    # Raw bytes: GET returns the remaining encoding (gzip), which the client would undo.
+    with client.stream("GET", f"/{BUCKET}/k") as got:
+        assert b"".join(got.iter_raw()) == b"plain body"
 
 
 def test_ordinary_content_sha256_values_accepted(client):

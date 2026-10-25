@@ -20,6 +20,12 @@ class ObjectMeta:
     blob_id: str
     # Set when the object was written by CompleteMultipartUpload.
     upload_id: str | None = None
+    # Stored system headers, as the client sent them; None when the PUT had none.
+    cache_control: str | None = None
+    content_disposition: str | None = None
+    content_encoding: str | None = None
+    content_language: str | None = None
+    expires: str | None = None
 
 
 @dataclass

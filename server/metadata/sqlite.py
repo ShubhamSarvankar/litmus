@@ -184,6 +184,11 @@ def _object(row: sqlite3.Row) -> ObjectMeta:
         content_type=row["content_type"],
         blob_id=row["blob_id"],
         upload_id=row["upload_id"],
+        cache_control=row["cache_control"],
+        content_disposition=row["content_disposition"],
+        content_encoding=row["content_encoding"],
+        content_language=row["content_language"],
+        expires=row["expires"],
     )
 
 
@@ -450,7 +455,7 @@ class SQLiteMetadataStore:
                                     content_type, cache_control, content_disposition,
                                     content_encoding, content_language, expires,
                                     user_metadata, upload_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, '{}', ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
                ON CONFLICT(bucket, key) DO UPDATE SET
                    blob_id             = excluded.blob_id,
                    size                = excluded.size,
@@ -472,6 +477,11 @@ class SQLiteMetadataStore:
                 meta.etag,
                 _dt_to_str(meta.last_modified),
                 meta.content_type,
+                meta.cache_control,
+                meta.content_disposition,
+                meta.content_encoding,
+                meta.content_language,
+                meta.expires,
                 meta.upload_id,
             ),
         )

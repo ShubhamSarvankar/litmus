@@ -94,6 +94,35 @@ def _http_date(dt: datetime) -> str:
     return dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 
+_AWS_CHUNKED = "aws-chunked"
+
+
+def _header_value(headers, name: str) -> str | None:
+    """The request header as RFC 9110 5.3 reads repeated fields, joined with ", ";
+    None when it is absent or blank, so a blank value is stored as no value."""
+    values = [v.strip() for v in headers.getlist(name) if v.strip()]
+    return ", ".join(values) or None
+
+
+def _stored_content_encoding(headers) -> str | None:
+    """Content-Encoding without its aws-chunked tokens, which name the request's
+    framing, not an encoding of the object; None when nothing else is left."""
+    tokens = [t.strip() for v in headers.getlist("content-encoding") for t in v.split(",")]
+    return ", ".join(t for t in tokens if t and t.lower() != _AWS_CHUNKED) or None
+
+
+def _stored_headers(meta: ObjectMeta) -> dict[str, str]:
+    """The stored system headers GET and HEAD return, besides Content-Type."""
+    pairs = (
+        ("Cache-Control", meta.cache_control),
+        ("Content-Disposition", meta.content_disposition),
+        ("Content-Encoding", meta.content_encoding),
+        ("Content-Language", meta.content_language),
+        ("Expires", meta.expires),
+    )
+    return {name: value for name, value in pairs if value is not None}
+
+
 # --- shared handler implementations (called by multipart router too) ---
 
 
@@ -139,6 +168,11 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         last_modified=datetime.now(UTC).replace(tzinfo=None),
         content_type=content_type,
         blob_id=blob_id,
+        cache_control=_header_value(request.headers, "cache-control"),
+        content_disposition=_header_value(request.headers, "content-disposition"),
+        content_encoding=_stored_content_encoding(request.headers),
+        content_language=_header_value(request.headers, "content-language"),
+        expires=_header_value(request.headers, "expires"),
     )
     try:
         replaced = metadata.put_object_meta(bucket, key, meta)
@@ -209,6 +243,7 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                     "ETag": meta.etag,
                     "Last-Modified": _http_date(meta.last_modified),
                     "Content-Type": meta.content_type,
+                    **_stored_headers(meta),
                 },
                 media_type=meta.content_type,
                 background=BackgroundTask(f.close),
@@ -223,6 +258,7 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                 "ETag": meta.etag,
                 "Last-Modified": _http_date(meta.last_modified),
                 "Content-Type": meta.content_type,
+                **_stored_headers(meta),
             },
             media_type=meta.content_type,
             background=BackgroundTask(f.close),
@@ -256,6 +292,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
             "Last-Modified": _http_date(meta.last_modified),
             "Content-Type": meta.content_type,
             "Accept-Ranges": "bytes",
+            **_stored_headers(meta),
         },
     )
 
