@@ -213,6 +213,53 @@ def test_conditional_get_racing_a_delete_returns_404(env, monkeypatch):
     assert ET.fromstring(resp.text).findtext("Code") == "NoSuchKey"
 
 
+def test_if_range_naming_the_old_version_does_not_range_the_new_one(env, monkeypatch):
+    """The overwrite lands between the row read and the open. If-Range is evaluated on the
+    row GET ends up serving, so a stale validator sends the whole new object (200), never
+    a 206 slice of the new bytes under the old ETag."""
+    reader, writer, storage, metadata = env
+    old = metadata.get_object_meta(BUCKET, KEY)
+    _after_row_read(monkeypatch, metadata, lambda: writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+    opens = _record_opens(monkeypatch, storage)
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"Range": "bytes=100-199", "If-Range": _md5(OLD)})
+
+    assert opens[0] == (old.blob_id, "ENOENT")
+    assert resp.status_code == 200
+    assert resp.content == NEW
+    assert "content-range" not in resp.headers
+    assert resp.headers["etag"] == _md5(NEW)
+
+
+def test_if_range_naming_the_new_version_ranges_the_new_one(env, monkeypatch):
+    reader, writer, storage, metadata = env
+    old = metadata.get_object_meta(BUCKET, KEY)
+    _after_row_read(monkeypatch, metadata, lambda: writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+    opens = _record_opens(monkeypatch, storage)
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"Range": "bytes=100-199", "If-Range": _md5(NEW)})
+
+    assert opens[0] == (old.blob_id, "ENOENT")
+    assert resp.status_code == 206
+    assert resp.content == NEW[100:200]
+    assert resp.headers["content-range"] == f"bytes 100-199/{len(NEW)}"
+    assert resp.headers["etag"] == _md5(NEW)
+
+
+def test_if_range_with_the_old_date_does_not_range_the_new_version(env, monkeypatch):
+    reader, writer, storage, metadata = env
+    stale = metadata.get_object_meta(BUCKET, KEY).last_modified.strftime(
+        "%a, %d %b %Y %H:%M:%S GMT"
+    )
+    _after_row_read(monkeypatch, metadata, lambda: writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"Range": "bytes=100-199", "If-Range": stale})
+
+    assert resp.status_code == 200
+    assert resp.content == NEW
+    assert resp.headers["etag"] == _md5(NEW)
+
+
 def test_open_descriptor_keeps_streaming_the_old_version_after_an_overwrite(env, monkeypatch):
     """Overwrite and GC run after the first chunk was read: the descriptor pins the
     old blob, and the whole old version is sent with its own ETag."""

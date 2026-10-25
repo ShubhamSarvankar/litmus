@@ -8,7 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
-from server.api.conditions import evaluate_read_conditions
+from server.api.conditions import evaluate_read_conditions, if_range_holds
 from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
@@ -297,6 +297,10 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
         # The stored headers, with this request's overrides over them; never stored.
         headers = {"Content-Type": meta.content_type, **_stored_headers(meta), **overrides}
         range_header = request.headers.get("range")
+        # RFC 9110 13.2.2 step 5: a false If-Range ignores the Range. Evaluated on the
+        # row that was opened, which is the row the headers come from.
+        if range_header and not if_range_holds(request.headers, meta.etag, meta.last_modified):
+            range_header = None
         resolved = _resolve_range(range_header, meta.size) if range_header else None
         if resolved is not None:
             start, end = resolved
@@ -351,7 +355,9 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
     range_header = request.headers.get("range")
     if range_header:
         # Raises InvalidRange for a range that GET would refuse. A range GET would
-        # serve is ignored here, as before: HEAD does not narrow Content-Length.
+        # serve is ignored here, as before: HEAD does not narrow Content-Length. If-Range
+        # is not evaluated: RFC 9110 13.2.2 step 5 is for GET, and 14.2 defines range
+        # handling for GET alone.
         _resolve_range(range_header, meta.size)
 
     return Response(

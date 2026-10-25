@@ -110,6 +110,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | `response-*` overrides on GET and HEAD | 330 | 508 | 162 | `response-cache-control`, `-content-disposition`, `-content-encoding`, `-content-language`, `-content-type` and `-expires` set the response header on GET (200 and 206) and HEAD, and are never stored. 1 pass gained: `test_object_raw_response_headers`, as forecast: it asserts the five headers the overrides set, its setup (`ACL` on CreateBucket and PutObject) already passed, and it is the only selected test that sends a `response-*` parameter. No other outcome changed; the results file differs from the previous one in that line only. Recorded at the commit that adds the overrides. |
 | Multipart upload headers | 330 | 508 | 163 | CreateMultipartUpload stores `Content-Type`, the system headers and `x-amz-meta-*` with the upload and Complete gives them to the object, which is dated by the upload's initiation time. 1 pass gained: `test_multipart_upload_resend_part`, as forecast: it completes each upload once, checks the object's Content-Type and metadata, and fails today only on `binary/octet-stream == text/bla`. `test_multipart_upload` stays failing as forecast: it fails at its second Complete (`NoSuchUpload`) before it reaches its Content-Type assertion. No selected test reads Last-Modified of a multipart object. The results file differs from the previous one in that one line only. Recorded at the commit that adds the storage. |
 | Conditional GET and HEAD | 330 | 508 | 166 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD in RFC 9110 13.2.2 order; a 304 carries the ETag and the stored Cache-Control and Expires. 3 passes gained: `test_get_object_ifnonematch_good` (304), `test_get_object_ifmodifiedsince_failed` (304) and `test_get_object_ifunmodifiedsince_good` (412), as forecast; the results file differs from the previous one in those three lines only. The three passing conditional GET tests on the incidental list stay there: they pass on a copy of the server from before this change as well (26 stays 26). Recorded at the commit that adds the evaluation. |
+| `If-Range` on GET | 330 | 508 | 166 | A `Range` is applied when `If-Range` holds (strong entity tag, or a date equal to `Last-Modified` once the object is a second old) and ignored otherwise (200, whole object). No outcome changed, and none was expected to: no selected test sends `If-Range`; the results file is identical to the previous one. Recorded at the commit that adds the evaluation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -900,8 +901,8 @@ built from, after the bucket and key are known to exist and before the blob is o
 the order of RFC 9110 13.2.2: `If-Match` (false: 412), else `If-Unmodified-Since` (false:
 412), then `If-None-Match` (false: 304), else `If-Modified-Since` (false: 304). Both
 combinations the S3 GetObject reference documents follow from it. A conditional request
-is answered before `Range` is looked at, so 412 and 304 beat 416 and 206. `If-Range` is
-not evaluated yet and is ignored.
+is answered before `Range` is looked at, so 412 and 304 beat 416 and 206. `If-Range`
+is evaluated on GET after them (below).
 
 Choices where the S3 documentation is silent or the RFC leaves room:
 
@@ -925,3 +926,33 @@ Choices where the S3 documentation is silent or the RFC leaves room:
 - HEAD evaluates the same conditions. Before this change HEAD ignored all of them, `If-Match`
   included: a HEAD with a non-matching `If-Match` got 200. That gap is closed. A 412 on
   HEAD has the status and headers of the GET answer and, as for any HEAD, no body.
+
+**If-Range.** On a GET that carries a `Range`, `If-Range` is step 5 of RFC 9110 13.2.2,
+after the four conditions above. When it holds, the `Range` applies (206, or 416 when no
+byte satisfies it). When it does not, the `Range` is ignored and the whole object is
+sent with 200 (13.1.5: "a recipient of an If-Range header field MUST ignore the Range
+header field if the If-Range condition evaluates to false"). It is evaluated on the row
+GET ends up serving, so a GET that raced an overwrite compares it with the new row: a
+validator naming the old version gets the whole new object, never a slice of it. The
+`response-*` overrides apply to the 206 and to the 200 alike.
+
+- An entity tag holds when it is not weak and equals the ETag character by character
+  (strong comparison, 8.8.3.2). A tag sent without its quotes is read as that opaque tag,
+  as for the other conditions.
+- A date holds when it equals `Last-Modified` exactly, at the second the header carries,
+  and `Last-Modified` is a strong validator. 13.1.5: the condition is false if the date
+  is not a strong validator. 8.8.2.2 calls a modification date weak unless it can be
+  deduced to be strong; Litmus treats it as strong once the object is at least one second
+  old, since any later change then falls in another second. An object written less than a
+  second ago never matches a date.
+- The RFC does not say what a value is that is neither a valid entity tag nor a valid
+  HTTP-date. Litmus treats it as not holding and sends the whole object, the safe
+  answer when the validator cannot be checked, rather than ignoring the header and
+  serving a partial response. That covers a blank value, a list, `*`, an unterminated
+  quote, a date in any other zone than GMT, and a header sent twice.
+- Without a `Range` the header is ignored (13.1.5: a server MUST ignore it). A `Range`
+  that is itself ignored (a set of ranges, a unit other than bytes, a malformed
+  specifier) leaves the answer 200 whether `If-Range` holds or not.
+- HEAD ignores `If-Range`: step 5 is for GET, and 14.2 says range handling is defined for
+  GET alone. HEAD still answers 416 for an unsatisfiable `Range` whatever `If-Range`
+  says, as it did before.

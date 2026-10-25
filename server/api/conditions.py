@@ -1,9 +1,9 @@
-"""Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2).
+"""Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), and If-Range.
 
 evaluate_read_conditions() takes the request headers and the one row the response will
 be built from, and answers whether the response is 304 Not Modified. It raises
-PreconditionFailed (412) when If-Match or If-Unmodified-Since fails. If-Range is not
-evaluated here.
+PreconditionFailed (412) when If-Match or If-Unmodified-Since fails. if_range_holds()
+is step 5, for a GET that carries a Range.
 
 The conditions are evaluated in the order RFC 9110 13.2.2 gives:
 
@@ -16,10 +16,13 @@ The S3 API reference documents two combinations, and both follow from this order
 If-Match true with If-Unmodified-Since false is 200, and If-None-Match false with
 If-Modified-Since true is 304. A missing bucket or key is answered before any condition
 (RFC 9110 13.2.1), by the callers.
+
+5. If-Range, only on GET and only with a Range (13.2.2 step 5): true applies the Range
+   (206, or 416 when no byte satisfies it), false ignores it and sends the whole object.
 """
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from server.errors.s3errors import PreconditionFailed
 
@@ -112,3 +115,39 @@ def evaluate_read_conditions(headers, etag: str, last_modified: datetime) -> boo
         return _matches(if_none_match, etag, strong=False)
     modified_since = parse_http_date(headers, "if-modified-since")
     return modified_since is not None and modified <= modified_since
+
+
+def if_range_holds(
+    headers, etag: str, last_modified: datetime, now: datetime | None = None
+) -> bool:
+    """RFC 9110 13.1.5: whether the Range of this request is to be applied. True when
+    there is no If-Range. The caller asks only for a GET that has a Range: "a server
+    MUST ignore an If-Range header field received in a request that does not contain a
+    Range header field", and 14.2 defines range handling for GET alone.
+
+    The value is an entity tag or an HTTP-date. An entity tag holds when it is not weak
+    and equals the ETag character by character (strong comparison, 8.8.3.2). A date
+    holds when it equals Last-Modified exactly, at the second the header carries, and
+    Last-Modified is a strong validator: "the condition is false if the date is not a
+    strong validator". RFC 9110 8.8.2.2 calls a modification date weak unless it can
+    be deduced to be strong; here it is strong once it is at least one second older than
+    now, since any later change then gets a different second.
+
+    The RFC does not say what a value is that is neither a valid entity tag nor a valid
+    HTTP-date. It does not hold (the whole object is sent), the safe answer when the
+    validator cannot be checked. That covers a blank value, a list, "*" and a repeated
+    header."""
+    values = headers.getlist("if-range")
+    if not values:
+        return True
+    if len(values) != 1:
+        return False
+    date = parse_http_date(headers, "if-range")
+    if date is not None:
+        now = now or datetime.now(UTC).replace(tzinfo=None)
+        strong = now - last_modified >= timedelta(seconds=1)
+        return strong and date == last_modified.replace(microsecond=0)
+    tags = _entity_tags(headers, "if-range")
+    if tags is None or len(tags) != 1 or tags[0][2]:
+        return False
+    return _matches(tags, etag, strong=True)
