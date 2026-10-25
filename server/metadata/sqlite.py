@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -189,6 +190,7 @@ def _object(row: sqlite3.Row) -> ObjectMeta:
         content_encoding=row["content_encoding"],
         content_language=row["content_language"],
         expires=row["expires"],
+        user_metadata=json.loads(row["user_metadata"]),
     )
 
 
@@ -455,7 +457,7 @@ class SQLiteMetadataStore:
                                     content_type, cache_control, content_disposition,
                                     content_encoding, content_language, expires,
                                     user_metadata, upload_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(bucket, key) DO UPDATE SET
                    blob_id             = excluded.blob_id,
                    size                = excluded.size,
@@ -482,6 +484,7 @@ class SQLiteMetadataStore:
                 meta.content_encoding,
                 meta.content_language,
                 meta.expires,
+                json.dumps(meta.user_metadata, ensure_ascii=False, sort_keys=True),
                 meta.upload_id,
             ),
         )

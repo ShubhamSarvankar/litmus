@@ -95,6 +95,12 @@ class InvalidDigest(S3Error):
     message = "The checksum you specified is not valid."
 
 
+class MetadataTooLarge(S3Error):
+    status_code = 400
+    code = "MetadataTooLarge"
+    message = "Your metadata headers exceed the maximum allowed metadata size."
+
+
 class IncompleteBody(S3Error):
     status_code = 400
     code = "IncompleteBody"

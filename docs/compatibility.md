@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**158 passed, 165 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**161 passed, 162 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -70,7 +70,9 @@ DeleteObjects limit of 1000 Objects moved 2 more (`test_multi_object_delete_key_
 and `test_multi_objectv2_delete_key_limit`), and the `InvalidRange` error body moved 2
 more (`test_ranged_request_invalid_range` and `test_ranged_request_empty_object`), and
 storing the system headers moved 3 more (`test_object_write_cache_control`,
-`test_object_write_expires` and `test_object_content_encoding_aws_chunked`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_object_write_expires` and `test_object_content_encoding_aws_chunked`), and storing
+user metadata moved 3 more (`test_object_set_get_metadata_none_to_good`, `_none_to_empty`
+and `_overwrite_to_empty`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -100,6 +102,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | InvalidRange error body | 330 | 508 | 155 | An unsatisfiable Range on GET is raised as the `InvalidRange` S3 error (416) instead of a bare 416, so it carries `Code`, `Message`, `RequestId` and `HostId`. 2 passes gained: `test_ranged_request_invalid_range` and `test_ranged_request_empty_object`, as forecast before the change; no other outcome changed. Recorded at the commit that adds the error. |
 | RFC 9110 Range handling | 330 | 508 | 155 | A range whose last byte is past the object is clamped and served as 206; a Range that does not parse, a unit other than `bytes`, and a set of ranges are ignored (200, whole object). No outcome changed, and none was expected to: the results file is identical to the previous one. Every Range in a selected GET test either ends inside the object or expects `bytes=40-50` to be 416, and the copy-range tests fail on 501. Recorded at the commit that adds the handling. |
 | System headers on PutObject | 330 | 508 | 158 | PutObject stores `Cache-Control`, `Content-Disposition`, `Content-Encoding` (without `aws-chunked`), `Content-Language` and `Expires`, and GET and HEAD return them. 3 passes gained: `test_object_write_cache_control`, `test_object_write_expires` and `test_object_content_encoding_aws_chunked`, as forecast; the results file differs from the previous one in those three lines only. Recorded at the commit that adds the storage. |
+| User metadata on PutObject | 330 | 508 | 161 | PutObject stores `x-amz-meta-*` and GET and HEAD return it, with RFC 2047 decoding on store and encoding on return and a 2048 byte limit (400 MetadataTooLarge). 3 passes gained: `test_object_set_get_metadata_none_to_good`, `_none_to_empty` and `_overwrite_to_empty`, as forecast; the results file differs from the previous one in those three lines only. `test_object_set_get_unicode_metadata` stays failing, as forecast: it fails on the RFC 2047 value Litmus returns, which botocore hands back undecoded. `test_object_metadata_replaced_on_put`, which passed because Litmus stored nothing, now passes because an overwrite replaces the metadata: against a copy of the server whose overwrite keeps the old metadata it fails, so it leaves the incidental list (27 to 26). Recorded at the commit that adds the storage. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -118,7 +121,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **27 of the 158 passes are incidental**.
+is authenticated or owned. By that rule, **26 of the 161 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -182,8 +185,6 @@ delimiter is ignored, and they do not exercise delimiter support.
   `test_object_anon_put_write_access` and `test_object_raw_get` set ACLs through the
   `x-amz-acl` header, which Litmus ignores, and their anonymous requests succeed
   because nothing is authenticated.
-- User metadata (1): `test_object_metadata_replaced_on_put` expects no metadata after
-  a second PUT without any, and Litmus never stores metadata.
 
 Borderline, not counted above (18):
 
@@ -215,7 +216,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Bucket operations | 17 | 9 | 7 | 1 | Create, delete, head, list buckets, deleting a non-empty bucket refused, missing-bucket errors. Fail: re-creating a bucket you own expects success or BucketAlreadyOwnedByYou, and Litmus answers 409 BucketAlreadyExists (2 tests). That answer is deliberate: telling the owner apart needs authentication, which is out of scope; RGW-specific usage and statistics headers (3); ListBuckets ignores MaxBuckets and ContinuationToken (1); one test calls PutObjectAcl, which is 501 (1). |
 | Bucket naming | 18 | 16 | 2 | 0 | Valid names are accepted; names that break the AWS rules (length, characters, edges, adjacent periods, IP format, reserved prefixes and suffixes) get 400 InvalidBucketName. Fail: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and `test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, and AWS's current rules allow both names, so Litmus accepts them (see Known gaps). |
 | Object operations | 28 | 26 | 2 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, `Content-Encoding` with its `aws-chunked` token removed, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: `response-*` query parameters are ignored; a key that is not valid UTF-8 gets 404 instead of 400. |
-| User metadata and stored headers | 6 | 2 | 4 | 0 | `Cache-Control` and `Expires` are stored and returned (see "System headers" under Known gaps). Fail: `x-amz-meta-*` is not stored or returned (4). |
+| User metadata and stored headers | 6 | 5 | 1 | 0 | `Cache-Control`, `Expires` and `x-amz-meta-*` are stored and returned (see "System headers" and "User metadata" under Known gaps). Fail: `test_object_set_get_unicode_metadata` expects a non-ASCII value back as the raw string, and Litmus returns it RFC 2047 encoded, as the AWS documentation describes (see "User metadata"). |
 | Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
 | Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges, a last byte past the end clamped; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
@@ -234,7 +235,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **158** | **165** | **7** | |
+| **Total** | **330** | **161** | **162** | **7** | |
 
 ## AWS CLI
 
@@ -718,6 +719,56 @@ one: no other path in Litmus stores an empty key.
 the body is not parsed as XML. S3 answers 400 MalformedXML. So does any other body
 that is not well-formed XML or not UTF-8: Complete has its own parser, which still
 lets the error escape, though DeleteObjects now answers 400 for the same bodies.
+
+**User metadata.** PutObject stores the `x-amz-meta-*` headers in the object row's
+`user_metadata` column, and GET and HEAD return them, with the prefix, on 200 and on 206.
+They commit in the same upsert as the object row (`chaos/scenarios/test_crash_user_metadata.py`).
+An overwrite replaces the whole set; nothing is merged with the old object's. The S3
+documentation says that names are stored in lower case, that metadata cannot be changed
+after the upload except by a copy, that the user-defined metadata of a PUT request is
+limited to 2 KB, "measured by taking the sum of the number of bytes in the UTF-8
+encoding of each key and value", that values with non-ASCII characters are RFC 2047
+decoded before they are stored and RFC 2047 encoded when they are returned, and that
+headers of the same name are combined into a comma-delimited list when they are
+retrieved (S3 User Guide, "Working with object metadata", "User-defined metadata"). The
+rest is Litmus's choice, listed here:
+
+- Size. Litmus counts the UTF-8 bytes of each name without the `x-amz-meta-` prefix plus
+  the UTF-8 bytes of its value, as stored: after duplicates are joined and encoded words
+  decoded. The documentation does not say whether the prefix counts. Exactly 2048 is
+  accepted and 2049 is refused with 400 `MetadataTooLarge`, before the body is read and
+  before any blob is registered, so nothing is written and the old object is untouched.
+  The bucket is checked first, so a missing bucket is still 404. The 8 KB limit on the
+  whole PUT header is not enforced separately, and the 2 KB limit on system-defined
+  metadata is not enforced either. The error code is S3's for "metadata headers exceed
+  the maximum allowed metadata size".
+- A name sent more than once has its values joined with `, `, as S3 does on retrieval;
+  the documentation does not say how a PUT's duplicates are combined.
+- An empty value is kept as an empty value, and returned as an empty header.
+- A header that is only the prefix, `x-amz-meta-`, has no name and is ignored.
+- `x-amz-missing-meta` is never returned: everything Litmus stores can be returned.
+- RFC 2047 on store. An encoded word `=?charset?encoding?text?=` is decoded when the
+  charset is `UTF-8`, `US-ASCII` or `ISO-8859-1` (compared without regard to case) and
+  the encoding is `B` (base64) or `Q` (quoted-printable, with `_` for a space). White
+  space between two adjacent encoded words is dropped (RFC 2047 6.2). An encoded word
+  that cannot be decoded (another charset, a payload that is not valid base64 or
+  quoted-printable, bytes that are not valid in the charset) is kept as text. The
+  documentation names no charset or encoding; its one example is UTF-8 with `B`.
+- Raw non-ASCII bytes that are not an encoded word are read as UTF-8 when they are valid
+  UTF-8, and as ISO-8859-1 otherwise. The documentation is silent. Latin-1 bytes that
+  happen to form valid UTF-8 are therefore read as UTF-8.
+- RFC 2047 on return. A value of printable ASCII (space to `~`) is returned as it is.
+  Any other value, including one with a control character, is returned as one UTF-8
+  `B` encoded word, never split at the RFC's 75 character limit. A value decoded from
+  `=?UTF-8?Q?a=0D=0Ab?=` therefore cannot split a response header.
+- `test_object_set_get_unicode_metadata` fails because Litmus follows the AWS
+  documentation over ceph. The test sends the string `Hello World\xe9` (raw ISO-8859-1
+  byte `E9`) and expects the same string back. Litmus returns
+  `=?UTF-8?B?SGVsbG8gV29ybGTDqQ==?=`, as the documentation describes, and botocore passes
+  a metadata header value on undecoded (`_parse_header_map` in `botocore/parsers.py`).
+  Upstream marks the test `fails_on_rgw`.
+- CreateMultipartUpload and UploadPart ignore `x-amz-meta-*`; the completed object has
+  none.
 
 **System headers.** PutObject stores `Cache-Control`, `Content-Disposition`,
 `Content-Encoding`, `Content-Language` and `Expires` with the object, and GET and HEAD

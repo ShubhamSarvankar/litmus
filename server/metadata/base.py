@@ -26,6 +26,8 @@ class ObjectMeta:
     content_encoding: str | None = None
     content_language: str | None = None
     expires: str | None = None
+    # x-amz-meta-* of the PUT: lower case name, without the prefix, to text.
+    user_metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -8,6 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
     DELETE_AFTER_COMMIT,
@@ -112,7 +113,8 @@ def _stored_content_encoding(headers) -> str | None:
 
 
 def _stored_headers(meta: ObjectMeta) -> dict[str, str]:
-    """The stored system headers GET and HEAD return, besides Content-Type."""
+    """The stored system headers and user metadata GET and HEAD return, besides
+    Content-Type."""
     pairs = (
         ("Cache-Control", meta.cache_control),
         ("Content-Disposition", meta.content_disposition),
@@ -120,7 +122,8 @@ def _stored_headers(meta: ObjectMeta) -> dict[str, str]:
         ("Content-Language", meta.content_language),
         ("Expires", meta.expires),
     )
-    return {name: value for name, value in pairs if value is not None}
+    stored = {name: value for name, value in pairs if value is not None}
+    return stored | response_headers(meta.user_metadata)
 
 
 # --- shared handler implementations (called by multipart router too) ---
@@ -133,6 +136,9 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
+
+    # Refused before the body is read and before any blob is registered.
+    user_metadata = parse_user_metadata(request.headers)
 
     # A framed body is decoded straight into the blob; the plain path buffers it whole.
     framed = preflight(request.headers) if is_framed(request.headers) else None
@@ -173,6 +179,7 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         content_encoding=_stored_content_encoding(request.headers),
         content_language=_header_value(request.headers, "content-language"),
         expires=_header_value(request.headers, "expires"),
+        user_metadata=user_metadata,
     )
     try:
         replaced = metadata.put_object_meta(bucket, key, meta)
