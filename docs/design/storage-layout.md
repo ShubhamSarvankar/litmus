@@ -720,13 +720,20 @@ same part number both succeed; the later commit wins (§9).
 
 #### §6.7 CompleteMultipartUpload
 
-C1. Read-only: parse and validate the body (an empty body is MalformedXML, separate
-    work). The upload is open and belongs to this bucket and key (else NoSuchUpload;
-    the bucket and key part comes with the multipart work, decision 17).
-    Read the part rows and validate the requested list: ascending part numbers, every
-    part recorded with a matching ETag (else InvalidPart / InvalidPartOrder). Remember
-    each requested part's `blob_id` and size. No early conditional check (§10): the
-    condition is decided at C4.c, so a refused Complete costs a full assembly.
+C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part comes
+    with the multipart work, decision 17). Then parse and validate the body, and
+    nothing is registered until all of it has passed. The errors come in this order:
+    1. MalformedXML: the body is empty, not UTF-8, not well-formed XML, its root is
+       not CompleteMultipartUpload, it has no Part, or a Part has no ETag or a
+       PartNumber that is not an integer.
+    2. InvalidPartOrder: the part numbers are not strictly ascending, so a repeated
+       number is refused too. The list is never sorted.
+    3. InvalidPart: a part number outside 1 to 10000, or a part that is not recorded
+       or whose ETag does not match. Read the part rows for this. Remember each
+       requested part's `blob_id` and size.
+    4. The condition (C4.c): there is no early conditional check (§10), so a refused
+       Complete costs a full assembly.
+    EntityTooSmall (a part but the last under 5 MiB) is not enforced.
 
 C2. `id = REGISTER('object', bucket, key, upload_id)` **[C]**. `⚡complete-after-register`
 

@@ -51,6 +51,15 @@ class InvalidPart(S3Error):
     message = "One or more of the specified parts could not be found"
 
 
+class InvalidPartOrder(S3Error):
+    status_code = 400
+    code = "InvalidPartOrder"
+    message = (
+        "The list of parts was not in ascending order. The parts list must be specified "
+        "in order by part number."
+    )
+
+
 class EntityTooSmall(S3Error):
     status_code = 400
     code = "EntityTooSmall"

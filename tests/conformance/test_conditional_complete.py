@@ -342,7 +342,7 @@ def test_a_part_that_was_never_uploaded_is_invalid_part_not_a_condition_failure(
 
 
 @pytest.mark.parametrize("headers,exists", REFUSING)
-def test_an_empty_part_list_is_invalid_part_not_a_condition_failure(env, headers, exists):
+def test_an_empty_part_list_is_malformed_xml_not_a_condition_failure(env, headers, exists):
     client, storage, metadata = env
     if exists:
         assert client.put(f"/{BUCKET}/{KEY}", content=OLD).status_code == 200
@@ -352,7 +352,7 @@ def test_an_empty_part_list_is_invalid_part_not_a_condition_failure(env, headers
         content=b"<CompleteMultipartUpload/>",
         headers=headers,
     )
-    assert resp.status_code == 400 and _code(resp) == "InvalidPart"
+    assert resp.status_code == 400 and _code(resp) == "MalformedXML"
     assert_upload_open(metadata, uid, etags)
 
 

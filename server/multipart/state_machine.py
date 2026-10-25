@@ -9,11 +9,13 @@ from server.crash_points import (
     armed_point,
     crash_point,
 )
-from server.errors.s3errors import InternalError, InvalidPart, NoSuchUpload
+from server.errors.s3errors import InternalError, InvalidPart, InvalidPartOrder, NoSuchUpload
 from server.metadata.base import ObjectMeta, PartsChanged
 from server.multipart.etag import composite_etag
 from server.storage.blobs import MissingPartBlob
 from server.storage.lifecycle import collect_garbage, discard_new_blob
+
+MAX_PART_NUMBER = 10000
 
 
 def _normalize_etag(e: str) -> str:
@@ -54,23 +56,31 @@ def complete_multipart_upload(
     back, so the upload is still open with all its parts; the assembled blob is
     discarded and the error propagates.
 
-    Raises InvalidPart if any listed part is missing or has a mismatched ETag.
+    Raises InvalidPartOrder unless the part numbers are strictly ascending (a repeat is
+    out of order too), then InvalidPart if any listed part is outside 1 to 10000,
+    missing or has a mismatched ETag. All of it is decided before a blob is registered.
     """
+    previous = None
+    for req in requested_parts:
+        if previous is not None and req["PartNumber"] <= previous:
+            raise InvalidPartOrder()
+        previous = req["PartNumber"]
+
     recorded = {p.part_number: p for p in metadata.get_parts(upload_id)}
 
     for req in requested_parts:
         num = req["PartNumber"]
         recorded_part = recorded.get(num)
         if (
-            recorded_part is None
+            not 1 <= num <= MAX_PART_NUMBER
+            or recorded_part is None
             or recorded_part.blob_id is None
             or _normalize_etag(recorded_part.etag) != _normalize_etag(req["ETag"])
         ):
             raise InvalidPart(extra={"PartNumber": str(num)})
 
-    ordered = sorted(requested_parts, key=lambda r: r["PartNumber"])
-    part_blob_ids = {r["PartNumber"]: recorded[r["PartNumber"]].blob_id for r in ordered}
-    etag = composite_etag([r["ETag"] for r in ordered])
+    part_blob_ids = {r["PartNumber"]: recorded[r["PartNumber"]].blob_id for r in requested_parts}
+    etag = composite_etag([r["ETag"] for r in requested_parts])
 
     upload = metadata.get_upload(upload_id)
     if upload is None or upload.state != "open":
@@ -82,7 +92,7 @@ def complete_multipart_upload(
     try:
         size = storage.assemble_blob(
             blob_id,
-            [part_blob_ids[r["PartNumber"]] for r in ordered],
+            [part_blob_ids[r["PartNumber"]] for r in requested_parts],
             mid_write_point=armed_point(COMPLETE_MID_ASSEMBLE),
         )
     except MissingPartBlob as missing:

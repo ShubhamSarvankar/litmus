@@ -18,7 +18,8 @@ against ceph/s3-tests and why the failing tests fail.
   blocks; they fail on those calls.
 - **Two restored tests.** `test_copy_object_ifmatch_failed` and
   `test_multipart_upload_empty` used to be deselected by exact name. Since commit
-  `9b7cd65` they are selected; both fail (see the table).
+  `9b7cd65` they are selected; the first still fails, the second passes since the Complete body
+  validation (see the table).
 - **Environment.** The s3-tests virtualenv uses Python 3.12.3 with packages pinned by
   `scripts/s3tests-constraints.txt` (boto3 and botocore 1.43.118, pytest 9.1.1).
   Litmus ran on Ubuntu 24.04 under WSL2 (ext4) with Python 3.12.15, against a fresh
@@ -56,7 +57,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**178 passed, 145 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**179 passed, 144 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -76,7 +77,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -113,6 +114,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | `If-Range` on GET | 330 | 508 | 166 | A `Range` is applied when `If-Range` holds (strong entity tag, or a date equal to `Last-Modified` once the object is a second old) and ignored otherwise (200, whole object). No outcome changed, and none was expected to: no selected test sends `If-Range`; the results file is identical to the previous one. Recorded at the commit that adds the evaluation. |
 | Conditional PutObject | 330 | 508 | 177 | `If-Match` and `If-None-Match` on PutObject are evaluated inside the commit transaction against the row it replaces (412 PreconditionFailed, or 404 NoSuchKey for `If-Match` with no object); `Last-Modified` is now assigned inside that commit. 11 passes gained, exactly the 11 forecast: `test_put_object_ifmatch_good`, `_failed`, `_overwrite_existed_good` and `_nonexisted_failed`; `test_put_object_ifnonmatch_good`, `_failed`, `_nonexisted_good` and `_overwrite_existed_failed`; `test_atomic_conditional_write_1mb`; `test_atomic_dual_conditional_write_1mb`; and `test_put_object_if_match`. The results file differs from the previous one in those 11 lines only. None is incidental (26 stays 26): each failed with 501 before. Still failing, as forecast: the six that need versioning or CompleteMultipartUpload (`test_put_current_object_if_match`, `test_put_current_object_if_none_match`, `test_put_object_current_if_match`, and the three `test_multipart_put_*if_*match`). Recorded at the commit that adds the evaluation. |
 | Conditional CompleteMultipartUpload | 330 | 508 | 178 | `If-Match` and `If-None-Match` on CompleteMultipartUpload are evaluated inside the Complete commit transaction against the row it replaces, with the same rules as PutObject (412 PreconditionFailed, or 404 NoSuchKey for `If-Match` with no object); a refused Complete leaves the upload open with all its parts. 1 pass gained, as forecast: `test_multipart_put_object_if_match`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it failed with 501 before. Still failing, as forecast: `test_multipart_put_current_object_if_match` and `test_multipart_put_current_object_if_none_match`, which enable versioning first (501) and read `VersionId`. No other selected test sends `If-Match` or `If-None-Match` on Complete. Recorded at the commit that adds the evaluation. |
+| Complete body validation | 330 | 508 | 179 | CompleteMultipartUpload no longer trusts its body. The part list was sorted and assembled as written, so a part number listed twice with the right ETag was assembled twice (size and composite ETag counted it twice) and parts out of order were silently sorted: a silent correctness bug, which this document had wrongly described as InvalidPart. Now an empty, non-UTF-8, malformed or wrong-document body, a Part without PartNumber or ETag and a non-integer PartNumber are 400 MalformedXML (were 500 or accepted); a list that is not strictly ascending, repeats included, is 400 InvalidPartOrder; a PartNumber outside 1 to 10000 is 400 InvalidPart; all decided before a blob is registered. Choices: MalformedXML for an empty body (MissingRequestBodyError is the alternative), the error order NoSuchUpload, MalformedXML, InvalidPartOrder, InvalidPart, then the conditions, InvalidPart for an out of range number, and EntityTooSmall not enforced. 1 pass gained, as forecast: `test_multipart_upload_empty`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it failed with 500 before. Still failing, as forecast: `test_multipart_upload_size_too_small` (EntityTooSmall, not implemented) and `test_multipart_resend_first_finishes_last` (lists part 1 twice, was InvalidPart, now InvalidPartOrder). Recorded at the commit that adds the validation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -131,8 +133,8 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 178 passes are incidental**.
-Of the 178 passes, 26 are incidental and 18 are borderline, which leaves 134 genuine.
+is authenticated or owned. By that rule, **26 of the 179 passes are incidental**.
+Of the 179 passes, 26 are incidental and 18 are borderline, which leaves 135 genuine.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -236,7 +238,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). |
-| Multipart upload | 14 | 9 | 5 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); the minimum part size is not enforced (1); a Complete that lists a part number twice gets InvalidPart (1); a Complete with an empty body gets 500 instead of 400 MalformedXML (1). |
+| Multipart upload | 14 | 10 | 4 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, an empty Complete body (400 MalformedXML), overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); the minimum part size is not enforced (1); a Complete that lists a part number twice (`test_multipart_resend_first_finishes_last`, with two different ETags for part 1) is refused, now with InvalidPartOrder, where the test expects success (1). See "The Complete body" under Known gaps; EntityTooSmall is not enforced, so `test_multipart_upload_size_too_small` fails. |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
@@ -249,7 +251,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **178** | **145** | **7** | |
+| **Total** | **330** | **179** | **144** | **7** | |
 
 ## AWS CLI
 
@@ -776,8 +778,8 @@ whatever the headers say, and only a request that passes them can be 412 or 404.
   was. AWS defines it only on AbortMultipartUpload, where it is still 501.
 - A retried Complete after a kill that follows the commit is NoSuchUpload, as without a
   condition (the gap above, unchanged).
-- The listed errors that do not exist here are unchanged: there is no EntityTooSmall or
-  InvalidPartOrder, and a malformed or empty body is 500, not MalformedXML (see below).
+- EntityTooSmall still does not exist here (see "The Complete body" below). InvalidPartOrder
+  and MalformedXML for a Complete body were added after this step (see the same section).
 - `test_multipart_put_object_if_match` is not marked `fails_on_aws` and sends `*`, `badetag`
   and the current ETag, so it depends on the entity-tag rule above; it counts as genuine,
   because it fails against the server as of 45abd9b and the new tests fail with this
@@ -803,10 +805,50 @@ DeleteObjects removes it, given a raw body such as
 botocore refuses that body for the same reason, so it takes a hand-written request. GET, HEAD and DELETE on `/{bucket}/` no longer reach it. Nothing creates a new
 one: no other path in Litmus stores an empty key.
 
-**Empty Complete body.** CompleteMultipartUpload with an empty body gets 500, because
-the body is not parsed as XML. S3 answers 400 MalformedXML. So does any other body
-that is not well-formed XML or not UTF-8: Complete has its own parser, which still
-lets the error escape, though DeleteObjects now answers 400 for the same bodies.
+**The Complete body.** CompleteMultipartUpload does not take its body at its word.
+Until this change it did, and that was a silent correctness bug, not only a missing
+error: the part list was sorted and then assembled as written, so a part number listed
+twice with the right ETag was accepted and its bytes were assembled twice (the object's
+size counted it twice and the composite ETag hashed it twice), and parts listed out of
+order were silently put in order. The earlier version of this document said a repeated
+part number gets InvalidPart; it did not. An empty, non-XML or non-UTF-8 body was a 500.
+Now, after NoSuchUpload for an unknown upload (checked first, as before):
+
+- MalformedXML (400): the body is empty, not UTF-8, not well-formed XML, its root is not
+  `CompleteMultipartUpload` (with or without the S3 namespace), it has no `Part`, or a
+  `Part` has no `PartNumber`, no `ETag` (blank counts as none) or a `PartNumber` that is
+  not an integer.
+- InvalidPartOrder (400): the part numbers are not strictly ascending. A repeat is refused
+  by the same rule, and the list is never sorted. Gaps are allowed (1 then 3 is fine).
+- InvalidPart (400): a `PartNumber` outside 1 to 10000, or a part that was never uploaded
+  or whose ETag differs.
+- Then the `If-Match` and `If-None-Match` conditions (412, or 404).
+
+All of it is decided before a blob is registered, so a refused Complete writes nothing:
+no object row, no pending or garbage blob, an empty `tmp/`, and the upload still open
+with all its parts, so a retry with a correct body succeeds.
+
+These are Litmus's choices where the S3 documentation does not fix the answer:
+
+- An empty body is MalformedXML. The error list also has MissingRequestBodyError ("You
+  sent an empty XML document as a request", 400), which is the alternative; Litmus keeps
+  MalformedXML because the one selected ceph test that sends no body
+  (`test_multipart_upload_empty`) expects it, and because DeleteObjects answers an empty
+  body the same way.
+- The order of the errors above is Litmus's. The S3 documentation lists the errors but not
+  which comes first when a request has several.
+- A `PartNumber` outside 1 to 10000 is InvalidPart, not MalformedXML or InvalidArgument:
+  the number is an integer, and no such part exists. A number of any length is accepted
+  as text and is out of range.
+- EntityTooSmall is not enforced: a part other than the last may be of any size. The
+  ceph tests that need it are listed under "Multipart upload" in the table above;
+  `test_multipart_upload_size_too_small` is the one selected.
+
+`test_multipart_resend_first_finishes_last` fails on purpose. It lists part 1 twice, first
+with a stale ETag and then with the current one, and expects the Complete to succeed.
+Litmus refuses any repeated part number with InvalidPartOrder, because S3 requires the list
+in ascending order and accepting a repeat is how a part got assembled twice. The test
+would pass only by tolerating repeats, which is the behavior this change removes.
 
 **Response header overrides.** GetObject and HeadObject take the query parameters
 `response-cache-control`, `response-content-disposition`, `response-content-encoding`,

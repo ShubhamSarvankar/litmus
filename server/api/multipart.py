@@ -1,3 +1,4 @@
+import re
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ from fastapi.responses import Response
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
 from server.api.conditions import write_precondition
+from server.api.request_xml import parse_request_xml
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
     ABORT_AFTER_COMMIT,
@@ -18,7 +20,7 @@ from server.crash_points import (
     armed_point,
     crash_point,
 )
-from server.errors.s3errors import InvalidPart, NoSuchBucket, NoSuchUpload
+from server.errors.s3errors import InvalidPart, MalformedXML, NoSuchBucket, NoSuchUpload
 from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
 from server.multipart.state_machine import complete_multipart_upload
 from server.storage.lifecycle import collect_garbage, discard_new_blob
@@ -42,26 +44,53 @@ def _complete_xml(bucket: str, key: str, etag: str) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
+_S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+_INTEGER = re.compile(r"-?[0-9]+")
+# Past this many digits the number is far outside 1 to 10000, and is not worth
+# converting: int() refuses a string of more than 4300 digits.
+_MAX_DIGITS = 18
+
+
+def _child_text(element: ET.Element, tag: str) -> str:
+    """The text of the child `tag`, with the S3 namespace or without; MalformedXML when
+    the child is absent or blank."""
+    text = element.findtext(f"{{{_S3_NS}}}{tag}") or element.findtext(tag)
+    if text is None or not text.strip():
+        raise MalformedXML()
+    return text.strip()
+
+
+def _part_number(text: str) -> int:
+    """The integer in a PartNumber; MalformedXML when the text is not one. A value
+    outside 1 to 10000 is returned as it is: it is InvalidPart, decided with the
+    other part errors."""
+    if _INTEGER.fullmatch(text) is None:
+        raise MalformedXML()
+    digits = text.lstrip("-")
+    if len(digits) > _MAX_DIGITS:
+        return -(10**_MAX_DIGITS) if text.startswith("-") else 10**_MAX_DIGITS
+    return int(text)
+
+
 def _parse_complete_body(body: bytes) -> list[dict]:
-    root = ET.fromstring(body.decode())
-    # boto3 sends XML with the S3 namespace — handle both namespaced and plain
-    ns = "http://s3.amazonaws.com/doc/2006-03-01/"
+    """The Part elements of a CompleteMultipartUpload document, in document order.
 
-    def _find_parts():
-        result = root.findall(f"{{{ns}}}Part")
-        return result if result else root.findall("Part")
-
-    def _text(el, tag):
-        return el.findtext(f"{{{ns}}}{tag}") or el.findtext(tag)
-
-    parts = []
-    for part_el in _find_parts():
-        parts.append(
-            {
-                "PartNumber": int(_text(part_el, "PartNumber")),
-                "ETag": _text(part_el, "ETag"),
-            }
-        )
+    MalformedXML (400) for every body that is not one: empty, not UTF-8, not XML, a
+    root other than CompleteMultipartUpload, no Part, or a Part without a PartNumber
+    that is an integer or without an ETag. Nothing is sorted or checked against the
+    upload here.
+    """
+    root = parse_request_xml(body)
+    # boto3 sends the S3 namespace; handle both namespaced and plain.
+    if root.tag not in ("CompleteMultipartUpload", f"{{{_S3_NS}}}CompleteMultipartUpload"):
+        raise MalformedXML()
+    parts = [
+        {"PartNumber": _part_number(_child_text(el, "PartNumber")), "ETag": _child_text(el, "ETag")}
+        for el in root
+        if el.tag in ("Part", f"{{{_S3_NS}}}Part")
+    ]
+    if not parts:
+        raise MalformedXML()
     return parts
 
 
@@ -216,8 +245,6 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
 
     body = await request.body()
     requested_parts = _parse_complete_body(body)
-    if not requested_parts:
-        raise InvalidPart()
 
     composite_etag = complete_multipart_upload(
         bucket=bucket,
