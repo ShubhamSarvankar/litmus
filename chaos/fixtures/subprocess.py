@@ -37,6 +37,32 @@ def _wait_ready(port: int, timeout: float = 10.0) -> None:
     raise RuntimeError(f"Server on port {port} did not become ready within {timeout}s")
 
 
+# Every ServerProcess that has been started and not yet reaped. Tests start servers
+# directly and stop them at the end of the body, which a failing assertion skips; the
+# autouse fixtures in chaos/conftest.py stop each test's servers after it, all at session end.
+_LIVE: list["ServerProcess"] = []
+
+
+def live_servers() -> list["ServerProcess"]:
+    return list(_LIVE)
+
+
+def stop_servers_started_since(before: list["ServerProcess"]) -> None:
+    """Stop the servers that are not in `before`, a live_servers() snapshot; servers
+    that were already live then (a module or session fixture's) are left running."""
+    for server in [s for s in _LIVE if s not in before]:
+        _LIVE.remove(server)
+        server.stop()
+
+
+def stop_all_servers() -> None:
+    """Stop every server started since the last call, running or already dead."""
+    servers = list(_LIVE)
+    _LIVE.clear()
+    for server in servers:
+        server.stop()
+
+
 class ServerProcess:
     def __init__(
         self,
@@ -52,6 +78,9 @@ class ServerProcess:
         self._write_delay_ms = write_delay_ms
         self._crash_point = crash_point
         self._proc: subprocess.Popen | None = None
+        # Every process this object has started: restart() replaces _proc, and stop()
+        # must reach the earlier ones too.
+        self._procs: list[subprocess.Popen] = []
         self._log: list[str] = []
 
     def start(self) -> None:
@@ -88,6 +117,9 @@ class ServerProcess:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        self._procs.append(self._proc)
+        if self not in _LIVE:
+            _LIVE.append(self)
 
     def wait_ready(self, timeout: float = 10.0) -> None:
         _wait_ready(self._port, timeout)
@@ -119,13 +151,16 @@ class ServerProcess:
         return "\n".join(self._log)
 
     def stop(self) -> None:
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
+        """Terminate every process this object started, wait up to 5s, kill the rest."""
+        alive = [p for p in self._procs if p.poll() is None]
+        for proc in alive:
+            proc.terminate()
+        for proc in alive:
             try:
-                self._proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
+                proc.kill()
+                proc.wait()
 
     @property
     def port(self) -> int:
