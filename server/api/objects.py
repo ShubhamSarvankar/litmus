@@ -8,6 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.api.conditions import evaluate_read_conditions
 from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
@@ -27,7 +28,6 @@ from server.errors.s3errors import (
     InvalidRange,
     NoSuchBucket,
     NoSuchKey,
-    PreconditionFailed,
     SlowDown,
 )
 from server.metadata.base import BucketMissing, ObjectMeta
@@ -237,16 +237,30 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     return Response(status_code=200, headers={"ETag": etag})
 
 
-def _open_current(metadata, storage, bucket: str, key: str, if_match: str | None):
-    """Read the key's row and open the blob it names (§8 steps 1 to 3). Returns
-    (row, open file); the headers must come from that row."""
+def _not_modified(meta: ObjectMeta) -> Response:
+    """304 for GET and HEAD (RFC 9110 15.4.5): the ETag and, when stored, Cache-Control
+    and Expires, which a 200 would carry, and no body. Last-Modified is left out: the
+    RFC asks for no other representation metadata, and the ETag is present."""
+    headers = {"ETag": meta.etag}
+    if meta.cache_control is not None:
+        headers["Cache-Control"] = meta.cache_control
+    if meta.expires is not None:
+        headers["Expires"] = meta.expires
+    return Response(status_code=304, headers=headers)
+
+
+def _open_current(metadata, storage, bucket: str, key: str, request_headers):
+    """Read the key's row, evaluate the request's conditions against it, and open the
+    blob it names (§8 steps 1 to 3). Returns (row, open file), or (row, None) when the
+    conditions make the answer 304; the headers must come from that row. Raises
+    PreconditionFailed. The conditions are evaluated again on every re-read row."""
     meta = metadata.get_object_meta(bucket, key)
     if meta is None:
         raise NoSuchKey(extra={"Key": key})
     retries = 0
     while True:
-        if if_match and if_match != meta.etag:
-            raise PreconditionFailed()
+        if evaluate_read_conditions(request_headers, meta.etag, meta.last_modified):
+            return meta, None
         try:
             return meta, storage.open_blob(meta.blob_id)
         except FileNotFoundError:
@@ -272,7 +286,9 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     overrides = _response_overrides(request)
-    meta, f = _open_current(metadata, storage, bucket, key, request.headers.get("if-match"))
+    meta, f = _open_current(metadata, storage, bucket, key, request.headers)
+    if f is None:
+        return _not_modified(meta)
     try:
         if os.fstat(f.fileno()).st_size != meta.size:
             # Never send a truncated or padded body under this row's ETag.
@@ -328,6 +344,9 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
     meta = metadata.get_object_meta(bucket, key)
     if meta is None:
         raise NoSuchKey(extra={"Key": key})
+
+    if evaluate_read_conditions(request.headers, meta.etag, meta.last_modified):
+        return _not_modified(meta)
 
     range_header = request.headers.get("range")
     if range_header:

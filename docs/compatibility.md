@@ -56,7 +56,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**163 passed, 160 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**166 passed, 157 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -74,7 +74,9 @@ storing the system headers moved 3 more (`test_object_write_cache_control`,
 user metadata moved 3 more (`test_object_set_get_metadata_none_to_good`, `_none_to_empty`
 and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
-moved 1 more (`test_multipart_upload_resend_part`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
+(`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
+`test_get_object_ifunmodifiedsince_good`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -107,6 +109,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | User metadata on PutObject | 330 | 508 | 161 | PutObject stores `x-amz-meta-*` and GET and HEAD return it, with RFC 2047 decoding on store and encoding on return and a 2048 byte limit (400 MetadataTooLarge). 3 passes gained: `test_object_set_get_metadata_none_to_good`, `_none_to_empty` and `_overwrite_to_empty`, as forecast; the results file differs from the previous one in those three lines only. `test_object_set_get_unicode_metadata` stays failing, as forecast: it fails on the RFC 2047 value Litmus returns, which botocore hands back undecoded. `test_object_metadata_replaced_on_put`, which passed because Litmus stored nothing, now passes because an overwrite replaces the metadata: against a copy of the server whose overwrite keeps the old metadata it fails, so it leaves the incidental list (27 to 26). Recorded at the commit that adds the storage. |
 | `response-*` overrides on GET and HEAD | 330 | 508 | 162 | `response-cache-control`, `-content-disposition`, `-content-encoding`, `-content-language`, `-content-type` and `-expires` set the response header on GET (200 and 206) and HEAD, and are never stored. 1 pass gained: `test_object_raw_response_headers`, as forecast: it asserts the five headers the overrides set, its setup (`ACL` on CreateBucket and PutObject) already passed, and it is the only selected test that sends a `response-*` parameter. No other outcome changed; the results file differs from the previous one in that line only. Recorded at the commit that adds the overrides. |
 | Multipart upload headers | 330 | 508 | 163 | CreateMultipartUpload stores `Content-Type`, the system headers and `x-amz-meta-*` with the upload and Complete gives them to the object, which is dated by the upload's initiation time. 1 pass gained: `test_multipart_upload_resend_part`, as forecast: it completes each upload once, checks the object's Content-Type and metadata, and fails today only on `binary/octet-stream == text/bla`. `test_multipart_upload` stays failing as forecast: it fails at its second Complete (`NoSuchUpload`) before it reaches its Content-Type assertion. No selected test reads Last-Modified of a multipart object. The results file differs from the previous one in that one line only. Recorded at the commit that adds the storage. |
+| Conditional GET and HEAD | 330 | 508 | 166 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD in RFC 9110 13.2.2 order; a 304 carries the ETag and the stored Cache-Control and Expires. 3 passes gained: `test_get_object_ifnonematch_good` (304), `test_get_object_ifmodifiedsince_failed` (304) and `test_get_object_ifunmodifiedsince_good` (412), as forecast; the results file differs from the previous one in those three lines only. The three passing conditional GET tests on the incidental list stay there: they pass on a copy of the server from before this change as well (26 stays 26). Recorded at the commit that adds the evaluation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -125,7 +128,7 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 163 passes are incidental**.
+is authenticated or owned. By that rule, **26 of the 166 passes are incidental**.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -166,10 +169,13 @@ delimiter is ignored, and they do not exercise delimiter support.
   (a marker below every key), and the V2 forms of the three delimiter tests. The
   ends-with-delimiter pair still fails on a server that applies the delimiter but
   ignores the prefix, which rolls the key up into the common prefix `asdf/`.
-- Conditional GET, the header is ignored and the expected answer is the plain object
-  (3): `test_get_object_ifmodifiedsince_good` (a date in the past),
+- Conditional GET, the header changes nothing and the expected answer is the plain
+  object (3): `test_get_object_ifmodifiedsince_good` (a date in the past),
   `test_get_object_ifnonematch_failed` (an ETag that does not match),
-  `test_get_object_ifunmodifiedsince_failed` (a date in the future).
+  `test_get_object_ifunmodifiedsince_failed` (a date in the future). They stay on the
+  list now that the three headers are evaluated: they pass whether the header is
+  ignored or evaluated (run for this change against a copy of the server from before
+  it: 5 of the 8 conditional GET tests pass there, these 3 among them).
 - Copy (3): `test_object_copy_key_not_found` and `test_object_copy_bucket_not_found`
   get their 404 from the client's HeadObject on the missing source, and no copy
   request reaches Litmus; `test_upload_part_copy_percent_encoded_key` expects
@@ -221,7 +227,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Bucket naming | 18 | 16 | 2 | 0 | Valid names are accepted; names that break the AWS rules (length, characters, edges, adjacent periods, IP format, reserved prefixes and suffixes) get 400 InvalidBucketName. Fail: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and `test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, and AWS's current rules allow both names, so Litmus accepts them (see Known gaps). |
 | Object operations | 28 | 27 | 1 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, `Content-Encoding` with its `aws-chunked` token removed, the `response-*` header overrides on GET, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: a key that is not valid UTF-8 gets 404 instead of 400. |
 | User metadata and stored headers | 6 | 5 | 1 | 0 | `Cache-Control`, `Expires` and `x-amz-meta-*` are stored and returned (see "System headers" and "User metadata" under Known gaps). Fail: `test_object_set_get_unicode_metadata` expects a non-ASCII value back as the raw string, and Litmus returns it RFC 2047 encoded, as the AWS documentation describes (see "User metadata"). |
-| Conditional GET | 8 | 5 | 3 | 0 | `If-Match` is evaluated. Fail: `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are ignored; the tests that pass with them are the ones whose expected answer is the same as ignoring them. |
+| Conditional GET | 8 | 8 | 0 | 0 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD. 3 of the 8 passes are incidental (see above): they pass with the headers ignored. |
 | Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges, a last byte past the end clamped; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
@@ -239,7 +245,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **163** | **160** | **7** | |
+| **Total** | **330** | **166** | **157** | **7** | |
 
 ## AWS CLI
 
@@ -887,5 +893,35 @@ that documents them, and the tests in ceph/s3-tests expect it.
 **Multipart details.** The minimum part size is not enforced. `partNumber`
 on GET is ignored.
 
-**Conditional GET.** Only `If-Match` is evaluated on GET. `If-None-Match`,
-`If-Modified-Since` and `If-Unmodified-Since` are ignored.
+**Conditional GET and HEAD.** `If-Match`, `If-None-Match`, `If-Modified-Since` and
+`If-Unmodified-Since` are evaluated on GET and HEAD, against the one row the response is
+built from, after the bucket and key are known to exist and before the blob is opened
+(so a missing bucket or key is 404 whatever the conditions, RFC 9110 13.2.1). They run in
+the order of RFC 9110 13.2.2: `If-Match` (false: 412), else `If-Unmodified-Since` (false:
+412), then `If-None-Match` (false: 304), else `If-Modified-Since` (false: 304). Both
+combinations the S3 GetObject reference documents follow from it. A conditional request
+is answered before `Range` is looked at, so 412 and 304 beat 416 and 206. `If-Range` is
+not evaluated yet and is ignored.
+
+Choices where the S3 documentation is silent or the RFC leaves room:
+
+- A 304 carries `ETag` and, when stored, `Cache-Control` and `Expires`, with no body.
+  `Last-Modified` is left out: RFC 9110 15.4.5 says a sender should not generate
+  representation metadata other than the fields it lists, and the ETag is present. S3's
+  own 304 may differ; the documentation does not say. Content-Type, user metadata and
+  `response-*` overrides are not sent on a 304.
+- Entity tags are read as RFC 9110 8.8.3 writes them, and a tag sent without its quotes
+  is read as that opaque tag (ceph's write tests send both forms). `If-Match` uses strong
+  comparison (8.8.3.2), so a weak tag never matches; `If-None-Match` uses weak
+  comparison. `*` matches any existing object and is a wildcard only on its own, not
+  inside a list. A list is comma separated; a comma inside a quoted tag is part of it;
+  repeated header lines are one list. A blank header is no condition.
+- A date is an HTTP-date in IMF-fixdate, RFC 850 or asctime form (RFC 9110 5.6.7) with
+  the zone GMT. A header that is blank, repeated, a list of dates or otherwise not a
+  valid date is ignored (13.1.3, 13.1.4), not a 400. Dates compare at the second that
+  `Last-Modified` shows: the stored microseconds are dropped.
+- `If-Unmodified-Since` is ignored when `If-Match` is present, and `If-Modified-Since`
+  when `If-None-Match` is present, even when the present header passes.
+- HEAD evaluates the same conditions. Before this change HEAD ignored all of them, `If-Match`
+  included: a HEAD with a non-matching `If-Match` got 200. That gap is closed. A 412 on
+  HEAD has the status and headers of the GET answer and, as for any HEAD, no body.

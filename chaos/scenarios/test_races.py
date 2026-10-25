@@ -150,6 +150,69 @@ def test_get_racing_a_delete_returns_404(env, monkeypatch):
     assert ET.fromstring(resp.text).findtext("Code") == "NoSuchKey"
 
 
+def test_if_match_is_evaluated_again_on_the_row_a_racing_overwrite_leaves(env, monkeypatch):
+    """The old row passes If-Match, the overwrite unlinks its blob before the open, and the
+    retry reads the new row, which does not match: 412, never the new bytes."""
+    reader, writer, storage, metadata = env
+    old = metadata.get_object_meta(BUCKET, KEY)
+    _after_row_read(monkeypatch, metadata, lambda: writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+    opens = _record_opens(monkeypatch, storage)
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"If-Match": _md5(OLD)})
+
+    assert opens == [(old.blob_id, "ENOENT")]
+    assert resp.status_code == 412
+    assert ET.fromstring(resp.text).findtext("Code") == "PreconditionFailed"
+
+
+def test_if_none_match_is_evaluated_again_on_the_row_a_racing_overwrite_leaves(env, monkeypatch):
+    """The old row does not match the NEW ETag, so GET goes to open its blob; the overwrite
+    unlinks it; the retry reads the new row, which matches: 304 with the new ETag, and the
+    new blob is never opened."""
+    reader, writer, storage, metadata = env
+    old = metadata.get_object_meta(BUCKET, KEY)
+    _after_row_read(monkeypatch, metadata, lambda: writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+    opens = _record_opens(monkeypatch, storage)
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"If-None-Match": _md5(NEW)})
+
+    assert opens == [(old.blob_id, "ENOENT")]
+    assert resp.status_code == 304
+    assert resp.content == b""
+    assert resp.headers["etag"] == _md5(NEW)
+
+
+def test_a_304_answers_for_the_row_it_read_and_opens_no_blob(env, monkeypatch):
+    """If-None-Match matches the row GET read; an overwrite right after changes nothing
+    for this request: 304 with the old ETag, as if it had run first, and no blob open."""
+    reader, writer, storage, metadata = env
+    writes = []
+    _after_row_read(
+        monkeypatch, metadata, lambda: writes.append(writer.put(f"/{BUCKET}/{KEY}", content=NEW))
+    )
+    opens = _record_opens(monkeypatch, storage)
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"If-None-Match": _md5(OLD)})
+
+    assert [w.status_code for w in writes] == [200]
+    assert opens == []
+    assert resp.status_code == 304
+    assert resp.headers["etag"] == _md5(OLD)
+    assert metadata.get_object_meta(BUCKET, KEY).etag == _md5(NEW)
+
+
+def test_conditional_get_racing_a_delete_returns_404(env, monkeypatch):
+    """A condition that passes on the old row does not outlive the delete: the retry finds
+    no row and the answer is NoSuchKey, not a 412 or a 304."""
+    reader, writer, storage, metadata = env
+    _after_row_read(monkeypatch, metadata, lambda: writer.delete(f"/{BUCKET}/{KEY}"))
+
+    resp = reader.get(f"/{BUCKET}/{KEY}", headers={"If-None-Match": '"other"'})
+
+    assert resp.status_code == 404
+    assert ET.fromstring(resp.text).findtext("Code") == "NoSuchKey"
+
+
 def test_open_descriptor_keeps_streaming_the_old_version_after_an_overwrite(env, monkeypatch):
     """Overwrite and GC run after the first chunk was read: the descriptor pins the
     old blob, and the whole old version is sent with its own ETag."""
