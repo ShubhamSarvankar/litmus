@@ -543,10 +543,9 @@ read as a body that does not parse. None of these choices has been compared with
 responses. The status for more than 1000 Objects is 400, which is what
 `test_multi_object_delete_key_limit` expects; the code is the choice.
 
-Also not done: S3 requires `Content-MD5` or another checksum header on DeleteObjects
-("The Content-MD5 request header is required for all Multi-Object Delete requests"),
-and Litmus accepts a request without one and checks none that it receives; see
-"Checksums: verified on PutObject and UploadPart" below. An internal DTD entity
+Checksums: DeleteObjects verifies `Content-MD5` and one `x-amz-checksum-<algorithm>`
+over the raw request body when the request carries them, and requires neither; see
+"Checksums: verified on PutObject, UploadPart and DeleteObjects" below. An internal DTD entity
 (`<!ENTITY e "x">`) in the body is expanded, within the parser's limits.
 
 **Keys are stored literally.** A key is the exact string the client sent, including
@@ -618,8 +617,8 @@ it: such a request is stored as an ordinary body.
   memory does not grow with the object. Plain bodies are not streamed: they are still
   read whole into memory before they are written, as before.
 
-**Checksums: verified on PutObject and UploadPart, not stored.** A PutObject or
-UploadPart body is checked against the checksums its request claims, before the blob is
+**Checksums: verified on PutObject, UploadPart and DeleteObjects, not stored.** A PutObject
+or UploadPart body is checked against the checksums its request claims, before the blob is
 made durable, so a refused request leaves no object, part or file. Checked:
 
 - `Content-MD5`: base64 of the 16 byte MD5 of the body. It may accompany one checksum,
@@ -655,19 +654,28 @@ choices, not documented by AWS:
 - A repeated `Content-MD5` header reads as one comma separated value, so it is 400
   InvalidDigest.
 
+DeleteObjects takes the same claims over the XML body, with the same rules and errors,
+in this order: NoSuchBucket, the checksum, then the document (MalformedXML), and a
+refusal anywhere deletes nothing. A claim that is not valid is refused before the body
+is read, after the bucket check; an `x-amz-checksum-<name>` of another algorithm is 501 before the bucket is looked up.
+One choice differs from the S3 API reference, which says "The Content-MD5 request
+header is required for all Multi-Object Delete requests" for general purpose buckets:
+Litmus requires no checksum at all. botocore 1.36+ sends `x-amz-checksum-crc32` and
+`x-amz-sdk-checksum-algorithm: CRC32` instead of `Content-MD5`, and real S3 accepts
+that; a client that sends nothing is accepted too. Not requiring one is Litmus's own
+choice, and so is the error for each refusal above that AWS does not document.
+
 Not done:
 
 - Nothing is stored and nothing is returned: PutObject and UploadPart answer with `ETag`
   only, and GetObject and HeadObject return no `x-amz-checksum-*` header whatever
   `x-amz-checksum-mode` says. S3 stores the checksum and, without one from the client,
   adds CRC64NVME.
-- DeleteObjects does not check `Content-MD5` or a checksum header, and does not require
-  one (see "Also not done" above).
 - Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
   `x-amz-checksum-type` on CreateMultipartUpload, the `Checksum*` elements of the
   CompleteMultipartUpload body, `x-amz-checksum-*` and `x-amz-mp-object-size` on
   Complete are all ignored, and composite and full object checksums are not computed.
-  The 501 for other algorithms applies to PutObject and UploadPart only.
+  The 501 for other algorithms applies to PutObject, UploadPart and DeleteObjects only.
 - The trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256`, which botocore
   sends over `https://`, are still 501 (see above); only CRC64NVME is decoded.
 - `x-amz-content-sha256` holding a hex digest is not compared with the body.

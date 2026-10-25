@@ -1,4 +1,5 @@
-"""Checksums a PutObject or UploadPart request claims for its body, and their check.
+"""Checksums a PutObject, UploadPart or DeleteObjects request claims for its body, and
+their check.
 
 A request can claim a checksum of the object bytes in three ways, all verified here
 before the blob is made durable:
@@ -23,6 +24,9 @@ docs/compatibility.md:
                                                          400 InvalidRequest
   x-amz-checksum-<other algorithm>                       501 NotImplemented, before the
                                                          body is read (request_guard)
+
+DeleteObjects takes the same claims over its XML body (UploadChecks.verify_body); none is
+required, though the S3 API reference says Content-MD5 is (docs/compatibility.md).
 
 Nothing is stored or returned yet.
 """
@@ -172,7 +176,15 @@ class UploadChecks:
     def verify(self, writer: BlobWriter, trailer_value: bytes | None = None) -> None:
         """BadDigest unless what was written matches every claim. trailer_value is the
         decoded trailer, for a body that has one."""
-        if self._content_md5 is not None and writer.md5_digest != self._content_md5:
+        self._check(writer.md5_digest, trailer_value)
+
+    def verify_body(self, body: bytes) -> None:
+        """feed() and verify() for a request body held whole in memory."""
+        self.feed(body)
+        self._check(hashlib.md5(body).digest(), None)
+
+    def _check(self, md5_digest: bytes, trailer_value: bytes | None) -> None:
+        if self._content_md5 is not None and md5_digest != self._content_md5:
             raise BadDigest(extra={"Header": "Content-MD5"})
         if self._hasher is not None:
             expected = self._expected if self._expected is not None else trailer_value

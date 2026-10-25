@@ -203,6 +203,11 @@ def _check(method: str, path: str, query, headers) -> None:
         if is_object_write and (name := unsupported_value_header(headers)):
             raise NotImplementedOperation(extra={"Header": name})
 
+    if method == "POST" and not key and (query_keys - _IGNORED) == {"delete"}:
+        # DeleteObjects: checksum claims over the XML body, the same algorithms.
+        if name := unsupported_value_header(headers):
+            raise NotImplementedOperation(extra={"Header": name})
+
     if key:
         subresources, implemented, allowed = (
             OBJECT_SUBRESOURCES,

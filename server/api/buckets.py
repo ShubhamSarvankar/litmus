@@ -10,6 +10,7 @@ from server.api.continuation_tokens import decode_token, encode_token
 from server.api.delete_document import parse_delete_document
 from server.api.request_guard import NULL_VERSION_ID
 from server.bucket_names import bucket_name_violation
+from server.checksums import UploadChecks
 from server.config import settings
 from server.crash_points import (
     BUCKET_DELETE_AFTER_COMMIT,
@@ -325,8 +326,12 @@ async def _delete_objects(bucket: str, request: Request) -> Response:
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
 
-    # The whole document is validated first: a refusal anywhere deletes nothing.
-    document = parse_delete_document(await request.body())
+    # Checksum claims first (none is required), then the whole document: a refusal
+    # anywhere deletes nothing.
+    checks = UploadChecks.from_headers(request.headers)
+    body = await request.body()
+    checks.verify_body(body)
+    document = parse_delete_document(body)
 
     def _error(key, version_id, code, message):
         e = ET.Element("Error")
