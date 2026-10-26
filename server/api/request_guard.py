@@ -155,15 +155,23 @@ UNEVALUATED_DELETE_OBJECT_HEADERS = tuple(h for h in CONDITIONAL_DELETE_HEADERS 
 # is refused.
 UNEVALUATED_PUT_OBJECT_HEADERS = ("x-amz-write-offset-bytes",)
 
-# x-amz-copy-source selects CopyObject on a PUT with no query parameters. On any other
-# request it selects an operation Litmus does not implement (UploadPartCopy, with
-# partNumber and uploadId, or a header on a method that takes none), and is refused.
-# A source Litmus cannot name (an ARN, a version ID other than "null") is refused too
-# (server/api/copy_source.py), and so is a copy that would replace the tag set with
-# tags: Litmus stores none, so they would be dropped. x-amz-tagging-directive: REPLACE
-# with a blank x-amz-tagging (an empty tag set) and COPY proceed.
+# x-amz-copy-source selects CopyObject on a PUT with no query parameters and
+# UploadPartCopy on a PUT with partNumber and uploadId. On any other request it selects
+# an operation Litmus does not implement (a header on a method that takes none, or on
+# a query that is neither), and is refused. A source Litmus cannot name (an ARN, a
+# version ID other than "null") is refused too (server/api/copy_source.py), and so is a
+# CopyObject that would replace the tag set with tags: Litmus stores none, so they would
+# be dropped. x-amz-tagging-directive: REPLACE with a blank x-amz-tagging (an empty tag
+# set) and COPY proceed.
 _TAGGING_DIRECTIVE = "x-amz-tagging-directive"
 _TAGGING = "x-amz-tagging"
+_UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
+
+# The SSE-C headers that unlock a source encrypted with a customer-provided key, on
+# CopyObject and UploadPartCopy. Litmus stores nothing encrypted, so a request that
+# supplies a key for the source asks for something it cannot do; ignoring the headers
+# would copy a source the client believes is encrypted without saying so.
+_COPY_SOURCE_SSE_C_PREFIX = "x-amz-copy-source-server-side-encryption-customer-"
 
 # A chunk-framed (aws-chunked) body, as S3 identifies one: x-amz-content-sha256 names a
 # STREAMING- payload, and x-amz-decoded-content-length gives the size without the
@@ -204,13 +212,24 @@ def _check_framing(headers, decodable: bool) -> None:
         raise NotImplementedOperation(extra={"Header": _DECODED_LENGTH_HEADER})
 
 
-def _check_copy_object(headers) -> None:
-    """Refuse the CopyObject requests Litmus cannot honor. A malformed source is not
-    decided here: the handler answers it, after the destination bucket."""
+def _check_copy_source_encryption(headers) -> None:
+    for name in headers.keys():
+        if name.lower().startswith(_COPY_SOURCE_SSE_C_PREFIX):
+            raise NotImplementedOperation(extra={"Header": name.lower()})
+
+
+def _check_copy_source(headers) -> None:
+    """Refuse a source Litmus cannot name. A malformed source is not decided here: the
+    handler answers it, after the destination bucket."""
     try:
         parse_copy_source(", ".join(headers.getlist(COPY_SOURCE_HEADER)))
     except InvalidArgument:
         pass
+
+
+def _check_copy_object(headers) -> None:
+    """Refuse the CopyObject requests Litmus cannot honor."""
+    _check_copy_source(headers)
     if headers.get(_TAGGING_DIRECTIVE) == "REPLACE" and any(
         v.strip() for v in headers.getlist(_TAGGING)
     ):
@@ -248,9 +267,14 @@ def _check(method: str, path: str, query, headers) -> None:
             _ALLOWED_MUTATING_OBJECT,
         )
         if COPY_SOURCE_HEADER in headers:
-            if method != "PUT" or query_keys - _IGNORED:
+            copy_query = query_keys - _IGNORED
+            if method != "PUT" or copy_query not in (set(), _UPLOAD_PART_QUERY):
                 raise NotImplementedOperation(extra={"Header": COPY_SOURCE_HEADER})
-            _check_copy_object(headers)
+            _check_copy_source_encryption(headers)
+            if copy_query:
+                _check_copy_source(headers)
+            else:
+                _check_copy_object(headers)
         if method == "DELETE":
             conditional = (
                 CONDITIONAL_DELETE_HEADERS

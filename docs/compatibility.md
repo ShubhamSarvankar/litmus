@@ -57,7 +57,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**193 passed, 130 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**199 passed, 124 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -77,7 +77,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`), and UploadPartCopy moved 6 more (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -118,6 +118,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Conditional DeleteObject | 330 | 508 | 179 | `If-Match` on DeleteObject is evaluated inside the delete's commit transaction against the ETag of the row it deletes: 412 PreconditionFailed when it does not match (strong comparison; `*`, quoted, unquoted and lists as for PutObject; a weak tag never matches), and the object, its row and its blob stay as they were. On a key that does not exist it is 404 NoSuchKey, `*` included, and nothing changes; an unconditional delete of a missing key stays 204 ([AWS, "How to perform conditional deletes"](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.md)). `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` stay 501, and so does `If-None-Match`. 409 is never emitted. No pass gained, as forecast: the one test that exercises the feature, `test_delete_object_if_match`, expects 204 on a missing key and fails on purpose (see "Conditional DeleteObject" under Known gaps). The results file is identical to the previous one. None of the 18 conditional delete tests passes: 12 enable versioning (501), `test_delete_object_if_match_last_modified_time` and `_size` send the directory bucket headers (501, deliberate), and the three non-versioned `test_delete_objects_*` need per key conditions (a later task). Recorded at the commit that adds the evaluation. |
 | Conditional DeleteObjects | 330 | 508 | 180 | The `ETag` element of a DeleteObjects `Object` is evaluated per key, inside the one transaction that deletes the batch, after the write lock and against that key's current row (`*`, quoted, unquoted and lists, strong comparison, as for DeleteObject). A condition that holds puts the key in `Deleted`; one that fails puts it in `Error` with Code PreconditionFailed and leaves the key untouched; one on a key that does not exist is an `Error` with Code NoSuchKey ([AWS, "How to perform conditional deletes"](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.md)). A refused key does not roll back the others. An empty `ETag` is no condition. `LastModifiedTime` and `Size` stay a per key NotImplemented, deliberately. 1 pass gained, as forecast: `test_delete_objects_if_match`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it fails against the server as of 9dcfba5, where its first request gets NotImplemented, and the new tests fail with this change reverted. Still failing, as forecast: the other 8 `test_delete_objects_*` tests, on purpose (see "Conditional DeleteObjects" under Known gaps). Recorded at the commit that adds the evaluation. |
 | CopyObject | 330 | 508 | 193 | A PUT with `x-amz-copy-source` and no query copies the source's bytes into a new blob and commits the destination like PutObject (see "CopyObject" under Known gaps). UploadPartCopy, a `versionId` other than `null`, an ARN source and a REPLACE of the tag set with tags stay 501. 13 passes gained, as forecast, test by test: `test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, and `test_copy_object_ifmatch_good`, `_ifmatch_failed`, `_ifnonematch_good`, `_ifnonematch_failed`. The results file differs from the previous one in those 13 lines only (26 lines, 13 out and 13 in), and the denominator stays 330. All 13 are genuine (26 incidental and 18 borderline stay, so 149 genuine): each failed before with 501, and the three that expect an error pass only because the check exists: against a server with the source conditions and the self-copy refusal switched off, `test_object_copy_to_itself`, `test_copy_object_ifmatch_failed` and `test_copy_object_ifnonematch_good` fail. Still failing, as forecast: the 7 `test_multipart_copy_*` tests (UploadPartCopy), the 2 versioned copy tests (versioning) and the 2 `test_object_copy_not_owned_*` tests (a second user, and PutObjectAcl). `test_upload_part_copy_percent_encoded_key`, `test_object_copy_bucket_not_found` and `test_object_copy_key_not_found` still pass, incidentally. Recorded at the commit that adds CopyObject. |
+| UploadPartCopy | 330 | 508 | 199 | A PUT with `x-amz-copy-source`, `partNumber` and `uploadId` copies a range of the source's bytes into a new part blob and records it like UploadPart (see "UploadPartCopy" under Known gaps). A `versionId` other than `null`, an ARN source and the `x-amz-copy-source-server-side-encryption-customer-*` headers (on this and on CopyObject) are 501. 6 passes gained, as forecast, test by test: `test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`. The results file differs from the previous one in those 6 lines only (12 lines, 6 out and 6 in), and the denominator stays 330. All 6 are genuine (26 incidental and 18 borderline stay, so 155 genuine): each failed before with 501, and the two that expect an error (`_invalid_range`, `_improper_range`) pass only because the range is parsed and checked against the source's size. Still failing, as forecast: `test_multipart_copy_versioned` (it enables versioning first, 501). `test_upload_part_copy_percent_encoded_key` still passes, now with 404 NoSuchKey (its copy source names `anyfilename%25.txt`, which decodes once to the key `anyfilename%.txt`, and there is none) instead of 501, and stays in the incidental list because a server that answers 501 passes it too. The CLI's copy of an object above its multipart threshold still fails, at GetObjectTagging (501), before it sends an UploadPartCopy. Recorded at the commit that adds UploadPartCopy. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -136,8 +137,8 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 193 passes are incidental**.
-Of the 193 passes, 26 are incidental and 18 are borderline, which leaves 149 genuine.
+is authenticated or owned. By that rule, **26 of the 199 passes are incidental**.
+Of the 199 passes, 26 are incidental and 18 are borderline, which leaves 155 genuine.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -188,7 +189,11 @@ delimiter is ignored, and they do not exercise delimiter support.
 - Copy (3): `test_object_copy_key_not_found` and `test_object_copy_bucket_not_found`
   get their 404 from the client's HeadObject on the missing source, and no copy
   request reaches Litmus; `test_upload_part_copy_percent_encoded_key` expects
-  UploadPartCopy to fail, and it gets 501 (UploadPartCopy is still not implemented).
+  UploadPartCopy to fail, and it gets 404 NoSuchKey (it passed with 501 before
+  UploadPartCopy was implemented). It still passes against a server that answers 501,
+  so it stays on this list, but only a server that decodes the copy source once, and no
+  more, gives it the 404: the key it names, `anyfilename%.txt`, is not the stored
+  `anyfilename%25.txt`.
 - Bucket naming, the test only checks that a valid name is accepted (9). Still
   incidental after name validation: all 9 also pass against a copy of the server with
   the check removed (run for this change), so they do not show that validation works;
@@ -248,13 +253,13 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | `Expect: 100-continue` | 2 | 1 | 1 | 0 | An early error response closes the connection. Fail: the other test expects 403 from a bucket protected by an ACL, and Litmus has no ACLs. |
 | Conditional PutObject and Complete | 17 | 12 | 5 | 0 | `If-Match` and `If-None-Match` on PutObject are decided in the commit: `*`, entity tags quoted and unquoted, 412 and 404 (see "Conditional PutObject" under Known gaps), including the two atomic tests that overwrite while another PUT is in flight. `If-Match` and `If-None-Match` on CompleteMultipartUpload are decided in its commit the same way (`test_multipart_put_object_if_match`). Fail: the 5 others enable versioning first, which is 501. |
 | Conditional delete | 18 | 1 | 17 | 0 | `If-Match` on DeleteObject is decided in the commit (see "Conditional DeleteObject" under Known gaps), but the one non-versioned test for it, `test_delete_object_if_match`, expects 204 on a missing key, which Litmus refuses on purpose (404 NoSuchKey, as AWS). The per key `ETag` of DeleteObjects is decided in the batch's commit (see "Conditional DeleteObjects" under Known gaps), and `test_delete_objects_if_match` passes. Fail: `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` on DeleteObject and `LastModifiedTime` and `Size` in DeleteObjects are refused on purpose (501, or a per key NotImplemented); 12 of these tests enable versioning first, which is 501. |
-| CopyObject and UploadPartCopy | 27 | 16 | 11 | 0 | CopyObject: copies within and across buckets, of 0 bytes and 16 MiB, with COPY and REPLACE of the metadata and Content-Type, onto itself (400 InvalidRequest, or 200 with REPLACE), and with source conditions (`x-amz-copy-source-if-match` and `-if-none-match`). Fail: UploadPartCopy is 501 (7 `test_multipart_copy_*` tests); `test_object_copy_not_owned_bucket` expects 403 for a second user, and Litmus has no authentication; `test_object_copy_not_owned_object_bucket` calls PutObjectAcl (501); the 2 versioned copy tests enable versioning first (501). Of the 16 that pass, 3 are incidental: 2 expect 404 for a missing source and get it from the client's HeadObject before any copy request is sent; the third expects UploadPartCopy to fail and gets 501. |
+| CopyObject and UploadPartCopy | 27 | 22 | 5 | 0 | CopyObject: copies within and across buckets, of 0 bytes and 16 MiB, with COPY and REPLACE of the metadata and Content-Type, onto itself (400 InvalidRequest, or 200 with REPLACE), and with source conditions (`x-amz-copy-source-if-match` and `-if-none-match`). UploadPartCopy: whole and ranged part copies of 1 byte to 10 MiB, completed into objects whose bytes equal the source's (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`), a range past the end of the source (416 `InvalidRange`) and malformed ranges (400 `InvalidArgument`). Fail: `test_multipart_copy_versioned` enables versioning first (501); `test_object_copy_not_owned_bucket` expects 403 for a second user, and Litmus has no authentication; `test_object_copy_not_owned_object_bucket` calls PutObjectAcl (501); the 2 versioned copy tests enable versioning first (501). Of the 22 that pass, 3 are incidental: 2 expect 404 for a missing source and get it from the client's HeadObject before any copy request is sent; the third, `test_upload_part_copy_percent_encoded_key`, expects UploadPartCopy to fail and gets 404 NoSuchKey, which a server answering 501 would also satisfy. |
 | Versioning, restore and read-through | 11 | 0 | 5 | 6 | Fail: PutBucketVersioning is 501, and DeleteObject sends no `x-amz-delete-marker` header. Skipped by s3-tests: 6. |
 | Anonymous and ACL-based access | 19 | 1 | 18 | 0 | The one pass, `test_object_anon_put_write_access`, is incidental: it sets the bucket ACL through the `x-amz-acl` header, which Litmus ignores, and its anonymous PUT succeeds because nothing is authenticated. Fail: requests are not authenticated, so anonymous requests are accepted, and ACL operations are 501. |
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **193** | **130** | **7** | |
+| **Total** | **330** | **199** | **124** | **7** | |
 
 ## AWS CLI
 
@@ -276,8 +281,12 @@ Verified, with content checks and not only exit codes:
   an empty directory, compared with `diff -r`
 - `s3 cp s3://b/small.bin s3://b/copied.bin` (one CopyObject, under the 8 MiB
   threshold): bytes compared after a download, the copy's ETag equal to the source's,
-  the copy listed. The same copy of the 40 MiB object, which the CLI sends as
-  UploadPartCopy, fails with NotImplemented and creates no destination key.
+  the copy listed. The same copy of the 40 MiB object fails with NotImplemented
+  naming GetObjectTagging and creates no destination key: above the multipart threshold
+  the CLI reads the source's tags first (`HEAD`, then `GET ?tagging`), and Litmus does
+  not implement GetObjectTagging, so the CLI never sends an UploadPartCopy. The server
+  does implement UploadPartCopy; boto3's managed copy of a 20 MiB object, which sends
+  one, is tested in `tests/conformance/test_upload_part_copy_boto3.py`.
 - `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
   BucketNotEmpty, and `s3 rb --force`
 
@@ -286,9 +295,10 @@ Limits of this check:
 - Only `http://` was tested. Litmus does not serve TLS itself, and what the CLI sends
   over `https://` was not captured.
 - Credentials are not checked: any access key and secret are accepted.
-- `s3 cp s3://b/x s3://b/y` of an object above the multipart threshold (and anything
-  else that needs UploadPartCopy) fails with 501 NotImplemented and creates no
-  destination key.
+- `s3 cp s3://b/x s3://b/y` of an object above the multipart threshold fails with 501
+  NotImplemented for GetObjectTagging, which the CLI calls on the source before it
+  copies in parts (UploadPartCopy itself is implemented), and creates no destination
+  key.
 - `s3 sync` compares size and modification time. LastModified has one second
   resolution, so files modified in the same second they were uploaded can be uploaded
   again by the next sync; the script backdates its source files for this reason.
@@ -301,8 +311,7 @@ request is rejected for missing or invalid credentials.
 **Unimplemented operations answer 501.** Requests for S3 operations Litmus does not
 implement get 501 NotImplemented and change nothing. That includes ACLs, policies,
 versioning configuration, tagging, CORS (including `OPTIONS`, the CORS preflight),
-lifecycle, POST Object, UploadPartCopy (a PUT with `x-amz-copy-source`, `partNumber`
-and `uploadId`), ListParts, ListMultipartUploads and GetObjectAttributes. A request
+lifecycle, POST Object, ListParts, ListMultipartUploads and GetObjectAttributes. A request
 with `x-amz-copy-source` that is not a plain PUT of a key (any other method, or a
 query other than `x-id`) is 501 too.
 
@@ -946,8 +955,85 @@ rest on the ceph tests or on nothing documented.
   a mismatch is 500 and nothing is stored. A multipart source is checked by size only.
   A source whose file is missing with its row unchanged, or has another size, is 500.
 - *Not honored, as for PutObject:* the ACL, storage class, SSE, object lock and checksum
-  headers of the request, `x-amz-copy-source-server-side-encryption-customer-*`, and
-  the expected bucket owner headers are ignored. `x-amz-write-offset-bytes` is still 501.
+  headers of the request, and the expected bucket owner headers are ignored. The
+  `x-amz-copy-source-server-side-encryption-customer-algorithm`, `-key` and `-key-MD5`
+  headers are 501 NotImplemented, here and on UploadPartCopy: Litmus stores nothing
+  encrypted, and a key supplied for the source asks for something it cannot do (until
+  UploadPartCopy was added they were ignored on CopyObject). `x-amz-write-offset-bytes` is still 501.
+
+**UploadPartCopy.** A PUT with `x-amz-copy-source`, `partNumber` and `uploadId` copies
+a byte range of the source into a new part blob and records it as UploadPart records a
+part (docs/design/storage-layout.md §6.6A and §11). The source is the AWS API reference
+for UploadPartCopy and UploadPart and the user guide pages "Amazon S3 multipart upload
+limits" and "Uploading and copying objects using multipart upload". The reference gives
+no error for a bad range, no order of errors and no ETag rule, so the points marked
+*Litmus's choice* rest on the ceph tests or on nothing documented.
+
+- *The source and the conditions* are CopyObject's: the same `x-amz-copy-source` format
+  (an ARN or a `versionId` other than `null` is 501), the same four
+  `x-amz-copy-source-if-*` headers decided on the source row whose blob is opened, with
+  the same 412 for each failing alone (*Litmus's choice*) and the two documented
+  combinations. The request's own `If-Match` and `If-None-Match` are not read as
+  conditions on the source. They are not conditions on the destination either: the
+  reference lists conditional writes for PutObject and CompleteMultipartUpload only, and
+  UploadPart ignores them as well.
+- *The range.* `x-amz-copy-source-range` is optional; without it the whole source is the
+  part. The reference's form is `bytes=first-last`, zero-based offsets. Anything else
+  (no `bytes=`, a missing end, a non-digit, a sign, a space, an open ended or suffix
+  range, several ranges, a repeated header) is 400 InvalidArgument naming the header,
+  as ceph's `test_multipart_copy_improper_range` expects. *Litmus's choice:* a reversed
+  range (`bytes=5-2`) is the same 400 InvalidArgument; the reference gives no error for
+  it.
+- *Out of bounds.* A `last` at or beyond the size of the source, and any range of an empty
+  source, is 416 InvalidRange. *Litmus's choice:* the reference gives no status or code;
+  ceph's `test_multipart_copy_invalid_range` accepts 400 or 416 with the code
+  InvalidRange. Unlike GET, a range is not clamped. The size is that of the source row
+  that was opened, so the check comes after the source conditions.
+- *The 5 MB sentence.* The reference says: "You can copy a range only if the source
+  object is greater than 5 MB." *Litmus's choice:* it is not enforced. The sentence names
+  no error, and ceph's `test_multipart_copy_invalid_range` and
+  `test_multipart_copy_improper_range` use a source of 5 bytes and expect a range error,
+  not a refusal of the range itself.
+- *Error order* (*Litmus's choice*; the reference documents none): the destination
+  bucket, the part number if it is not an integer (InvalidPart), the upload (NoSuchUpload),
+  the part number interval (InvalidPart), the source syntax (400 InvalidArgument), the
+  range syntax (400 InvalidArgument), the source bucket (NoSuchBucket), the source key
+  (NoSuchKey), the source conditions (412), the range against the size (416), then the
+  copy and the commit. The part number checks are UploadPart's, in its order.
+- *Part size.* The user guide gives parts of 5 MiB to 5 GiB and no minimum for the last
+  part. Neither bound is checked when a part is uploaded, as for UploadPart, and
+  EntityTooSmall is not implemented, so a copied part of 1 byte is accepted whatever its
+  number.
+- *The response.* 200 with a `CopyPartResult` body holding the ETag and LastModified. The
+  ETag is the MD5 of the copied bytes, quoted, plain even when the source was uploaded in
+  parts; the reference says only "Entity tag of the object" and does not give the rule.
+  *Litmus's choice:* `LastModified` is the time of the response, because a part has no
+  timestamp of its own; the reference says "Date and time at which the object was
+  uploaded". There is no `ETag` header (the reference's example has none) and no checksum
+  element or `x-amz-copy-source-version-id`.
+- *Replacing a part.* A copy over a part number writes a new blob; the part recorded
+  before stays recorded and intact until the replacing commit, as for UploadPart (the
+  reference: a part uploaded again with the same number overwrites the previous one). A
+  copy and an upload of one part number race like two uploads: the later commit wins. A
+  source may be the key of the upload being filled.
+- *What is checked.* Before the part is made durable its length is compared with the
+  range's and, when the range is the whole of a source not assembled from parts, its MD5
+  with the row's ETag; a mismatch is 500 and nothing is recorded. A range of a source
+  has no stored digest, so only its length is checked, and a multipart source is checked
+  by length only. A source whose file is missing with its row unchanged, or has another
+  size, is 500.
+- *Races.* A source overwritten or deleted after the open is copied as it was (the open
+  descriptor pins the blob). One replaced between the row read and the open is copied as
+  it then is, with the conditions and the range decided again on that row. An upload
+  aborted or completed before the part commit is 404 NoSuchUpload and the new blob is
+  discarded.
+- *Not honored:* `x-amz-copy-source-server-side-encryption-customer-*` is 501 (above); the
+  SSE-C headers for the destination, the request payer and expected owner headers are
+  ignored, as for UploadPart.
+- *The AWS CLI.* An `aws s3 cp` between two keys above the multipart threshold copies in
+  parts, but before the first part it calls GetObjectTagging on the source (501 here), so
+  that command still fails. `aws s3api upload-part-copy`, boto3's `client.copy` and
+  ceph's tests send UploadPartCopy directly.
 
 **PutObject ignores `x-amz-tagging`.** A PutObject with `x-amz-tagging` stores the object
 without tags and answers 200, since Litmus stores no tags; likewise `x-amz-acl`, the

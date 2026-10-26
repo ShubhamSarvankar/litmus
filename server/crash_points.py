@@ -40,6 +40,12 @@ PART_AFTER_REGISTER = "part-after-register"
 PART_MID_WRITE = "part-mid-write"
 PART_AFTER_BYTES = "part-after-bytes"
 PART_AFTER_COMMIT = "part-after-commit"
+# UploadPartCopy (§6.6): the same steps as UploadPart, with the bytes read from a range of
+# the source blob
+PART_COPY_AFTER_REGISTER = "part-copy-after-register"
+PART_COPY_MID_WRITE = "part-copy-mid-write"
+PART_COPY_AFTER_BYTES = "part-copy-after-bytes"
+PART_COPY_AFTER_COMMIT = "part-copy-after-commit"
 # CompleteMultipartUpload (§6.7): the commit carries the object row and the upload
 # completion in one transaction.
 COMPLETE_AFTER_REGISTER = "complete-after-register"
@@ -79,6 +85,10 @@ CRASH_POINTS = frozenset(
         PART_MID_WRITE,
         PART_AFTER_BYTES,
         PART_AFTER_COMMIT,
+        PART_COPY_AFTER_REGISTER,
+        PART_COPY_MID_WRITE,
+        PART_COPY_AFTER_BYTES,
+        PART_COPY_AFTER_COMMIT,
         COMPLETE_AFTER_REGISTER,
         COMPLETE_MID_ASSEMBLE,
         COMPLETE_AFTER_ASSEMBLE,

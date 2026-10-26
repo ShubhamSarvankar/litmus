@@ -42,7 +42,7 @@ parameters as follows.
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
 | GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 and V2 also apply `delimiter` and `max-keys`; V1 pages with `marker` and `NextMarker` and shows the configured `Owner` in each `Contents`; V2 pages with `continuation-token` or `start-after`, reports `KeyCount`, and shows `Owner` with `fetch-owner=true`. ListObjectVersions applies `delimiter` and `max-keys`, pages with `key-marker` and `version-id-marker`, and lists each object once as version `null` with the configured `Owner`. All three accept `encoding-type=url`. |
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
-| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart. |
+| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
@@ -52,7 +52,7 @@ parameters as follows.
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
-configuration, UploadPartCopy, ListParts, ListMultipartUploads, POST Object and others)
+configuration, tagging, ListParts, ListMultipartUploads, POST Object and others)
 get 501 NotImplemented before reaching a handler, and change nothing. `/{bucket}/`
 (a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
 in the table. Keys are stored as the exact string the client sent.
@@ -71,8 +71,9 @@ An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http:/
 its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies
 of objects under 8 MiB), `sync`, `rm`, `rb` and `s3api put-object`, `get-object` and
 `head-object`. `scripts/aws_cli_smoke.sh` runs these checks. Only `http://` was tested,
-credentials are not checked, and an s3 to s3 copy of a larger object, which the CLI
-sends as UploadPartCopy, gets 501 NotImplemented.
+credentials are not checked, and an s3 to s3 copy of a larger object fails: before the
+CLI copies in parts (UploadPartCopy, which Litmus implements) it reads the source's tags
+with GetObjectTagging, which gets 501 NotImplemented.
 
 ---
 
@@ -173,7 +174,8 @@ server/
   api/                 routes: buckets.py for buckets; multipart.py for every
                        /{bucket}/{key} request, handing plain object requests to
                        the handlers in objects.py; copy_object.py and copy_source.py
-                       are CopyObject and its x-amz-copy-source; request_guard.py
+                       are CopyObject and its x-amz-copy-source; upload_part_copy.py
+                       is UploadPartCopy; request_guard.py
                        answers 501; aws_chunked.py decodes aws-chunked bodies
   checksums.py         the checksums a PutObject or UploadPart claims, and their check
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
@@ -200,6 +202,6 @@ docs/
 
 ## Not implemented
 
-Authentication, ACLs and policies, versioning, UploadPartCopy, the `allow-unordered`
+Authentication, ACLs and policies, versioning, tagging, the `allow-unordered`
 listing extension, append writes, and conditional deletes other than `If-Match` on DeleteObject. Litmus runs as one process on one
 machine. See [`docs/compatibility.md`](docs/compatibility.md).

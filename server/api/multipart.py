@@ -127,6 +127,11 @@ async def put_object_or_part(bucket: str, key: str, request: Request) -> Respons
     params = dict(request.query_params)
 
     if "partNumber" in params and "uploadId" in params:
+        # UploadPartCopy: the guard lets x-amz-copy-source through on this query only.
+        if "x-amz-copy-source" in request.headers:
+            from server.api.upload_part_copy import upload_part_copy
+
+            return await upload_part_copy(bucket, key, params, request)
         return await _upload_part(bucket, key, params, request)
 
     # CopyObject: the guard lets x-amz-copy-source through on a PUT with no query only.

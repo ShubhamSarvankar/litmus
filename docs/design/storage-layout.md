@@ -94,8 +94,9 @@ rename, fsync of the parent directory, then the SQLite commit).
     under `data/objects` and `data/parts`, `server/config.py`).
 
 13. **(asked) CopyObject and UploadPartCopy.** How they fit the layout (a new ID with
-    copied bytes, or a shared ID with reference counting). Both currently return 501
-    via `x-amz-copy-source` in `server/api/request_guard.py`.
+    copied bytes, or a shared ID with reference counting). Both returned 501 via
+    `x-amz-copy-source` in `server/api/request_guard.py` when this was asked; both are
+    implemented now (§6.10, §6.6A, §11).
 
 14. **(asked) Concurrent same-key PUTs.** What happens under the new design. Today they
     are safe only by accident: handlers do blocking file and SQLite I/O inside async
@@ -721,6 +722,61 @@ same part number both succeed; the later commit wins (§9).
 | `part-after-commit` | part row points at new blob; old part blob `garbage`, file present | unlink old, delete row; `InterruptedCleanup` (upload_id, part_number) | new part recorded |
 | inside GC, after the unlink | `garbage` row, no file | delete row silently | new part recorded |
 
+#### §6.6A UploadPartCopy
+
+UploadPartCopy is UploadPart (§6.6) whose bytes come from a byte range of another
+object's blob (§11). It is PUT with `x-amz-copy-source`, `partNumber` and `uploadId`; the
+guard lets the header through on exactly that query.
+
+P1. Read-only checks, in this order: the destination bucket exists (NoSuchBucket); the
+    part number is an integer (else 400 InvalidPart, as UploadPart); the upload is open
+    (NoSuchUpload); the part number is between 1 and 10000 (InvalidPart); the
+    `x-amz-copy-source` value parses (400 InvalidArgument; 501 for an ARN or a version ID
+    other than `null`, already in the guard); `x-amz-copy-source-range`, when present, is
+    `bytes=<first>-<last>` with first not greater than last (400 InvalidArgument naming
+    the header); the source bucket exists (NoSuchBucket) and the source key has a row
+    (NoSuchKey). The `x-amz-copy-source-server-side-encryption-customer-*` headers are
+    501 on this operation and on CopyObject, in the guard.
+
+P2. Read the source row, decide its `x-amz-copy-source-if-*` conditions against that row
+    (412 PreconditionFailed), and open its blob: K2 of §6.10, the same code. The size of
+    the open file must equal the row's size, else 500. Then the range is checked against
+    that row's size: a `last` at or beyond it is 416 InvalidRange (so is every range of
+    an empty source). With no range header the part is the whole source. Nothing is
+    registered before this point, so a refused or failed read leaves nothing behind.
+
+P3. `id = REGISTER('part', bucket, key, upload_id, part_number)` **[C]**.
+    `⚡part-copy-after-register`
+
+P4. `WRITE_BLOB(id, source descriptor, [first, last])` **[Ff] [Fd]** (`⚡part-copy-mid-write`
+    inside). Before the fsync, a verify step checks that the length written equals the
+    range's and, only when the range is the whole of a source that was not assembled from
+    parts, that the MD5 written equals the row's ETag; otherwise 500 and the blob is
+    discarded. A range has no stored digest to compare with, so for a range, and for a
+    multipart source, the length is the only check. `⚡part-copy-after-bytes`
+
+P5. The commit of U4 (§6.6): the upload is still open (else NoSuchUpload, the new blob is
+    discarded), the row of the part number is inserted or replaced, the new blob becomes
+    `live` and a replaced part blob `garbage`. COMMIT **[C]**. `⚡part-copy-after-commit`
+
+P6. If the commit replaced a part: `GC([old.blob_id])` **[C]**.
+
+P7. 200 with a `CopyPartResult` body holding the ETag (the MD5 of the copied bytes,
+    always a plain MD5) and LastModified. A part has no timestamp of its own, so
+    LastModified is the time of the response.
+
+Kills leave what a killed UploadPart leaves, with the same sweep reports; the source is
+never touched.
+
+| Kill at | State left behind | Sweep at restart | Clients see after restart |
+|---|---|---|---|
+| `part-copy-after-register` | `pending` part row, no file | delete row; `InterruptedWrite` (bytes_durable = false) | part not recorded (a part of that number uploaded before stays recorded) |
+| `part-copy-mid-write` | `pending` row, partial `tmp/<id>.tmp` holding the start of the range | delete temp (`LeftoverTemp`), then row (`InterruptedWrite`, false) | same |
+| `part-copy-after-bytes` | `pending` row, complete blob | unlink, delete row; `InterruptedWrite` (bytes_durable = true) | same; Complete with the copy's ETag gets InvalidPart, with the old part's ETag works |
+| `part-copy-after-commit` | part row points at the copy's `live` blob; a replaced part blob `garbage`, file present | unlink it, delete row; `InterruptedCleanup`; nothing when no part was replaced | the copied part |
+
+A replaced part has no unlink point of its own, as for UploadPart (U5).
+
 #### §6.7 CompleteMultipartUpload
 
 C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part comes
@@ -879,7 +935,8 @@ K1. Read-only checks, in this order: the destination bucket exists (NoSuchBucket
     COPY or REPLACE (400 InvalidArgument); under REPLACE the request's headers are
     parsed (400 MetadataTooLarge); the source bucket exists (NoSuchBucket) and the
     source key has a row (NoSuchKey); a copy of an object onto itself without REPLACE
-    is refused (400 InvalidRequest).
+    is refused (400 InvalidRequest). The `x-amz-copy-source-server-side-encryption-
+    customer-*` headers are 501, in the guard, before any of this.
 
 K2. Read the source row, decide its `x-amz-copy-source-if-*` conditions against that
     row (412 PreconditionFailed), and open its blob: GET's sequence (§8 steps 1 to 3),
@@ -1280,8 +1337,8 @@ still fails.
 
 ### §11. CopyObject and UploadPartCopy (R13)
 
-Status: CopyObject is implemented as below (sequence in §6.10). UploadPartCopy is not;
-a PUT with `x-amz-copy-source` and `partNumber` and `uploadId` still returns 501.
+Status: CopyObject (sequence in §6.10) and UploadPartCopy (sequence in §6.6A) are
+implemented as below. A PUT with `x-amz-copy-source` on any other query is 501.
 
 **Decided (decision 8): copy the bytes into a new ID.** CopyObject is PutObject whose
 source is another object's blob:
@@ -1340,7 +1397,9 @@ Choices (AWS documents less than this; each is Litmus's own where it says so):
   accepts a self-copy that changes a storage class, encryption or a website redirect
   too; Litmus does not honor those headers, so REPLACE is its only change.
 - **Not honored, as for PutObject:** the ACL, storage class, SSE and checksum headers of
-  the request, and the SSE-C headers for the source, are ignored.
+  the request are ignored. The SSE-C headers for the source
+  (`x-amz-copy-source-server-side-encryption-customer-*`) are not ignored: they are 501,
+  here and on UploadPartCopy (§11, below).
 
 *Possible later optimization.* A self-copy with REPLACE could be a metadata-only
 transaction that keeps the same `blob_id`, since the bytes do not change: the headers
@@ -1349,11 +1408,60 @@ blob becoming garbage. It would save copying a large object for a header change.
 not done: it needs a second commit procedure and its own crash analysis for a case the
 byte copy already handles correctly.
 
-UploadPartCopy is UploadPart whose bytes come from a byte range of the source blob:
-U2 to U6 with WRITE_BLOB reading `[first, last]` from the source descriptor. A missing
-source must answer NoSuchKey before anything is registered, so
-`test_upload_part_copy_percent_encoded_key` keeps passing for the right reason (today
-it passes because the request is 501).
+**UploadPartCopy** is UploadPart whose bytes come from a byte range of the source blob:
+U2 to U6 with WRITE_BLOB reading `[first, last]` from the source descriptor (§6.6A). It
+shares the source parsing, the source conditions and the open with CopyObject. A missing
+source answers NoSuchKey before anything is registered, so
+`test_upload_part_copy_percent_encoded_key` passes for the right reason (it passed while
+the request was 501). Choices, each Litmus's own where it says so:
+
+- **Range.** `x-amz-copy-source-range` is optional; without it the whole source is the
+  part. The S3 API reference gives one form, `bytes=first-last` with zero-based offsets.
+  Anything else (no `bytes=`, no `-`, a non-digit, a sign, a space, an open ended or
+  suffix range, a list of ranges, a repeated header) is 400 InvalidArgument naming the
+  header, which is what ceph's `test_multipart_copy_improper_range` expects. A reversed
+  range (first greater than last) is the same 400 InvalidArgument: *Litmus's choice*, the
+  reference gives no error for it.
+- **Out of bounds.** A `last` at or beyond the source's size, or any range of an empty
+  source, is 416 InvalidRange. The reference gives no code for it; ceph's
+  `test_multipart_copy_invalid_range` accepts 400 or 416 with the code InvalidRange.
+  Unlike GET, a `last` past the end is not clamped. The size is that of the row whose
+  blob was opened, after the source conditions.
+- **The 5 MB sentence.** The reference says "You can copy a range only if the source
+  object is greater than 5 MB". Litmus does not enforce it: it gives no error, and ceph's
+  tests copy ranges of sources of 5 bytes. *Litmus's choice.*
+- **Error order.** Destination bucket, part number syntax, upload, part number interval,
+  source syntax, range syntax, source bucket, source key, source conditions, range bounds,
+  then the copy. The reference documents no order. The first four are UploadPart's. The
+  range syntax comes before the source is looked up, as the source syntax does for
+  CopyObject; the bounds need the row, so a request that fails both a condition and the
+  bounds is 412.
+- **Source conditions.** The four `x-amz-copy-source-if-*` headers, evaluated as for
+  CopyObject (each failing alone is 412; the two combinations the reference documents
+  hold). The request's own `If-Match` and `If-None-Match` are not read as conditions on
+  the source, and are not evaluated as conditions on the destination: the reference lists
+  conditional writes for PutObject and CompleteMultipartUpload only, and UploadPart
+  ignores them too.
+- **Part size.** The reference gives 5 MiB to 5 GiB and no minimum for the last part.
+  Neither bound is enforced at upload, as for UploadPart; there is no EntityTooSmall.
+- **ETag and body.** The part's ETag is the MD5 of the copied bytes, quoted, in the
+  `CopyPartResult` body next to LastModified (the time of the response). There is no
+  `ETag` header and no checksum element, and no `x-amz-copy-source-version-id` (Litmus has
+  no versions).
+- **Replacing a part.** As UploadPart: a fresh blob, the old part recorded and intact
+  until the replacing commit, then garbage; of two commits of one part number the later
+  wins. Copying a source onto the part of an upload at the same key is allowed.
+- **Not honored, 501 on both CopyObject and UploadPartCopy:** the
+  `x-amz-copy-source-server-side-encryption-customer-algorithm`, `-key` and `-key-MD5`
+  headers. Litmus stores nothing encrypted, and a client that supplies a key for the
+  source asks for something it cannot do. They were ignored on CopyObject before this
+  change.
+- **Source races.** As §11 above: the descriptor pins the blob, so a source overwritten or
+  deleted after the open is copied as it was; one replaced between the row read and the
+  open is copied as it then is, with the conditions and the range decided again on that
+  row; one deleted in that window is NoSuchKey; four replacements in a row are 503
+  SlowDown. An upload aborted or completed before the part commit is NoSuchUpload and the
+  new blob is discarded.
 
 **Not chosen: shared IDs with reference counts.** Immutable blobs make sharing
 safe in principle: add a `refs` count to `blobs`, change it in the same transaction as
@@ -1531,6 +1639,10 @@ new meaning described in §6.
 | `part-mid-write` | `test_upload_part_killed_mid_write` | partial temp removed |
 | `part-after-bytes` | `test_reupload_part_killed_after_bytes_keeps_old_part` | re-upload: old part still recorded; Complete with the old ETag gives the old bytes |
 | `part-after-commit` | `test_reupload_part_killed_after_commit` | new part recorded; old part blob removed with upload_id and part_number |
+| `part-copy-after-register` | `test_part_copy_killed_after_register` | part not recorded; row removed; `InterruptedWrite` (false); source intact |
+| `part-copy-mid-write` | `test_part_copy_killed_mid_write` | the first 64 KiB of the range (not of the source) in a temp file; removed with the row |
+| `part-copy-after-bytes` | `test_part_copy_killed_after_bytes_to_a_new_part`, `test_part_copy_over_a_part_killed_after_bytes_keeps_the_old_part` | the complete copy is not recorded; the old part stays usable by Complete with its ETag; `InterruptedWrite` (true) |
+| `part-copy-after-commit` | `test_part_copy_killed_after_commit_to_a_new_part`, `test_part_copy_over_a_part_killed_after_commit` | the copied part is recorded and Complete with its ETag works; the replaced part blob removed as `InterruptedCleanup` |
 | `complete-after-register` | `test_complete_killed_after_register` | upload open, parts intact, retry works |
 | `complete-mid-assemble` | `test_complete_killed_mid_assemble` | partial temp removed; upload open |
 | `complete-after-assemble` (existing) | `test_complete_killed_after_assemble_before_metadata` (revised) | assembled blob not visible, removed; upload open, parts intact |
@@ -1545,9 +1657,9 @@ new meaning described in §6.
 | `store-init-after-commit` | `test_first_start_killed_after_store_row` | a first start killed between the `store` row and the marker: restarting with the same blob directory finishes it (marker written, row `ready`); restarting with a different blob directory refuses and deletes nothing |
 
 GC is one procedure; its unlink window is proven through PutObject and Complete, and
-DeleteObject, DeleteObjects, Abort and CopyObject reuse it unchanged. The window between
-WRITE_BLOB's fsync and its rename leaves the same state class as `*-mid-write` (a temp
-file only) and needs no separate point.
+DeleteObject, DeleteObjects, Abort, CopyObject and UploadPartCopy reuse it unchanged. The
+window between WRITE_BLOB's fsync and its rename leaves the same state class as
+`*-mid-write` (a temp file only) and needs no separate point.
 
 ### §16. Other tests, and existing tests this design changes
 
@@ -1882,7 +1994,8 @@ Recorded on 2026-10-23.
     and `docs/compatibility.md` before any feature work starts. Conditional writes
     (§10) and CopyObject / UploadPartCopy (§11) come later, in an order you choose.
     They are not part of this implementation. Done since: conditional writes and
-    deletes (§10) and CopyObject (§11, §6.10, decision 19); UploadPartCopy remains.
+    deletes (§10), CopyObject (§11, §6.10, decision 19) and UploadPartCopy (§11, §6.6A,
+    decision 20).
 
 Recorded during step (a):
 
@@ -1908,4 +2021,15 @@ Recorded with CopyObject:
     metadata-only commit is recorded in §11 as a possible later optimization;
     `x-amz-tagging-directive: REPLACE` with a non-empty `x-amz-tagging` is 501 while
     COPY, and REPLACE with an empty tag set, proceed; each source condition that fails
-    on its own is 412 PreconditionFailed. UploadPartCopy stays 501.
+    on its own is 412 PreconditionFailed.
+
+Recorded with UploadPartCopy:
+
+20. **UploadPartCopy.** Implemented as §6.6A and §11 describe. Choices you made: a reversed
+    range is 400 InvalidArgument; "you can copy a range only if the source object is
+    greater than 5 MB" is not enforced; the 5 MiB minimum part size stays unenforced
+    (there is no EntityTooSmall); the `x-amz-copy-source-server-side-encryption-customer-*`
+    headers are 501 on both CopyObject and UploadPartCopy, where CopyObject had ignored
+    them. The CLI's copy of an object above its multipart threshold still fails, because
+    it reads the source's tags with GetObjectTagging first (501); GetObjectTagging is not
+    implemented.

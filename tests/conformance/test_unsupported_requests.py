@@ -148,11 +148,19 @@ def _create_upload(client: TestClient) -> str:
     return ET.fromstring(resp.text).findtext("UploadId")
 
 
-def test_upload_part_copy_returns_501_and_records_no_part(populated):
+@pytest.mark.parametrize(
+    "source",
+    [
+        "arn:aws:s3:us-west-2:123456789012:accesspoint/ap/object/obj.txt",
+        "arn%3Aaws%3As3%3Aus-west-2%3A123456789012%3Aaccesspoint/ap/object/obj.txt",
+        "/arn:aws:s3-outposts:us-west-2:123456789012:outpost/op/object/obj.txt",
+    ],
+)
+def test_upload_part_copy_from_an_arn_returns_501_and_records_no_part(populated, source):
     upload_id = _create_upload(populated)
     resp = populated.put(
         f"/{BUCKET}/dest?partNumber=1&uploadId={upload_id}",
-        headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}"},
+        headers={"x-amz-copy-source": source},
     )
     _assert_not_implemented(resp, "PUT")
     assert populated.app.state.metadata.get_parts(upload_id) == []
@@ -160,14 +168,21 @@ def test_upload_part_copy_returns_501_and_records_no_part(populated):
     _assert_unchanged(populated)
 
 
-def test_upload_part_copy_with_a_range_returns_501(populated):
+@pytest.mark.parametrize("version_id", ["3HL4kqtJlcpXroDTDmJ", "", "null2", "NULL"])
+def test_upload_part_copy_with_a_non_null_version_id_returns_501_and_records_no_part(
+    populated, version_id
+):
     upload_id = _create_upload(populated)
     resp = populated.put(
         f"/{BUCKET}/dest?partNumber=1&uploadId={upload_id}",
-        headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}", "x-amz-copy-source-range": "bytes=0-3"},
+        headers={
+            "x-amz-copy-source": f"/{BUCKET}/{KEY}?versionId={version_id}",
+            "x-amz-copy-source-range": "bytes=0-3",
+        },
     )
     _assert_not_implemented(resp, "PUT")
     assert populated.app.state.metadata.get_parts(upload_id) == []
+    _assert_unchanged(populated)
 
 
 @pytest.mark.parametrize("version_id", ["3HL4kqtJlcpXroDTDmJ", "", "null2", "NULL"])
