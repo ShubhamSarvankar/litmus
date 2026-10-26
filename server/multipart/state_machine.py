@@ -9,7 +9,13 @@ from server.crash_points import (
     armed_point,
     crash_point,
 )
-from server.errors.s3errors import InternalError, InvalidPart, InvalidPartOrder, NoSuchUpload
+from server.errors.s3errors import (
+    InternalError,
+    InvalidPart,
+    InvalidPartOrder,
+    InvalidRequest,
+    NoSuchUpload,
+)
 from server.metadata.base import ObjectMeta, PartsChanged
 from server.multipart.etag import composite_etag
 from server.storage.blobs import MissingPartBlob
@@ -44,6 +50,7 @@ def complete_multipart_upload(
     storage,
     metadata,
     precondition: Callable[[str | None], None] | None = None,
+    expected_size: int | None = None,
 ) -> str:
     """CompleteMultipartUpload (docs/design/storage-layout.md §6.7).
 
@@ -58,7 +65,9 @@ def complete_multipart_upload(
 
     Raises InvalidPartOrder unless the part numbers are strictly ascending (a repeat is
     out of order too), then InvalidPart if any listed part is outside 1 to 10000,
-    missing or has a mismatched ETag. All of it is decided before a blob is registered.
+    missing or has a mismatched ETag, then InvalidRequest if expected_size (the
+    x-amz-mp-object-size header) is not the total of the stored sizes of exactly the
+    listed parts. All of it is decided before a blob is registered.
     """
     previous = None
     for req in requested_parts:
@@ -78,6 +87,11 @@ def complete_multipart_upload(
             or _normalize_etag(recorded_part.etag) != _normalize_etag(req["ETag"])
         ):
             raise InvalidPart(extra={"PartNumber": str(num)})
+
+    if expected_size is not None and expected_size != sum(
+        recorded[r["PartNumber"]].size for r in requested_parts
+    ):
+        raise InvalidRequest(extra={"Header": "x-amz-mp-object-size"})
 
     part_blob_ids = {r["PartNumber"]: recorded[r["PartNumber"]].blob_id for r in requested_parts}
     etag = composite_etag([r["ETag"] for r in requested_parts])

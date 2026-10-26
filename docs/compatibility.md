@@ -124,6 +124,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Bucket owner condition | 330 | 508 | 199 | `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are compared with `S3_OWNER_ID` in the request guard; a mismatch is 403 AccessDenied (see "Bucket owner condition" under Known gaps). No outcome changed: the only selected test that sends the header, `test_expected_bucket_owner`, fails first at `put_bucket_acl`, which is 501. |
 | Refuse unsupported feature headers | 330 | 508 | 199 | Server-side encryption, SSE-C, website redirect, Object Lock and storage class headers on PutObject, CreateMultipartUpload, CopyObject, UploadPart and UploadPartCopy, and `x-amz-bucket-object-lock-enabled` and `x-amz-bucket-namespace` on CreateBucket, answer 501 instead of being dropped (see "Feature headers Litmus refuses" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of them, and the results file is identical to the previous one. The 11 selected tests whose source mentions a storage class are the five GetObjectAttributes tests, which ask for `StorageClass` in `ObjectAttributes` (not the header; the operation is 501), and the six skipped cloud tests, which skip before sending anything. |
 | ACLs disabled | 330 | 508 | 194 | `x-amz-acl`, the `x-amz-grant-*` headers and `x-amz-object-ownership` are no longer accepted and dropped: Litmus behaves as a bucket with Object Ownership set to BucketOwnerEnforced (see "ACL and grant headers" under Known gaps). 5 passes lost, on purpose, exactly as forecast: `test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`, because CreateBucket with `public-read` or `public-read-write` is 400 InvalidBucketAclWithObjectOwnership. The results file differs from the previous one in those 5 lines only. `test_object_raw_response_headers` stays passed (`private` is accepted). The other ACL tests stay failed, some at an earlier step: `test_create_bucket_bucket_owner_preferred` and `test_create_bucket_object_writer` now fail at CreateBucket (501), where they failed at GetBucketOwnershipControls (501) before. Of the 5, `test_object_raw_get` and `test_object_anon_put_write_access` were incidental and the other three borderline, so the figures are 24 incidental, 15 borderline and 155 genuine (genuine unchanged). Recorded at the commit that adds the handling. |
+| Complete size and checksum headers | 330 | 508 | 194 | CompleteMultipartUpload verifies `x-amz-mp-object-size` (400 InvalidRequest on a mismatch with the total of the listed parts, 400 InvalidArgument on a malformed value) and refuses the `x-amz-checksum-*` headers and `x-amz-checksum-type` with 501 (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of these on Complete. The tests that send a checksum header there (`test_multipart_checksum_sha256`, `test_multipart_reupload_checksum_and_etag` and the five `test_multipart_use_cksum_helper_*` tests) carry the `checksum` marker, which the `-k` filter deselects, no ceph test sends `x-amz-mp-object-size` (`MpuObjectSize`) or `ChecksumType` on Complete, and boto3 sends neither that header nor a checksum header on Complete by default. The results file is identical to the previous one. Recorded at the commit that adds the checks. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -635,7 +636,9 @@ from the stored `Content-Encoding` (see "System headers" below).
   `x-amz-decoded-content-length` on any such request, whatever its method; the supported
   streaming value without `x-amz-trailer`; and an `x-amz-trailer` that lists more than
   one entry or names anything but `x-amz-checksum-crc64nvme`, so CRC32, CRC32C, SHA-1
-  and SHA-256 trailers, which botocore sends over `https://` by default, are refused.
+  and SHA-256 trailers are refused. botocore sends them over `https://` by default, and
+  the AWS CLI sends them over `http://` too when asked for the algorithm
+  (`--checksum-algorithm CRC32`, captured with aws-cli 2.38.5).
   The AWS CLI v2 sends the supported framing over `http://` with its default settings
   (see "AWS CLI" above). A client can also avoid framing by setting
   `request_checksum_calculation = when_required`.
@@ -723,12 +726,17 @@ Not done:
   `x-amz-checksum-mode` says. S3 stores the checksum and, without one from the client,
   adds CRC64NVME.
 - Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
-  `x-amz-checksum-type` on CreateMultipartUpload, the `Checksum*` elements of the
-  CompleteMultipartUpload body, `x-amz-checksum-*` and `x-amz-mp-object-size` on
-  Complete are all ignored, and composite and full object checksums are not computed.
-  The 501 for other algorithms applies to PutObject, UploadPart and DeleteObjects only.
+  `x-amz-checksum-type` on CreateMultipartUpload are ignored, the `Checksum*` elements of
+  the CompleteMultipartUpload body are accepted and not verified, and composite and full
+  object checksums are not computed. On Complete, `x-amz-checksum-*` and
+  `x-amz-checksum-type` are 501, and `x-amz-mp-object-size` is verified (see "Checksum
+  and size headers on CompleteMultipartUpload" below). The 501 for other algorithms
+  applies to PutObject, UploadPart and DeleteObjects.
 - The trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256`, which botocore
-  sends over `https://`, are still 501 (see above); only CRC64NVME is decoded.
+  sends over `https://` and the AWS CLI sends over `http://` when asked for the algorithm,
+  are still 501 (see above); only CRC64NVME is decoded. An AWS CLI upload with
+  `--checksum-algorithm CRC32` (or CRC32C, SHA1 or SHA256) therefore fails at the first
+  UploadPart with NotImplemented, and the CLI aborts the upload.
 - `x-amz-content-sha256` holding a hex digest is not compared with the body.
 - The algorithms S3's documentation now lists beyond these five (MD5, SHA512 and the
   XXHash family) are not computed.
@@ -1315,10 +1323,13 @@ Ignored, where a client can observe the difference:
 - `x-amz-object-ownership` on PutObject, CreateMultipartUpload and CopyObject, and the
   ACL and grant headers on UploadPart, UploadPartCopy and CompleteMultipartUpload, which
   do not define them (see "ACL and grant headers" for the operations that do).
-- `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` on
-  CreateMultipartUpload and CopyObject; `x-amz-checksum-type` on CreateMultipartUpload and
-  CompleteMultipartUpload; the `x-amz-checksum-*` headers and `x-amz-mp-object-size` on
-  CompleteMultipartUpload (see "Checksums", Not done).
+- `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` and
+  `x-amz-checksum-type` on CreateMultipartUpload; `x-amz-checksum-algorithm` on
+  CopyObject (see "Checksums", Not done). The checksum headers and `x-amz-mp-object-size`
+  on CompleteMultipartUpload are no longer ignored (see "Checksum and size headers on
+  CompleteMultipartUpload").
+- The `Checksum*` elements inside `Part` in the CompleteMultipartUpload body are
+  accepted and not verified (see "Checksum and size headers on CompleteMultipartUpload").
 - The SSE-C headers on GetObject, HeadObject and CompleteMultipartUpload, and `x-amz-mfa`
   on DeleteObject and DeleteObjects, where the effect is unclear.
 - A satisfiable `Range` on HeadObject, which does not narrow `Content-Length`.
@@ -1353,7 +1364,9 @@ twice with the right ETag was accepted and its bytes were assembled twice (the o
 size counted it twice and the composite ETag hashed it twice), and parts listed out of
 order were silently put in order. The earlier version of this document said a repeated
 part number gets InvalidPart; it did not. An empty, non-XML or non-UTF-8 body was a 500.
-Now, after NoSuchUpload for an unknown upload (checked first, as before):
+Now, after NoSuchUpload for an unknown upload (checked first, as before), and after the
+`x-amz-mp-object-size` syntax check (see "Checksum and size headers on
+CompleteMultipartUpload"):
 
 - MalformedXML (400): the body is empty, not UTF-8, not well-formed XML, its root is not
   `CompleteMultipartUpload` (with or without the S3 namespace), it has no `Part`, or a
@@ -1363,6 +1376,8 @@ Now, after NoSuchUpload for an unknown upload (checked first, as before):
   by the same rule, and the list is never sorted. Gaps are allowed (1 then 3 is fine).
 - InvalidPart (400): a `PartNumber` outside 1 to 10000, or a part that was never uploaded
   or whose ETag differs.
+- InvalidRequest (400): `x-amz-mp-object-size` differs from the total size of the listed
+  parts.
 - Then the `If-Match` and `If-None-Match` conditions (412, or 404).
 
 All of it is decided before a blob is registered, so a refused Complete writes nothing:
@@ -1390,6 +1405,76 @@ with a stale ETag and then with the current one, and expects the Complete to suc
 Litmus refuses any repeated part number with InvalidPartOrder, because S3 requires the list
 in ascending order and accepting a repeat is how a part got assembled twice. The test
 would pass only by tolerating repeats, which is the behavior this change removes.
+
+**Checksum and size headers on CompleteMultipartUpload.** Until this change Complete read
+none of `x-amz-mp-object-size`, `x-amz-checksum-*` and `x-amz-checksum-type`, so a client
+that sent an expected size or a checksum got a success without either being checked.
+Now:
+
+- `x-amz-mp-object-size` is verified. S3 API reference, "CompleteMultipartUpload": it is
+  "the expected total object size of the multipart upload request", and a mismatch with
+  the actual size "results in an `HTTP 400 InvalidRequest` error". The size compared is
+  the total of the stored sizes of exactly the listed parts, so a part that was uploaded
+  and not listed does not count (the object is those parts only). The documentation says
+  nothing else about the header: what it counts for a part list S3 would refuse is not
+  found.
+- A malformed value is 400 InvalidArgument. The value must be a plain non-negative
+  decimal integer, digits only after stripping surrounding whitespace: `-1`, `1.5`,
+  `0x10`, `+5`, `1e3`, `1_000`, letters, and digits with a space inside are refused, and
+  leading zeros are accepted. AWS's handling of a malformed value is not found in the
+  S3 API reference, "CompleteMultipartUpload" or the "Error" page; InvalidArgument (400,
+  "Invalid Argument") is in the error list and is Litmus's choice. A value with more
+  than 18 significant digits is a mismatch, not an error.
+- A header whose value is empty after stripping whitespace counts as absent, here and
+  for the checksum headers.
+- The order of the errors is Litmus's; the documentation lists the errors and not which
+  comes first. NoSuchUpload, then the `x-amz-mp-object-size` syntax check
+  (InvalidArgument), then MalformedXML, InvalidPartOrder and InvalidPart, then the size
+  mismatch (InvalidRequest), then the conditions. Every one of them is decided before a
+  blob is registered, so a refusal leaves the upload open with all its parts, as a failed
+  condition does, and the write sequence of Complete (docs/design/storage-layout.md
+  §6.7) is unchanged. InvalidRequest and InvalidArgument are both in the "Error" page's
+  list with status 400.
+- A non-blank `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`,
+  `-sha512`, `-md5`, `-xxhash64`, `-xxhash3`, `-xxhash128` or `x-amz-checksum-type` is
+  501 NotImplemented, in the request guard with the other 501 refusals, so it is decided
+  before the upload is looked up. Litmus stores no part checksums, so it cannot verify
+  the whole-object value or the type until it does. S3 API reference,
+  "CompleteMultipartUpload": the headers are data integrity checks, and a type that
+  differs from the one given at CreateMultipartUpload is `BadDigest`. S3 User Guide,
+  "Checking object integrity for data uploads": for CRC32, CRC32C, SHA1 and SHA256, when
+  CreateMultipartUpload did not name the algorithm, a checksum header on Complete "is
+  currently accepted but not validated or stored"; for MD5, SHA512 and the XXHash
+  algorithms, a value on Complete without the algorithm at Create is `InvalidRequest`.
+  Litmus does not record the algorithm or type of an upload, so it cannot tell the
+  accepted case from the one that must be checked, and refuses every case. AWS
+  documents no status for a checksum mismatch on Complete beyond the code `BadDigest`;
+  how a whole-object value is validated for a composite upload is not found.
+- The `Checksum*` elements inside `Part` in the body (`ChecksumCRC32`,
+  `ChecksumCRC64NVME` and the rest) stay accepted and are not verified. S3 API
+  reference, "CompletedPart": each is the checksum of the part, "present if the multipart
+  upload request was created with" that algorithm; what S3 does when one does not match
+  is not found. The default AWS CLI sends `x-amz-mp-object-size` and a
+  `ChecksumCRC64NVME` per part on every multipart upload (captured with aws-cli 2.38.5),
+  so refusing them would break it. Verifying them needs stored part checksums, which come
+  later. boto3 1.42.89 sends neither `x-amz-mp-object-size` nor a `Checksum*` element in
+  its Complete body: s3transfer copies a part's checksum into the Complete body from the
+  UploadPart response (`s3transfer/upload.py`), and Litmus's UploadPart answers with
+  `ETag` only because it does not return the checksum it verified.
+- Open for the checksum design: S3 API reference, "CompletedPart", says that with part
+  checksums, non-consecutive part numbers are 400 `InvalidPartOrder`, and S3 User Guide,
+  "Checking object integrity for data uploads", says the same case is an `HTTP 500
+  Internal Server` error. The two pages conflict. Litmus allows gaps today (1 then 3 is
+  fine) and does not choose here.
+
+**The AWS CLI's `--checksum-algorithm` for CRC32, CRC32C, SHA1 and SHA256 fails.** An
+upload with `aws s3 cp --checksum-algorithm CRC32` (aws-cli 2.38.5, over `http://`)
+sends `x-amz-checksum-algorithm: CRC32` on CreateMultipartUpload, then each UploadPart
+as an aws-chunked body with the trailer `x-amz-checksum-crc32`. Litmus decodes only the
+CRC64NVME trailer, so every UploadPart is 501 NotImplemented and the CLI aborts the
+upload. The same applies to CRC32C, SHA1 and SHA256. CRC64NVME, the CLI's default, is
+decoded. This is the same refusal as "Chunk-framed (aws-chunked) bodies" above; the
+trailers are sent over `http://` by the CLI, not only over `https://`.
 
 **Response header overrides.** GetObject and HeadObject take the query parameters
 `response-cache-control`, `response-content-disposition`, `response-content-encoding`,

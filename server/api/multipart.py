@@ -21,7 +21,13 @@ from server.crash_points import (
     armed_point,
     crash_point,
 )
-from server.errors.s3errors import InvalidPart, MalformedXML, NoSuchBucket, NoSuchUpload
+from server.errors.s3errors import (
+    InvalidArgument,
+    InvalidPart,
+    MalformedXML,
+    NoSuchBucket,
+    NoSuchUpload,
+)
 from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
 from server.multipart.state_machine import complete_multipart_upload
 from server.storage.lifecycle import collect_garbage, discard_new_blob
@@ -71,6 +77,26 @@ def _part_number(text: str) -> int:
     if len(digits) > _MAX_DIGITS:
         return -(10**_MAX_DIGITS) if text.startswith("-") else 10**_MAX_DIGITS
     return int(text)
+
+
+_OBJECT_SIZE_HEADER = "x-amz-mp-object-size"
+_DIGITS = re.compile(r"[0-9]+")
+
+
+def _expected_object_size(headers) -> int | None:
+    """The x-amz-mp-object-size of a Complete, or None when the header is absent or
+    blank. The value must be a plain non-negative decimal integer, digits only after
+    stripping whitespace; anything else is InvalidArgument. The API reference documents
+    only the mismatch (InvalidRequest), so the error for a malformed value is a choice.
+    A value past _MAX_DIGITS significant digits is returned as 10**_MAX_DIGITS, which no
+    upload's size can equal."""
+    text = ", ".join(headers.getlist(_OBJECT_SIZE_HEADER)).strip()
+    if not text:
+        return None
+    if _DIGITS.fullmatch(text) is None:
+        raise InvalidArgument(extra={"ArgumentName": _OBJECT_SIZE_HEADER, "ArgumentValue": text})
+    digits = text.lstrip("0")
+    return 10**_MAX_DIGITS if len(digits) > _MAX_DIGITS else int(digits or "0")
 
 
 def _parse_complete_body(body: bytes) -> list[dict]:
@@ -261,6 +287,7 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
     if not metadata.upload_exists(upload_id):
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
+    expected_size = _expected_object_size(request.headers)
     body = await request.body()
     requested_parts = _parse_complete_body(body)
 
@@ -273,6 +300,7 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
         metadata=metadata,
         # Decided in the commit, after every other Complete error (§10); no early check.
         precondition=write_precondition(request.headers, key),
+        expected_size=expected_size,
     )
     return Response(
         content=_complete_xml(bucket, key, composite_etag),

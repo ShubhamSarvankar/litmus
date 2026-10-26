@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 193 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 194 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -50,7 +50,7 @@ parameters as follows.
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
-| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match` |
+| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the `x-amz-checksum-*` headers and `x-amz-checksum-type` are 501, since Litmus cannot verify them yet. The per part `Checksum*` elements of the body are accepted and not verified. |
 | GET | `/health` | Health check |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart

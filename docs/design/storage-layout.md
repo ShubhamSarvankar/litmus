@@ -780,8 +780,9 @@ A replaced part has no unlink point of its own, as for UploadPart (U5).
 #### §6.7 CompleteMultipartUpload
 
 C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part comes
-    with the multipart work, decision 17). Then parse and validate the body, and
-    nothing is registered until all of it has passed. The errors come in this order:
+    with the multipart work, decision 17). Then the `x-amz-mp-object-size` syntax
+    (InvalidArgument, decision 26), then parse and validate the body, and nothing is
+    registered until all of it has passed. The errors come in this order:
     1. MalformedXML: the body is empty, not UTF-8, not well-formed XML, its root is
        not CompleteMultipartUpload, it has no Part, or a Part has no ETag or a
        PartNumber that is not an integer.
@@ -790,7 +791,9 @@ C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part com
     3. InvalidPart: a part number outside 1 to 10000, or a part that is not recorded
        or whose ETag does not match. Read the part rows for this. Remember each
        requested part's `blob_id` and size.
-    4. The condition (C4.c): there is no early conditional check (§10), so a refused
+    4. InvalidRequest: `x-amz-mp-object-size` is not the total of the remembered sizes
+       of exactly the listed parts (decision 26).
+    5. The condition (C4.c): there is no early conditional check (§10), so a refused
        Complete costs a full assembly.
     EntityTooSmall (a part but the last under 5 MiB) is not enforced.
 
@@ -2117,3 +2120,33 @@ Recorded with the ACL header handling:
     blob or metadata changed. Authentication is a separate matter, out of scope as before:
     accepting an ACL header says nothing about network access. Details and what AWS
     leaves unsaid: docs/compatibility.md, "ACL and grant headers".
+
+Recorded with the Complete size and checksum headers:
+
+26. **`x-amz-mp-object-size` is verified, the checksum headers are refused.**
+    CompleteMultipartUpload reads `x-amz-mp-object-size` (S3 API reference,
+    "CompleteMultipartUpload": the expected total object size; a mismatch is `HTTP 400
+    InvalidRequest`). A value that is empty after stripping whitespace is absent. The
+    value must be a plain non-negative decimal integer, digits only after stripping
+    whitespace; anything else is 400 InvalidArgument, which is Litmus's choice, since the
+    handling of a malformed value is not found in the documentation. A valid value that
+    differs from the total of the stored sizes of exactly the listed parts is 400
+    InvalidRequest; a part uploaded and not listed does not count. The order of the errors
+    extends §6.7 C1: NoSuchUpload, the size syntax, MalformedXML, InvalidPartOrder,
+    InvalidPart, the size mismatch, then the conditions. Every check is decided from the
+    part rows before a blob is registered, so a refusal leaves the upload open with all
+    its parts, and the write sequence (§6.7 C2 to C5) is unchanged. Separately, a
+    non-blank `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`,
+    `-sha512`, `-md5`, `-xxhash64`, `-xxhash3`, `-xxhash128` or `x-amz-checksum-type` on
+    Complete is 501 NotImplemented in the request guard, with the other 501 refusals:
+    Litmus stores no part checksums and does not record an upload's algorithm or type, so
+    it cannot verify them. AWS accepts some of them unvalidated when
+    CreateMultipartUpload named no algorithm (S3 User Guide, "Checking object integrity
+    for data uploads"), a case Litmus cannot tell apart for that reason. The per part
+    `Checksum*` elements in the body stay accepted and unverified: the default AWS CLI
+    sends them on every multipart upload, and verifying them needs the stored part
+    checksums that the checksum design will add. That design must also settle the
+    conflict between "CompletedPart" (400 InvalidPartOrder) and "Checking object
+    integrity for data uploads" (500) for non-consecutive part numbers with checksums.
+    Details and what AWS leaves unsaid: docs/compatibility.md, "Checksum and size headers
+    on CompleteMultipartUpload".
