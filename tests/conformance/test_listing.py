@@ -320,7 +320,10 @@ def test_v1_owner_ignores_request_identity(client, monkeypatch):
     _put(client, ["a"])
     resp = client.get(
         f"/{BUCKET}",
-        headers={"Authorization": "AWS someoneelse:sig", "x-amz-expected-bucket-owner": "x"},
+        headers={
+            "Authorization": "AWS someoneelse:sig",
+            "x-amz-expected-bucket-owner": "owner-id",
+        },
     )
     assert ET.fromstring(resp.text).findtext("Contents/Owner/ID") == "owner-id"
 

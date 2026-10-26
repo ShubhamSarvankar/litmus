@@ -121,7 +121,7 @@ Configuration is by environment variable:
 |---|---|---|
 | `S3_BLOB_DIR` | `data/blobs` | Directory of the blob files |
 | `S3_DB_PATH` | `data/litmus.db` | SQLite database |
-| `S3_OWNER_ID` | `litmus` | ID in every `Owner` element; Litmus has one account and no authentication |
+| `S3_OWNER_ID` | `litmus` | ID in every `Owner` element, and the value `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` must equal (otherwise 403 AccessDenied); Litmus has one account and no authentication |
 | `S3_OWNER_DISPLAY_NAME` | `litmus` | DisplayName in every `Owner` element |
 
 The server refuses to start:

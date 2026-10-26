@@ -359,7 +359,8 @@ _EMPTY_TAGGING = (
 async def _get_object_tagging(bucket: str, key: str, request: Request) -> Response:
     """GetObjectTagging: the bucket is checked first, then the key. Range, conditional
     headers and response-* overrides do not apply to it, and, as for GetObject,
-    x-amz-expected-bucket-owner and x-amz-request-payer are not evaluated."""
+    x-amz-request-payer is not evaluated. x-amz-expected-bucket-owner is checked by the
+    request guard before this handler runs."""
     metadata = request.app.state.metadata
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})

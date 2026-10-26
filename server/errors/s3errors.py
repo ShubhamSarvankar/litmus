@@ -15,6 +15,12 @@ class S3Error(Exception):
         super().__init__(self.message)
 
 
+class AccessDenied(S3Error):
+    status_code = 403
+    code = "AccessDenied"
+    message = "Access Denied"
+
+
 class NoSuchBucket(S3Error):
     status_code = 404
     code = "NoSuchBucket"

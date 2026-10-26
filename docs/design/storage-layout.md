@@ -2056,9 +2056,24 @@ Recorded with GetObjectTagging:
     PutObjectTagging being 501), so the true tag set of every object is empty. The
     handler reads no blob and writes nothing: the bucket is checked (NoSuchBucket), then
     the key's row (NoSuchKey). `versionId` is handled as for GetObject (`null` or 501);
-    `x-amz-expected-bucket-owner` and `x-amz-request-payer` are not evaluated, and no
-    `x-amz-version-id` is sent, as for GetObject. Range, conditional headers and
+    `x-amz-request-payer` is not evaluated, and no `x-amz-version-id` is sent, as for
+    GetObject. `x-amz-expected-bucket-owner` is evaluated by the request guard like
+    every object operation (decision 23). Range, conditional headers and
     `response-*` do not apply; `?tagging` with any other parameter (besides `x-id`) is
     501 in the guard. PutObjectTagging, DeleteObjectTagging, the bucket tagging
     operations and `HEAD ?tagging` stay 501. The GetObjectTagging page lists no errors
     and does not say how an empty `TagSet` is written (not found).
+
+23. **Bucket owner condition.** The request guard compares `x-amz-expected-bucket-owner`,
+    stripped of surrounding whitespace, with `S3_OWNER_ID` exactly (case sensitive, no
+    format check; an empty or blank value is absent) on the 17 operations whose API
+    reference pages define it, and `x-amz-source-expected-bucket-owner` on CopyObject and
+    UploadPartCopy. A mismatch is 403 AccessDenied, last in the guard: after the bucket
+    name check and every 501, before routing, so before the body is read and before any
+    lookup (it beats NoSuchBucket, NoSuchKey and NoSuchUpload). The destination header is
+    checked before the source header. ListBuckets and CreateBucket ignore both headers
+    (S3 User Guide, "Verifying bucket ownership with bucket owner condition"). AWS
+    documents the value as a 12 digit account ID; `S3_OWNER_ID` also serves as the
+    canonical owner ID, which AWS keeps separate. The check reads nothing and writes
+    nothing: no write path, blob or metadata, changed. Details and what AWS leaves
+    unsaid: docs/compatibility.md, "Bucket owner condition".

@@ -30,7 +30,9 @@ from server.api.aws_chunked import (
 )
 from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
 from server.checksums import unsupported_value_header
+from server.config import settings
 from server.errors.s3errors import (
+    AccessDenied,
     InvalidArgument,
     InvalidBucketName,
     NotImplementedOperation,
@@ -203,6 +205,14 @@ _COPY_SOURCE_SSE_C_PREFIX = "x-amz-copy-source-server-side-encryption-customer-"
 _STREAMING_PAYLOAD_PREFIX = "STREAMING-"
 _DECODED_LENGTH_HEADER = DECODED_LENGTH_HEADER
 
+# Bucket owner condition (S3 User Guide, "Verifying bucket ownership with bucket owner
+# condition"). x-amz-expected-bucket-owner names the owner of the target bucket (the
+# destination, on CopyObject and UploadPartCopy); x-amz-source-expected-bucket-owner
+# names the source bucket's owner and exists on those two operations only. CreateBucket
+# and ListBuckets ignore both. A value that differs from S3_OWNER_ID is AccessDenied.
+EXPECTED_OWNER_HEADER = "x-amz-expected-bucket-owner"
+SOURCE_EXPECTED_OWNER_HEADER = "x-amz-source-expected-bucket-owner"
+
 # Bucket names S3's naming rules forbid and that would read as path segments.
 _DOT_SEGMENTS = frozenset({".", ".."})
 
@@ -256,6 +266,43 @@ def _check_new_object_tags(headers) -> None:
     """Refuse a PutObject or CreateMultipartUpload that asks for tags."""
     if any(v.strip() for v in headers.getlist(_TAGGING)):
         raise NotImplementedOperation(extra={"Header": _TAGGING})
+
+
+def _takes_owner_condition(method: str, key: str, query_keys: set[str]) -> bool:
+    """True for the 17 operations that define x-amz-expected-bucket-owner. The caller
+    has already refused everything Litmus does not implement, so a GET or HEAD that
+    reaches here is a read, and the other methods are matched by their exact query.
+    CreateBucket (PUT /{bucket} with no key and no query) and anything else, such as an
+    unknown method, is not one of them."""
+    query_keys = query_keys - _IGNORED
+    if method in ("GET", "HEAD"):
+        return True
+    if key:
+        return query_keys in _ALLOWED_MUTATING_OBJECT.get(method, [])
+    if method == "PUT":  # CreateBucket
+        return False
+    return query_keys in _ALLOWED_MUTATING_BUCKET.get(method, [])
+
+
+def _owner_mismatch(headers, name: str) -> bool:
+    """A present, non-blank header whose stripped value is not S3_OWNER_ID. The
+    comparison is exact: case sensitive, and the value is not validated as an account
+    ID. An empty or whitespace-only value counts as absent."""
+    value = ", ".join(headers.getlist(name)).strip()
+    return bool(value) and value != settings.owner_id
+
+
+def _check_expected_owner(method: str, key: str, query_keys: set[str], headers) -> None:
+    if not _takes_owner_condition(method, key, query_keys):
+        return
+    if _owner_mismatch(headers, EXPECTED_OWNER_HEADER):
+        raise AccessDenied
+    if (
+        method == "PUT"
+        and COPY_SOURCE_HEADER in headers
+        and _owner_mismatch(headers, SOURCE_EXPECTED_OWNER_HEADER)
+    ):
+        raise AccessDenied
 
 
 def _check(method: str, path: str, query, headers) -> None:
@@ -348,6 +395,9 @@ def _check(method: str, path: str, query, headers) -> None:
         raise NotImplementedOperation(
             extra={"Method": method, "QueryParameters": ",".join(sorted(query_keys))}
         )
+
+    # Last, so every 501 above beats it. Still before routing, so before any body read.
+    _check_expected_owner(method, key, query_keys, headers)
 
 
 async def reject_unimplemented(request: Request, call_next):

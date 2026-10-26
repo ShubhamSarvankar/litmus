@@ -121,6 +121,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | UploadPartCopy | 330 | 508 | 199 | A PUT with `x-amz-copy-source`, `partNumber` and `uploadId` copies a range of the source's bytes into a new part blob and records it like UploadPart (see "UploadPartCopy" under Known gaps). A `versionId` other than `null`, an ARN source and the `x-amz-copy-source-server-side-encryption-customer-*` headers (on this and on CopyObject) are 501. 6 passes gained, as forecast, test by test: `test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`. The results file differs from the previous one in those 6 lines only (12 lines, 6 out and 6 in), and the denominator stays 330. All 6 are genuine (26 incidental and 18 borderline stay, so 155 genuine): each failed before with 501, and the two that expect an error (`_invalid_range`, `_improper_range`) pass only because the range is parsed and checked against the source's size. Still failing, as forecast: `test_multipart_copy_versioned` (it enables versioning first, 501). `test_upload_part_copy_percent_encoded_key` still passes, now with 404 NoSuchKey (its copy source names `anyfilename%25.txt`, which decodes once to the key `anyfilename%.txt`, and there is none) instead of 501, and stays in the incidental list because a server that answers 501 passes it too. The CLI's copy of an object above its multipart threshold still fails, at GetObjectTagging (501), before it sends an UploadPartCopy. Recorded at the commit that adds UploadPartCopy. |
 | Refuse `x-amz-tagging` | 330 | 508 | 199 | PutObject and CreateMultipartUpload answer 501 to a non-empty `x-amz-tagging` instead of dropping it (see "`x-amz-tagging` on PutObject and CreateMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends the header, because the filter deselects every test marked `tagging` and the lifecycle and policy tests that set tags. The results file is identical to the previous one. Recorded at the commit that adds the refusal. |
 | GetObjectTagging, always empty | 330 | 508 | 199 | `GET /{bucket}/{key}?tagging` answers 200 with an empty TagSet (see "GetObjectTagging" under Known gaps). It is an answer from a store that holds no tags, not tagging support: PUT and DELETE `?tagging` and every bucket tagging request stay 501. No outcome changed, and none was expected to: no selected test calls `get_object_tagging`, `put_object_tagging` or `delete_object_tagging` or sends `?tagging` (checked by parsing every function in `test_s3.py` for those calls; the 13 selected tests that reach `_multipart_upload`, whose `tagging` parameter they never pass, are the only other matches), because the filter deselects the tests whose names say tagging. The results file is identical to the previous one. The AWS CLI's s3 to s3 copy of a 40 MiB object now succeeds (see "AWS CLI"). |
+| Bucket owner condition | 330 | 508 | 199 | `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are compared with `S3_OWNER_ID` in the request guard; a mismatch is 403 AccessDenied (see "Bucket owner condition" under Known gaps). No outcome changed: the only selected test that sends the header, `test_expected_bucket_owner`, fails first at `put_bucket_acl`, which is 501. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -956,7 +957,8 @@ rest on the ceph tests or on nothing documented.
   a mismatch is 500 and nothing is stored. A multipart source is checked by size only.
   A source whose file is missing with its row unchanged, or has another size, is 500.
 - *Not honored, as for PutObject:* the ACL, storage class, SSE, object lock and checksum
-  headers of the request, and the expected bucket owner headers are ignored. The
+  headers of the request are ignored (the expected bucket owner headers are evaluated,
+  see "Bucket owner condition"). The
   `x-amz-copy-source-server-side-encryption-customer-algorithm`, `-key` and `-key-MD5`
   headers are 501 NotImplemented, here and on UploadPartCopy: Litmus stores nothing
   encrypted, and a key supplied for the source asks for something it cannot do (until
@@ -1029,8 +1031,8 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   aborted or completed before the part commit is 404 NoSuchUpload and the new blob is
   discarded.
 - *Not honored:* `x-amz-copy-source-server-side-encryption-customer-*` is 501 (above); the
-  SSE-C headers for the destination, the request payer and expected owner headers are
-  ignored, as for UploadPart.
+  SSE-C headers for the destination and the request payer header are ignored, as for
+  UploadPart. The expected owner headers are evaluated (see "Bucket owner condition").
 - *The AWS CLI.* An `aws s3 cp` between two keys above the multipart threshold copies in
   parts, and before the first part it calls GetObjectTagging on the source, which Litmus
   answers with an empty TagSet (see "GetObjectTagging" below). The copy succeeds.
@@ -1083,8 +1085,92 @@ nothing about an object with no tags or how an empty `TagSet` is written, and li
 conditional headers (all not found), so the empty element above is Litmus's reading of a
 `TagSet` array with no members. The bucket is checked first (404 NoSuchBucket), then the
 key (404 NoSuchKey). `versionId` is handled as for GetObject: `null` names the current
-object and any other value is 501. As for GetObject, `x-amz-expected-bucket-owner` and
-`x-amz-request-payer` are not evaluated, and no `x-amz-version-id` is sent.
+object and any other value is 501. As for GetObject, `x-amz-request-payer` is not
+evaluated, and no `x-amz-version-id` is sent. `x-amz-expected-bucket-owner` is evaluated,
+as for every object operation (see "Bucket owner condition").
+
+**Bucket owner condition.** `x-amz-expected-bucket-owner` is evaluated on the 17
+operations whose API reference pages define it: HeadBucket, DeleteBucket, ListObjects,
+ListObjectsV2, ListObjectVersions, PutObject, GetObject, HeadObject, DeleteObject,
+DeleteObjects, GetObjectTagging, CreateMultipartUpload, UploadPart, UploadPartCopy,
+CompleteMultipartUpload, AbortMultipartUpload and CopyObject. On CopyObject and
+UploadPartCopy it names the destination bucket's owner, and
+`x-amz-source-expected-bucket-owner` names the source bucket's owner; those are the only
+two operations that read the source header. A value that differs from `S3_OWNER_ID` is
+403 AccessDenied, "Access Denied", in the standard error body. The check is in the request
+guard, the last step, so it follows the bucket name check and every 501 refusal, and it
+runs before the handler and before the body is read. Documented: S3 User Guide,
+"Verifying bucket ownership with bucket owner condition" ("If the parameter doesn't match
+the bucket owner's account ID, the request fails with an `Access Denied` error message";
+for CopyObject the first parameter is the destination bucket's and a second is the
+source bucket's; "Bucket owner condition isn't available for CreateBucket, ListBuckets
+... Amazon S3 ignores any bucket owner condition parameters included with requests to
+these operations"), and each operation's API reference page ("the request fails with the
+HTTP status code `403 Forbidden` (access denied)", PutObject, `x-amz-expected-bucket-owner`).
+The S3 API reference page "Error" (`API_Error`, its `Code` element, the list of error
+codes) gives AccessDenied the description "Access Denied" and the HTTP status 403 Forbidden;
+Litmus sends that code, message and status.
+
+The choices that the pages leave open:
+
+- *Comparison.* The value, with surrounding whitespace stripped, is compared with
+  `S3_OWNER_ID` exactly: case sensitive. The User Guide page says the value must be an
+  AWS account ID (12 digits); Litmus has one identity, `S3_OWNER_ID`, which also serves as
+  the canonical owner ID in `Owner` elements, and AWS keeps those two apart. A client that
+  sends the configured owner ID matches, whatever it looks like.
+- *No format validation.* A value that is not 12 digits is a mismatch like any other. What
+  AWS does with a malformed value is not found.
+- *Order.* A mismatch is 403 before NoSuchBucket, NoSuchKey and NoSuchUpload, and loses
+  to every 501 and to an invalid bucket name. The pages do not say which of the checks AWS
+  runs first (not found).
+- *Empty is absent.* An empty or whitespace only value is treated as no header. AWS's
+  handling of an empty value is not found.
+- *Destination before source.* When both headers are present on a copy and both
+  mismatch, the destination header is checked first. The response is the same either way.
+- *Source header elsewhere.* `x-amz-source-expected-bucket-owner` on any operation other
+  than CopyObject and UploadPartCopy is ignored: only those two pages define it.
+- *ListBuckets and CreateBucket* ignore both headers, as the User Guide page says. So
+  does `/health`.
+- *Selection.* The guard picks the operations by method, whether there is a key, and
+  the query: CreateBucket is `PUT /{bucket}` or `PUT /{bucket}/` with no query (`x-id` is
+  ignored throughout the guard), and every other request that reaches the end of the guard
+  and is one of the 17 is checked. A method no route accepts is not checked, so it still
+  gets 405.
+
+`test_expected_bucket_owner` still fails: it calls put_bucket_acl first, which is 501, so
+it never reaches a request that carries the header.
+
+**Request headers Litmus still ignores.** A header Litmus does not read has no effect, and
+the request succeeds as if it were absent. Where this file already says so, the entry
+points there instead of repeating it.
+
+Ignored, where a client can observe the difference:
+
+- `x-amz-acl` and the `x-amz-grant-*` headers on PutObject, CreateMultipartUpload,
+  CopyObject and CreateBucket (see "Anonymous and ACL-based access" under Results by
+  category, and "`x-amz-tagging` on PutObject and CreateMultipartUpload").
+- The SSE and KMS headers on PutObject, CreateMultipartUpload and CopyObject.
+- The SSE-C headers on PutObject, CreateMultipartUpload, UploadPart, and the destination
+  of CopyObject and UploadPartCopy (the source side is 501, see "CopyObject").
+- `x-amz-storage-class`, `x-amz-website-redirect-location` and the six Object Lock
+  headers on PutObject, CreateMultipartUpload and CopyObject.
+- `x-amz-bucket-object-lock-enabled`, `x-amz-object-ownership` and `x-amz-bucket-namespace`
+  on CreateBucket.
+- `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` on
+  CreateMultipartUpload and CopyObject; `x-amz-checksum-type` on CreateMultipartUpload and
+  CompleteMultipartUpload; the `x-amz-checksum-*` headers and `x-amz-mp-object-size` on
+  CompleteMultipartUpload (see "Checksums", Not done).
+- The SSE-C headers on GetObject, HeadObject and CompleteMultipartUpload, and `x-amz-mfa`
+  on DeleteObject and DeleteObjects, where the effect is unclear.
+- A satisfiable `Range` on HeadObject, which does not narrow `Content-Length`.
+
+Ignored with no observable effect: `x-amz-request-payer`, `x-amz-bypass-governance-retention`,
+`x-amz-object-annotation-directive` and `x-amz-optional-object-attributes`.
+
+**UploadPart, CompleteMultipartUpload and AbortMultipartUpload never check that the
+bucket exists.** They look up the upload, so a request for a missing bucket gets 404
+NoSuchUpload, not NoSuchBucket. Under a wrong owner header it is 403, as for every
+operation that takes the header.
 
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The

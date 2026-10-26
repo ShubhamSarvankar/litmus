@@ -21,6 +21,7 @@ from botocore.config import Config
 from fastapi.testclient import TestClient
 
 from server.app import create_app
+from server.config import settings
 from server.metadata.sqlite import SQLiteMetadataStore
 from server.storage.blobs import BlobStore
 
@@ -256,7 +257,7 @@ def test_headers_that_shape_get_object_do_not_apply(client):
         {"If-Match": '"nope"'},
         {"If-Modified-Since": "Wed, 01 Jan 2100 00:00:00 GMT"},
         {"If-Unmodified-Since": "Wed, 01 Jan 2000 00:00:00 GMT"},
-        {"x-amz-expected-bucket-owner": "someone-else", "x-amz-request-payer": "requester"},
+        {"x-amz-expected-bucket-owner": settings.owner_id, "x-amz-request-payer": "requester"},
     ):
         _assert_empty(_tagging(client, headers=headers))
 
