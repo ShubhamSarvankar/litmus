@@ -122,6 +122,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Refuse `x-amz-tagging` | 330 | 508 | 199 | PutObject and CreateMultipartUpload answer 501 to a non-empty `x-amz-tagging` instead of dropping it (see "`x-amz-tagging` on PutObject and CreateMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends the header, because the filter deselects every test marked `tagging` and the lifecycle and policy tests that set tags. The results file is identical to the previous one. Recorded at the commit that adds the refusal. |
 | GetObjectTagging, always empty | 330 | 508 | 199 | `GET /{bucket}/{key}?tagging` answers 200 with an empty TagSet (see "GetObjectTagging" under Known gaps). It is an answer from a store that holds no tags, not tagging support: PUT and DELETE `?tagging` and every bucket tagging request stay 501. No outcome changed, and none was expected to: no selected test calls `get_object_tagging`, `put_object_tagging` or `delete_object_tagging` or sends `?tagging` (checked by parsing every function in `test_s3.py` for those calls; the 13 selected tests that reach `_multipart_upload`, whose `tagging` parameter they never pass, are the only other matches), because the filter deselects the tests whose names say tagging. The results file is identical to the previous one. The AWS CLI's s3 to s3 copy of a 40 MiB object now succeeds (see "AWS CLI"). |
 | Bucket owner condition | 330 | 508 | 199 | `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are compared with `S3_OWNER_ID` in the request guard; a mismatch is 403 AccessDenied (see "Bucket owner condition" under Known gaps). No outcome changed: the only selected test that sends the header, `test_expected_bucket_owner`, fails first at `put_bucket_acl`, which is 501. |
+| Refuse unsupported feature headers | 330 | 508 | 199 | Server-side encryption, SSE-C, website redirect, Object Lock and storage class headers on PutObject, CreateMultipartUpload, CopyObject, UploadPart and UploadPartCopy, and `x-amz-bucket-object-lock-enabled` and `x-amz-bucket-namespace` on CreateBucket, answer 501 instead of being dropped (see "Feature headers Litmus refuses" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of them, and the results file is identical to the previous one. The 11 selected tests whose source mentions a storage class are the five GetObjectAttributes tests, which ask for `StorageClass` in `ObjectAttributes` (not the header; the operation is 501), and the six skipped cloud tests, which skip before sending anything. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -949,16 +950,18 @@ rest on the ceph tests or on nothing documented.
   and nothing changes (ceph's `test_object_copy_to_itself`; the code is not in the pages
   read). With REPLACE it is the ordinary byte copy: a new blob with the same bytes, the
   request's headers, a new Last-Modified, and the old blob garbage. AWS also accepts a
-  self-copy that changes a storage class, encryption or a website redirect; Litmus does
-  not honor those, so REPLACE is its only change. A metadata-only commit that keeps the
+  self-copy that changes a storage class, encryption or a website redirect; Litmus
+  refuses those headers (501, see "Feature headers Litmus refuses"), so REPLACE is its only
+  change. A metadata-only commit that keeps the
   blob is a possible later optimization.
 - *What is checked.* Before the copy is made durable its size is compared with the
   source row's and, for a source not assembled from parts, its MD5 with the row's ETag;
   a mismatch is 500 and nothing is stored. A multipart source is checked by size only.
   A source whose file is missing with its row unchanged, or has another size, is 500.
-- *Not honored, as for PutObject:* the ACL, storage class, SSE, object lock and checksum
-  headers of the request are ignored (the expected bucket owner headers are evaluated,
-  see "Bucket owner condition"). The
+- *Not honored, as for PutObject:* the ACL and checksum headers of the request are
+  ignored (the expected bucket owner headers are evaluated, see "Bucket owner condition").
+  The storage class, SSE, SSE-C (destination), website redirect and Object Lock headers are
+  501 (see "Feature headers Litmus refuses"). The
   `x-amz-copy-source-server-side-encryption-customer-algorithm`, `-key` and `-key-MD5`
   headers are 501 NotImplemented, here and on UploadPartCopy: Litmus stores nothing
   encrypted, and a key supplied for the source asks for something it cannot do (until
@@ -1030,9 +1033,9 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   it then is, with the conditions and the range decided again on that row. An upload
   aborted or completed before the part commit is 404 NoSuchUpload and the new blob is
   discarded.
-- *Not honored:* `x-amz-copy-source-server-side-encryption-customer-*` is 501 (above); the
-  SSE-C headers for the destination and the request payer header are ignored, as for
-  UploadPart. The expected owner headers are evaluated (see "Bucket owner condition").
+- *Not honored:* `x-amz-copy-source-server-side-encryption-customer-*` is 501 (above), and
+  so are the SSE-C headers for the destination (see "Feature headers Litmus refuses"); the
+  request payer header is ignored, as for UploadPart. The expected owner headers are evaluated (see "Bucket owner condition").
 - *The AWS CLI.* An `aws s3 cp` between two keys above the multipart threshold copies in
   parts, and before the first part it calls GetObjectTagging on the source, which Litmus
   answers with an empty TagSet (see "GetObjectTagging" below). The copy succeeds.
@@ -1055,8 +1058,7 @@ header on UploadPart and UploadPartCopy, which take none, is not read. A PUT wit
 ("If you choose `COPY` for the `x-amz-tagging-directive`, you don't need to set the
 `x-amz-tagging` header, because the tag-set will be copied from the source object
 directly", CopyObject, `x-amz-tagging`), so the header is accepted and not read. What AWS
-does with a non-empty value there is not found. `x-amz-acl`, the storage class and the SSE
-headers are still ignored by PutObject.
+does with a non-empty value there is not found. `x-amz-acl` is still ignored by PutObject.
 
 **GetObjectTagging.** `GET /{bucket}/{key}?tagging` answers 200 with an empty tag set:
 
@@ -1140,6 +1142,54 @@ The choices that the pages leave open:
 `test_expected_bucket_owner` still fails: it calls put_bucket_acl first, which is 501, so
 it never reaches a request that carries the header.
 
+**Feature headers Litmus refuses.** Litmus stores plaintext, has no Object Lock, no
+website hosting and one storage class, so a request for any of those used to succeed
+without doing what it asked. These headers are now 501 NotImplemented ("A header you
+provided implies functionality that is not implemented", HTTP 501; S3 API reference, page
+"Error", `Code` NotImplemented), decided in the request guard before any body byte is
+read, so no blob, temp file, metadata row, upload, part or bucket is created and an
+existing object is unchanged. The response names the header in a `Header` element. The
+refusals sit with the guard's other 501s, so the owner check stays the last step: a
+refused header with a wrong `x-amz-expected-bucket-owner` is 501, not 403. A value that is
+empty after stripping whitespace counts as absent (the pages say nothing about an empty
+value, not found). Nothing here adds a write path.
+
+- PutObject, CreateMultipartUpload and CopyObject (the destination), any non-empty value
+  of `x-amz-server-side-encryption`, `x-amz-server-side-encryption-aws-kms-key-id`,
+  `x-amz-server-side-encryption-context`, `x-amz-server-side-encryption-bucket-key-enabled`,
+  `x-amz-website-redirect-location` and the six Object Lock headers `x-amz-object-lock-mode`,
+  `-retain-until-date`, `-legal-hold`, `-event-hold`, `-event-hold-duration-days` and
+  `-event-hold-duration-years`. The three pages define the same headers (S3 API
+  reference, PutObject, CreateMultipartUpload and CopyObject, "Request Syntax").
+- PutObject, CreateMultipartUpload, UploadPart, and the destination side of CopyObject and
+  UploadPartCopy, any non-empty value of `x-amz-server-side-encryption-customer-algorithm`,
+  `-customer-key` and `-customer-key-MD5` (S3 API reference, UploadPart and UploadPartCopy,
+  which define them for the destination). The source side,
+  `x-amz-copy-source-server-side-encryption-customer-*`, was already 501.
+- PutObject, CreateMultipartUpload and CopyObject, `x-amz-storage-class` unless the value
+  is exactly `STANDARD`. The pages list `STANDARD | REDUCED_REDUNDANCY | STANDARD_IA |
+  ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | DEEP_ARCHIVE | OUTPOSTS | GLACIER_IR | SNOW |
+  EXPRESS_ONEZONE | FSX_OPENZFS | FSX_ONTAP | AWS_BACKUP_WARM | AWS_BACKUP_LOW_COST_WARM`
+  and say "By default, Amazon S3 uses the STANDARD Storage Class to store newly created
+  objects", so naming STANDARD asks for what Litmus does. Every other value is refused,
+  including a lowercase `standard`.
+- CreateBucket, `x-amz-bucket-object-lock-enabled` unless the value is `false`, compared
+  case insensitively, and `x-amz-bucket-namespace` unless the value is `global`, compared
+  exactly. The CreateBucket page gives the namespace the valid values `account-regional |
+  global`, and gives `x-amz-bucket-object-lock-enabled` no valid values at all, so what S3
+  does with a value other than `true` and `false` is not found; Litmus refuses it.
+
+The choices that the pages leave open: a header repeated in one request is refused if any
+of its non-blank values is refused. The value is compared after stripping surrounding
+whitespace, so ` STANDARD ` is accepted. The case of `x-amz-bucket-namespace` is exact
+because the page lists its values as an enumeration. UploadPart and UploadPartCopy ignore
+the encryption, redirect, storage class and Object Lock headers: their pages do not
+define them (encryption is set when the upload is created). The pages also define the
+SSE-C headers on GetObject, HeadObject, CompleteMultipartUpload and others, and
+`x-amz-server-side-encryption` on CreateSession; those operations are unchanged (see the
+list below). `x-amz-object-ownership`, the ACL and grant headers and the checksum headers
+are not decided here.
+
 **Request headers Litmus still ignores.** A header Litmus does not read has no effect, and
 the request succeeds as if it were absent. Where this file already says so, the entry
 points there instead of repeating it.
@@ -1149,13 +1199,7 @@ Ignored, where a client can observe the difference:
 - `x-amz-acl` and the `x-amz-grant-*` headers on PutObject, CreateMultipartUpload,
   CopyObject and CreateBucket (see "Anonymous and ACL-based access" under Results by
   category, and "`x-amz-tagging` on PutObject and CreateMultipartUpload").
-- The SSE and KMS headers on PutObject, CreateMultipartUpload and CopyObject.
-- The SSE-C headers on PutObject, CreateMultipartUpload, UploadPart, and the destination
-  of CopyObject and UploadPartCopy (the source side is 501, see "CopyObject").
-- `x-amz-storage-class`, `x-amz-website-redirect-location` and the six Object Lock
-  headers on PutObject, CreateMultipartUpload and CopyObject.
-- `x-amz-bucket-object-lock-enabled`, `x-amz-object-ownership` and `x-amz-bucket-namespace`
-  on CreateBucket.
+- `x-amz-object-ownership` on CreateBucket.
 - `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` on
   CreateMultipartUpload and CopyObject; `x-amz-checksum-type` on CreateMultipartUpload and
   CompleteMultipartUpload; the `x-amz-checksum-*` headers and `x-amz-mp-object-size` on

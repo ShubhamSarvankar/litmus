@@ -185,6 +185,51 @@ _UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
 # which decides the header with its directive (_check_copy_object); UploadPart and
 # UploadPartCopy take no such header.
 
+# Features Litmus does not have, asked for by request header. It stores plaintext, has no
+# Object Lock, no website hosting and one storage class, so honoring none of these would
+# succeed without doing what the client asked; each is refused, unparsed, with 501. A
+# value that is empty after stripping whitespace counts as absent. The header lists are
+# the S3 API reference's: PutObject, CreateMultipartUpload and CopyObject define the same
+# SSE, website redirect, storage class and Object Lock headers (the PutObject page lists
+# six Object Lock headers, three of them the event hold ones); UploadPart and
+# UploadPartCopy define the SSE-C headers for the destination only. The CopyObject and
+# UploadPartCopy source side (x-amz-copy-source-server-side-encryption-customer-*) is
+# refused above. x-amz-object-ownership, the ACL and grant headers and the checksum
+# headers are not decided here.
+_NEW_OBJECT_FEATURE_HEADERS = (
+    "x-amz-server-side-encryption",
+    "x-amz-server-side-encryption-aws-kms-key-id",
+    "x-amz-server-side-encryption-context",
+    "x-amz-server-side-encryption-bucket-key-enabled",
+    "x-amz-website-redirect-location",
+    "x-amz-object-lock-mode",
+    "x-amz-object-lock-retain-until-date",
+    "x-amz-object-lock-legal-hold",
+    "x-amz-object-lock-event-hold",
+    "x-amz-object-lock-event-hold-duration-days",
+    "x-amz-object-lock-event-hold-duration-years",
+)
+_SSE_C_HEADERS = (
+    "x-amz-server-side-encryption-customer-algorithm",
+    "x-amz-server-side-encryption-customer-key",
+    "x-amz-server-side-encryption-customer-key-md5",
+)
+
+# Litmus has one storage class. Only STANDARD, exactly, is accepted: STANDARD is what S3
+# stores when the header is absent, so naming it asks for nothing Litmus lacks. The
+# other values the API reference lists (STANDARD_IA, GLACIER, ...) and any value it does
+# not, including a lowercase "standard", are refused.
+_STORAGE_CLASS_HEADER = "x-amz-storage-class"
+_ACCEPTED_STORAGE_CLASS = "STANDARD"
+
+# CreateBucket. x-amz-bucket-object-lock-enabled: false asks for no Object Lock, so it is
+# accepted, compared case insensitively; anything else is refused. The API reference
+# gives no valid values for it, so what S3 does with a value other than true and false
+# is not found. x-amz-bucket-namespace: the reference gives "account-regional | global";
+# global is the namespace Litmus has, compared exactly, and anything else is refused.
+_OBJECT_LOCK_ENABLED_HEADER = "x-amz-bucket-object-lock-enabled"
+_BUCKET_NAMESPACE_HEADER = "x-amz-bucket-namespace"
+
 # The SSE-C headers that unlock a source encrypted with a customer-provided key, on
 # CopyObject and UploadPartCopy. Litmus stores nothing encrypted, so a request that
 # supplies a key for the source asks for something it cannot do; ignoring the headers
@@ -268,6 +313,39 @@ def _check_new_object_tags(headers) -> None:
         raise NotImplementedOperation(extra={"Header": _TAGGING})
 
 
+def _refuse_value(headers, name: str, accepts) -> None:
+    """Refuse the request if any non-blank value of the header fails accepts(stripped)."""
+    for value in headers.getlist(name):
+        value = value.strip()
+        if value and not accepts(value):
+            raise NotImplementedOperation(extra={"Header": name})
+
+
+def _refuse_present(headers, names) -> None:
+    for name in names:
+        _refuse_value(headers, name, lambda _: False)
+
+
+def _check_object_feature_headers(method: str, query_keys: set[str], headers) -> None:
+    """Refuse the encryption, website redirect, storage class and Object Lock headers on
+    the operations that define them. query_keys has "x-id" removed. PutObject and
+    CopyObject are a PUT with no query (CopyObject has x-amz-copy-source), and
+    CreateMultipartUpload is a POST ?uploads; those take every header. UploadPart and
+    UploadPartCopy take only the SSE-C headers. Anything else is not decided here."""
+    if (method == "PUT" and not query_keys) or (method == "POST" and query_keys == {"uploads"}):
+        _refuse_present(headers, _NEW_OBJECT_FEATURE_HEADERS)
+        _refuse_value(headers, _STORAGE_CLASS_HEADER, lambda v: v == _ACCEPTED_STORAGE_CLASS)
+    elif not (method == "PUT" and query_keys == _UPLOAD_PART_QUERY):
+        return
+    _refuse_present(headers, _SSE_C_HEADERS)
+
+
+def _check_create_bucket_headers(headers) -> None:
+    """Refuse a CreateBucket that asks for Object Lock or a namespace Litmus lacks."""
+    _refuse_value(headers, _OBJECT_LOCK_ENABLED_HEADER, lambda v: v.lower() == "false")
+    _refuse_value(headers, _BUCKET_NAMESPACE_HEADER, lambda v: v == "global")
+
+
 def _takes_owner_condition(method: str, key: str, query_keys: set[str]) -> bool:
     """True for the 17 operations that define x-amz-expected-bucket-owner. The caller
     has already refused everything Litmus does not implement, so a GET or HEAD that
@@ -348,6 +426,7 @@ def _check(method: str, path: str, query, headers) -> None:
             method == "POST" and (query_keys - _IGNORED) == {"uploads"}
         ):
             _check_new_object_tags(headers)
+        _check_object_feature_headers(method, query_keys - _IGNORED, headers)
         if method == "DELETE":
             conditional = (
                 CONDITIONAL_DELETE_HEADERS
@@ -368,6 +447,8 @@ def _check(method: str, path: str, query, headers) -> None:
                 raise NotImplementedOperation(extra={"Parameter": "versionId", "Method": method})
             query_keys.discard("versionId")
     else:
+        if method == "PUT" and not (query_keys - _IGNORED):  # CreateBucket
+            _check_create_bucket_headers(headers)
         subresources, implemented, allowed = (
             BUCKET_SUBRESOURCES,
             _IMPLEMENTED_BUCKET,

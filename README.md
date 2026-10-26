@@ -39,24 +39,28 @@ parameters as follows.
 | Method | Path | Operation |
 |---|---|---|
 | GET | `/` | ListBuckets, with the configured `Owner` |
-| PUT | `/{bucket}` | CreateBucket |
+| PUT | `/{bucket}` | CreateBucket; `x-amz-bucket-object-lock-enabled` other than `false` and `x-amz-bucket-namespace` other than `global` are 501. |
 | HEAD | `/{bucket}` | HeadBucket |
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
 | GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 and V2 also apply `delimiter` and `max-keys`; V1 pages with `marker` and `NextMarker` and shows the configured `Owner` in each `Contents`; V2 pages with `continuation-token` or `start-after`, reports `KeyCount`, and shows `Owner` with `fetch-owner=true`. ListObjectVersions applies `delimiter` and `max-keys`, pages with `key-marker` and `version-id-marker`, and lists each object once as version `null` with the configured `Owner`. All three accept `encoding-type=url`. |
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
-| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
+| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags, and so are server-side encryption, `x-amz-website-redirect-location`, Object Lock and a `x-amz-storage-class` other than `STANDARD`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | GET | `/{bucket}/{key}?tagging` | GetObjectTagging, answered with an empty `TagSet`: Litmus stores no tags, so that is always true. This is not tagging support. `versionId=null` is accepted; any other query parameter is 501. |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
-| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501. |
+| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match` |
 | GET | `/health` | Health check |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
 configuration, tagging (other than GetObjectTagging), ListParts, ListMultipartUploads, POST Object and others)
-get 501 NotImplemented before reaching a handler, and change nothing. `/{bucket}/`
+get 501 NotImplemented before reaching a handler, and change nothing. So do requests whose
+headers ask for a feature Litmus does not have: server-side encryption, SSE-C (also on
+UploadPart and UploadPartCopy), website redirects, Object Lock, a storage class other than
+`STANDARD`, and on CreateBucket Object Lock or an account regional namespace; the
+headers are refused before the body is read, not ignored. `/{bucket}/`
 (a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
 in the table. Keys are stored as the exact string the client sent.
 

@@ -1399,9 +1399,10 @@ Choices (AWS documents less than this; each is Litmus's own where it says so):
   it is the ordinary byte copy above (decision 19): a new blob with
   the same bytes, the new headers, a new Last-Modified, and the old blob garbage. AWS
   accepts a self-copy that changes a storage class, encryption or a website redirect
-  too; Litmus does not honor those headers, so REPLACE is its only change.
-- **Not honored, as for PutObject:** the ACL, storage class, SSE and checksum headers of
-  the request are ignored. The SSE-C headers for the source
+  too; Litmus refuses those headers (decision 24), so REPLACE is its only change.
+- **Not honored, as for PutObject:** the ACL and checksum headers of the request are
+  ignored; the storage class, SSE, website redirect and Object Lock headers are 501
+  (decision 24). The SSE-C headers for the source
   (`x-amz-copy-source-server-side-encryption-customer-*`) are not ignored: they are 501,
   here and on UploadPartCopy (§11, below).
 
@@ -2077,3 +2078,20 @@ Recorded with GetObjectTagging:
     canonical owner ID, which AWS keeps separate. The check reads nothing and writes
     nothing: no write path, blob or metadata, changed. Details and what AWS leaves
     unsaid: docs/compatibility.md, "Bucket owner condition".
+
+Recorded with the feature header refusals:
+
+24. **Feature headers Litmus does not have.** The request guard answers 501 NotImplemented,
+    before any body byte is read, to a non-empty (after stripping whitespace) value of
+    the SSE, SSE-KMS and bucket key headers, `x-amz-website-redirect-location` and the six
+    `x-amz-object-lock-*` headers on PutObject, CreateMultipartUpload and CopyObject; of
+    the three SSE-C headers on those, UploadPart and the destination side of
+    UploadPartCopy; of `x-amz-storage-class` unless it is exactly `STANDARD`; and, on
+    CreateBucket, of `x-amz-bucket-object-lock-enabled` unless it is `false` (any case)
+    and `x-amz-bucket-namespace` unless it is `global`. Litmus stores plaintext, has no
+    Object Lock or website hosting and one storage class, so honoring none of them would
+    succeed without doing what the client asked. The refusals sit with the other 501s,
+    so the owner check (decision 23) stays last. The guard reads headers only and
+    nothing else changed: no write path, blob or metadata. The ACL, grant, object
+    ownership and checksum headers are not decided here. Details and what AWS leaves
+    unsaid: docs/compatibility.md, "Feature headers Litmus refuses".
