@@ -98,6 +98,21 @@ class InvalidBucketName(S3Error):
     message = "The specified bucket is not valid."
 
 
+class AccessControlListNotSupported(S3Error):
+    # S3 User Guide, "Troubleshooting" (Object Ownership error responses). The code is not
+    # in the S3 API error code list.
+    status_code = 400
+    code = "AccessControlListNotSupported"
+    message = "The bucket does not allow ACLs"
+
+
+class InvalidBucketAclWithObjectOwnership(S3Error):
+    # Same page, same caveat: the message is the one it shows for this code.
+    status_code = 400
+    code = "InvalidBucketAclWithObjectOwnership"
+    message = "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting"
+
+
 class BadDigest(S3Error):
     status_code = 400
     code = "BadDigest"

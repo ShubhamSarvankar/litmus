@@ -21,6 +21,7 @@ since no key is ever part of a filesystem path (docs/design/storage-layout.md R1
 from fastapi import Request
 from fastapi.responses import Response
 
+from server.api.acl_headers import BUCKET_OWNER_ENFORCED, OBJECT_OWNERSHIP_HEADER
 from server.api.aws_chunked import (
     CONTENT_SHA256_HEADER,
     DECODED_LENGTH_HEADER,
@@ -194,8 +195,9 @@ _UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
 # six Object Lock headers, three of them the event hold ones); UploadPart and
 # UploadPartCopy define the SSE-C headers for the destination only. The CopyObject and
 # UploadPartCopy source side (x-amz-copy-source-server-side-encryption-customer-*) is
-# refused above. x-amz-object-ownership, the ACL and grant headers and the checksum
-# headers are not decided here.
+# refused above. The checksum headers are not decided here. The ACL and grant headers are
+# answered by the handlers (server/api/acl_headers.py), after the bucket lookup; on these
+# operations x-amz-object-ownership is not defined and is ignored.
 _NEW_OBJECT_FEATURE_HEADERS = (
     "x-amz-server-side-encryption",
     "x-amz-server-side-encryption-aws-kms-key-id",
@@ -227,6 +229,11 @@ _ACCEPTED_STORAGE_CLASS = "STANDARD"
 # gives no valid values for it, so what S3 does with a value other than true and false
 # is not found. x-amz-bucket-namespace: the reference gives "account-regional | global";
 # global is the namespace Litmus has, compared exactly, and anything else is refused.
+# x-amz-object-ownership: every bucket has BucketOwnerEnforced, the default for a new
+# bucket, so only that value, compared exactly, is accepted and the other values the
+# reference lists (BucketOwnerPreferred, ObjectWriter) and any value it does not are
+# refused. The CreateBucket ACL and grant headers are the handler's
+# (server/api/acl_headers.py), after the name is validated.
 _OBJECT_LOCK_ENABLED_HEADER = "x-amz-bucket-object-lock-enabled"
 _BUCKET_NAMESPACE_HEADER = "x-amz-bucket-namespace"
 
@@ -341,9 +348,11 @@ def _check_object_feature_headers(method: str, query_keys: set[str], headers) ->
 
 
 def _check_create_bucket_headers(headers) -> None:
-    """Refuse a CreateBucket that asks for Object Lock or a namespace Litmus lacks."""
+    """Refuse a CreateBucket that asks for Object Lock, a namespace or an Object Ownership
+    setting Litmus lacks."""
     _refuse_value(headers, _OBJECT_LOCK_ENABLED_HEADER, lambda v: v.lower() == "false")
     _refuse_value(headers, _BUCKET_NAMESPACE_HEADER, lambda v: v == "global")
+    _refuse_value(headers, OBJECT_OWNERSHIP_HEADER, lambda v: v == BUCKET_OWNER_ENFORCED)
 
 
 def _takes_owner_condition(method: str, key: str, query_keys: set[str]) -> bool:

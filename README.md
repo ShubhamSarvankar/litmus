@@ -59,8 +59,14 @@ configuration, tagging (other than GetObjectTagging), ListParts, ListMultipartUp
 get 501 NotImplemented before reaching a handler, and change nothing. So do requests whose
 headers ask for a feature Litmus does not have: server-side encryption, SSE-C (also on
 UploadPart and UploadPartCopy), website redirects, Object Lock, a storage class other than
-`STANDARD`, and on CreateBucket Object Lock or an account regional namespace; the
-headers are refused before the body is read, not ignored. `/{bucket}/`
+`STANDARD`, and on CreateBucket Object Lock, an account regional namespace or an Object
+Ownership setting other than `BucketOwnerEnforced`; the headers are refused before the
+body is read, not ignored. ACLs are disabled, as on a bucket with Object Ownership set
+to `BucketOwnerEnforced`, the default for a new bucket: PutObject, CreateMultipartUpload
+and CopyObject accept an absent `x-amz-acl`, `private` or `bucket-owner-full-control`, and
+answer 400 AccessControlListNotSupported to any other ACL or any `x-amz-grant-*` header;
+CreateBucket answers 400 InvalidBucketAclWithObjectOwnership to an ACL other than
+`private` or any grant header. `/{bucket}/`
 (a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
 in the table. Keys are stored as the exact string the client sent.
 

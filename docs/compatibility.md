@@ -57,7 +57,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**199 passed, 124 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**194 passed, 129 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -77,7 +77,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`), and UploadPartCopy moved 6 more (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`), and UploadPartCopy moved 6 more (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`). Disabling ACLs moved 5 from passed to failed, on purpose (`test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`: they create a bucket or put an object with a public ACL, which AWS refuses on a bucket with the default Object Ownership setting). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -108,7 +108,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | RFC 9110 Range handling | 330 | 508 | 155 | A range whose last byte is past the object is clamped and served as 206; a Range that does not parse, a unit other than `bytes`, and a set of ranges are ignored (200, whole object). No outcome changed, and none was expected to: the results file is identical to the previous one. Every Range in a selected GET test either ends inside the object or expects `bytes=40-50` to be 416, and the copy-range tests fail on 501. Recorded at the commit that adds the handling. |
 | System headers on PutObject | 330 | 508 | 158 | PutObject stores `Cache-Control`, `Content-Disposition`, `Content-Encoding` (without `aws-chunked`), `Content-Language` and `Expires`, and GET and HEAD return them. 3 passes gained: `test_object_write_cache_control`, `test_object_write_expires` and `test_object_content_encoding_aws_chunked`, as forecast; the results file differs from the previous one in those three lines only. Recorded at the commit that adds the storage. |
 | User metadata on PutObject | 330 | 508 | 161 | PutObject stores `x-amz-meta-*` and GET and HEAD return it, with RFC 2047 decoding on store and encoding on return and a 2048 byte limit (400 MetadataTooLarge). 3 passes gained: `test_object_set_get_metadata_none_to_good`, `_none_to_empty` and `_overwrite_to_empty`, as forecast; the results file differs from the previous one in those three lines only. `test_object_set_get_unicode_metadata` stays failing, as forecast: it fails on the RFC 2047 value Litmus returns, which botocore hands back undecoded. `test_object_metadata_replaced_on_put`, which passed because Litmus stored nothing, now passes because an overwrite replaces the metadata: against a copy of the server whose overwrite keeps the old metadata it fails, so it leaves the incidental list (27 to 26). Recorded at the commit that adds the storage. |
-| `response-*` overrides on GET and HEAD | 330 | 508 | 162 | `response-cache-control`, `-content-disposition`, `-content-encoding`, `-content-language`, `-content-type` and `-expires` set the response header on GET (200 and 206) and HEAD, and are never stored. 1 pass gained: `test_object_raw_response_headers`, as forecast: it asserts the five headers the overrides set, its setup (`ACL` on CreateBucket and PutObject) already passed, and it is the only selected test that sends a `response-*` parameter. No other outcome changed; the results file differs from the previous one in that line only. Recorded at the commit that adds the overrides. |
+| `response-*` overrides on GET and HEAD | 330 | 508 | 162 | `response-cache-control`, `-content-disposition`, `-content-encoding`, `-content-language`, `-content-type` and `-expires` set the response header on GET (200 and 206) and HEAD, and are never stored. 1 pass gained: `test_object_raw_response_headers`, as forecast: it asserts the five headers the overrides set, its setup (`ACL` on CreateBucket and PutObject, `private` for both, which is still accepted since the ACL headers are decided: see "ACL and grant headers") already passed, and it is the only selected test that sends a `response-*` parameter. No other outcome changed; the results file differs from the previous one in that line only. Recorded at the commit that adds the overrides. |
 | Multipart upload headers | 330 | 508 | 163 | CreateMultipartUpload stores `Content-Type`, the system headers and `x-amz-meta-*` with the upload and Complete gives them to the object, which is dated by the upload's initiation time. 1 pass gained: `test_multipart_upload_resend_part`, as forecast: it completes each upload once, checks the object's Content-Type and metadata, and fails today only on `binary/octet-stream == text/bla`. `test_multipart_upload` stays failing as forecast: it fails at its second Complete (`NoSuchUpload`) before it reaches its Content-Type assertion. No selected test reads Last-Modified of a multipart object. The results file differs from the previous one in that one line only. Recorded at the commit that adds the storage. |
 | Conditional GET and HEAD | 330 | 508 | 166 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD in RFC 9110 13.2.2 order; a 304 carries the ETag and the stored Cache-Control and Expires. 3 passes gained: `test_get_object_ifnonematch_good` (304), `test_get_object_ifmodifiedsince_failed` (304) and `test_get_object_ifunmodifiedsince_good` (412), as forecast; the results file differs from the previous one in those three lines only. The three passing conditional GET tests on the incidental list stay there: they pass on a copy of the server from before this change as well (26 stays 26). Recorded at the commit that adds the evaluation. |
 | `If-Range` on GET | 330 | 508 | 166 | A `Range` is applied when `If-Range` holds (strong entity tag, or a date equal to `Last-Modified` once the object is a second old) and ignored otherwise (200, whole object). No outcome changed, and none was expected to: no selected test sends `If-Range`; the results file is identical to the previous one. Recorded at the commit that adds the evaluation. |
@@ -123,6 +123,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | GetObjectTagging, always empty | 330 | 508 | 199 | `GET /{bucket}/{key}?tagging` answers 200 with an empty TagSet (see "GetObjectTagging" under Known gaps). It is an answer from a store that holds no tags, not tagging support: PUT and DELETE `?tagging` and every bucket tagging request stay 501. No outcome changed, and none was expected to: no selected test calls `get_object_tagging`, `put_object_tagging` or `delete_object_tagging` or sends `?tagging` (checked by parsing every function in `test_s3.py` for those calls; the 13 selected tests that reach `_multipart_upload`, whose `tagging` parameter they never pass, are the only other matches), because the filter deselects the tests whose names say tagging. The results file is identical to the previous one. The AWS CLI's s3 to s3 copy of a 40 MiB object now succeeds (see "AWS CLI"). |
 | Bucket owner condition | 330 | 508 | 199 | `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` are compared with `S3_OWNER_ID` in the request guard; a mismatch is 403 AccessDenied (see "Bucket owner condition" under Known gaps). No outcome changed: the only selected test that sends the header, `test_expected_bucket_owner`, fails first at `put_bucket_acl`, which is 501. |
 | Refuse unsupported feature headers | 330 | 508 | 199 | Server-side encryption, SSE-C, website redirect, Object Lock and storage class headers on PutObject, CreateMultipartUpload, CopyObject, UploadPart and UploadPartCopy, and `x-amz-bucket-object-lock-enabled` and `x-amz-bucket-namespace` on CreateBucket, answer 501 instead of being dropped (see "Feature headers Litmus refuses" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of them, and the results file is identical to the previous one. The 11 selected tests whose source mentions a storage class are the five GetObjectAttributes tests, which ask for `StorageClass` in `ObjectAttributes` (not the header; the operation is 501), and the six skipped cloud tests, which skip before sending anything. |
+| ACLs disabled | 330 | 508 | 194 | `x-amz-acl`, the `x-amz-grant-*` headers and `x-amz-object-ownership` are no longer accepted and dropped: Litmus behaves as a bucket with Object Ownership set to BucketOwnerEnforced (see "ACL and grant headers" under Known gaps). 5 passes lost, on purpose, exactly as forecast: `test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`, because CreateBucket with `public-read` or `public-read-write` is 400 InvalidBucketAclWithObjectOwnership. The results file differs from the previous one in those 5 lines only. `test_object_raw_response_headers` stays passed (`private` is accepted). The other ACL tests stay failed, some at an earlier step: `test_create_bucket_bucket_owner_preferred` and `test_create_bucket_object_writer` now fail at CreateBucket (501), where they failed at GetBucketOwnershipControls (501) before. Of the 5, `test_object_raw_get` and `test_object_anon_put_write_access` were incidental and the other three borderline, so the figures are 24 incidental, 15 borderline and 155 genuine (genuine unchanged). Recorded at the commit that adds the handling. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -141,8 +142,10 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **26 of the 199 passes are incidental**.
-Of the 199 passes, 26 are incidental and 18 are borderline, which leaves 155 genuine.
+is authenticated or owned. By that rule, **24 of the 194 passes are incidental**.
+Of the 194 passes, 24 are incidental and 15 are borderline, which leaves 155 genuine.
+Disabling ACLs took 2 incidental and 3 borderline passes off the lists (see "ACL and
+grant headers" under Known gaps): 26 and 18 before.
 
 The listing entries were reclassified after `delimiter`, paging and `encoding-type`
 were implemented, by running the listing tests (`-k test_bucket_list`, 84 tests, 76
@@ -208,13 +211,13 @@ delimiter is ignored, and they do not exercise delimiter support.
   `test_bucket_create_naming_good_long_60` to `_63` (4 tests),
   `test_bucket_create_naming_good_starts_alpha`,
   `test_bucket_create_naming_good_starts_digit`.
-- Ownership and authentication (3): `test_bucket_create_exists_nonowner` expects 409
-  BucketAlreadyExists for a second user, which Litmus answers to every user;
-  `test_object_anon_put_write_access` and `test_object_raw_get` set ACLs through the
-  `x-amz-acl` header, which Litmus ignores, and their anonymous requests succeed
-  because nothing is authenticated.
+- Ownership and authentication (1): `test_bucket_create_exists_nonowner` expects 409
+  BucketAlreadyExists for a second user, which Litmus answers to every user.
+  `test_object_anon_put_write_access` and `test_object_raw_get` were on this list while
+  the `x-amz-acl` header was ignored; they now fail, because Litmus refuses the public
+  ACL they set.
 
-Borderline, not counted above (18):
+Borderline, not counted above (15):
 
 - An empty or absent listing parameter, which S3 also treats as a no-op, so the
   expected result equals ignoring it, and the test passes with every parameter ignored
@@ -230,9 +233,10 @@ Borderline, not counted above (18):
   continuation-token entries are new to this list: they were never ignored, so they
   were not flagged before, but they meet the same definition. Without the prefix and
   marker entries the count is 12.
-- The ACLs are ignored and the requests are anonymous, but the asserted 404 error
-  codes are implemented (3): `test_object_raw_get_bucket_gone`,
-  `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone`.
+- Three tests were listed here while the ACLs were ignored (the requests are anonymous,
+  but the asserted 404 error codes are implemented): `test_object_raw_get_bucket_gone`,
+  `test_object_raw_get_object_gone` and `test_object_delete_key_bucket_gone`. They now
+  fail with the public ACL refused, so none is borderline any more.
 
 ## Results by category
 
@@ -243,7 +247,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 |---|---|---|---|---|---|
 | Bucket operations | 17 | 9 | 7 | 1 | Create, delete, head, list buckets, deleting a non-empty bucket refused, missing-bucket errors. Fail: re-creating a bucket you own expects success or BucketAlreadyOwnedByYou, and Litmus answers 409 BucketAlreadyExists (2 tests). That answer is deliberate: telling the owner apart needs authentication, which is out of scope; RGW-specific usage and statistics headers (3); ListBuckets ignores MaxBuckets and ContinuationToken (1); one test calls PutObjectAcl, which is 501 (1). |
 | Bucket naming | 18 | 16 | 2 | 0 | Valid names are accepted; names that break the AWS rules (length, characters, edges, adjacent periods, IP format, reserved prefixes and suffixes) get 400 InvalidBucketName. Fail: `test_bucket_create_naming_dns_dot_dash` (`foo.-bar`) and `test_bucket_create_naming_dns_dash_dot` (`foo-.bar`) expect 400, and AWS's current rules allow both names, so Litmus accepts them (see Known gaps). |
-| Object operations | 28 | 27 | 1 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, `Content-Encoding` with its `aws-chunked` token removed, the `response-*` header overrides on GET, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: a key that is not valid UTF-8 gets 404 instead of 400. |
+| Object operations | 28 | 23 | 5 | 0 | PutObject, GetObject, HeadObject, DeleteObject, ETags, overwrites, zero-byte objects, standard chunked transfer encoding, `Content-Encoding` with its `aws-chunked` token removed, the `response-*` header overrides on GET, the atomic read and write tests, and the request ID in an error body matching the `x-amz-request-id` header. Fail: a key that is not valid UTF-8 gets 404 instead of 400; `test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone` and `test_object_delete_key_bucket_gone` create a bucket with `public-read` through `x-amz-acl`, which Litmus refuses on purpose (400 InvalidBucketAclWithObjectOwnership: see "ACL and grant headers" under Known gaps); they also need anonymous access, which is out of scope. `test_object_raw_response_headers` still passes, because it sends `private`. |
 | User metadata and stored headers | 6 | 5 | 1 | 0 | `Cache-Control`, `Expires` and `x-amz-meta-*` are stored and returned (see "System headers" and "User metadata" under Known gaps). Fail: `test_object_set_get_unicode_metadata` expects a non-ASCII value back as the raw string, and Litmus returns it RFC 2047 encoded, as the AWS documentation describes (see "User metadata"). |
 | Conditional GET | 8 | 8 | 0 | 0 | `If-Match`, `If-None-Match`, `If-Modified-Since` and `If-Unmodified-Since` are evaluated on GET and HEAD. 3 of the 8 passes are incidental (see above): they pass with the headers ignored. |
 | Range GET | 6 | 6 | 0 | 0 | Single, open-ended and suffix ranges, a last byte past the end clamped; an unsatisfiable range, on an object with bytes or on an empty one, gets 416 `InvalidRange` with the standard error body. |
@@ -259,11 +263,11 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | Conditional delete | 18 | 1 | 17 | 0 | `If-Match` on DeleteObject is decided in the commit (see "Conditional DeleteObject" under Known gaps), but the one non-versioned test for it, `test_delete_object_if_match`, expects 204 on a missing key, which Litmus refuses on purpose (404 NoSuchKey, as AWS). The per key `ETag` of DeleteObjects is decided in the batch's commit (see "Conditional DeleteObjects" under Known gaps), and `test_delete_objects_if_match` passes. Fail: `x-amz-if-match-last-modified-time` and `x-amz-if-match-size` on DeleteObject and `LastModifiedTime` and `Size` in DeleteObjects are refused on purpose (501, or a per key NotImplemented); 12 of these tests enable versioning first, which is 501. |
 | CopyObject and UploadPartCopy | 27 | 22 | 5 | 0 | CopyObject: copies within and across buckets, of 0 bytes and 16 MiB, with COPY and REPLACE of the metadata and Content-Type, onto itself (400 InvalidRequest, or 200 with REPLACE), and with source conditions (`x-amz-copy-source-if-match` and `-if-none-match`). UploadPartCopy: whole and ranged part copies of 1 byte to 10 MiB, completed into objects whose bytes equal the source's (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`), a range past the end of the source (416 `InvalidRange`) and malformed ranges (400 `InvalidArgument`). Fail: `test_multipart_copy_versioned` enables versioning first (501); `test_object_copy_not_owned_bucket` expects 403 for a second user, and Litmus has no authentication; `test_object_copy_not_owned_object_bucket` calls PutObjectAcl (501); the 2 versioned copy tests enable versioning first (501). Of the 22 that pass, 3 are incidental: 2 expect 404 for a missing source and get it from the client's HeadObject before any copy request is sent; the third, `test_upload_part_copy_percent_encoded_key`, expects UploadPartCopy to fail and gets 404 NoSuchKey, which a server answering 501 would also satisfy. |
 | Versioning, restore and read-through | 11 | 0 | 5 | 6 | Fail: PutBucketVersioning is 501, and DeleteObject sends no `x-amz-delete-marker` header. Skipped by s3-tests: 6. |
-| Anonymous and ACL-based access | 19 | 1 | 18 | 0 | The one pass, `test_object_anon_put_write_access`, is incidental: it sets the bucket ACL through the `x-amz-acl` header, which Litmus ignores, and its anonymous PUT succeeds because nothing is authenticated. Fail: requests are not authenticated, so anonymous requests are accepted, and ACL operations are 501. |
+| Anonymous and ACL-based access | 19 | 0 | 19 | 0 | Fail: requests are not authenticated, so anonymous requests are accepted, and ACL operations are 501. `test_object_anon_put_write_access`, the one pass before, now fails on purpose: it creates a bucket with `public-read` through `x-amz-acl`, which Litmus refuses (400 InvalidBucketAclWithObjectOwnership), because AWS refuses a public ACL on a bucket with the default Object Ownership setting, and it also needs anonymous access, which is out of scope. |
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **199** | **124** | **7** | |
+| **Total** | **330** | **194** | **129** | **7** |
 
 ## AWS CLI
 
@@ -1058,7 +1062,7 @@ header on UploadPart and UploadPartCopy, which take none, is not read. A PUT wit
 ("If you choose `COPY` for the `x-amz-tagging-directive`, you don't need to set the
 `x-amz-tagging` header, because the tag-set will be copied from the source object
 directly", CopyObject, `x-amz-tagging`), so the header is accepted and not read. What AWS
-does with a non-empty value there is not found. `x-amz-acl` is still ignored by PutObject.
+does with a non-empty value there is not found. `x-amz-acl` is decided separately (see "ACL and grant headers").
 
 **GetObjectTagging.** `GET /{bucket}/{key}?tagging` answers 200 with an empty tag set:
 
@@ -1187,8 +1191,120 @@ the encryption, redirect, storage class and Object Lock headers: their pages do 
 define them (encryption is set when the upload is created). The pages also define the
 SSE-C headers on GetObject, HeadObject, CompleteMultipartUpload and others, and
 `x-amz-server-side-encryption` on CreateSession; those operations are unchanged (see the
-list below). `x-amz-object-ownership`, the ACL and grant headers and the checksum headers
-are not decided here.
+list below). The checksum headers are not decided here. `x-amz-object-ownership` on
+CreateBucket is refused here unless it is `BucketOwnerEnforced` (see "ACL and grant
+headers"); the ACL and grant headers are answered by the handlers, not the guard.
+
+**ACL and grant headers.** ACLs are disabled. Litmus answers the ACL, grant and Object
+Ownership request headers as a bucket whose Object Ownership setting is
+BucketOwnerEnforced does: the owner has full control and there are no other grants. Until
+this change `x-amz-acl`, the `x-amz-grant-*` headers and `x-amz-object-ownership` were
+accepted and dropped, so a client that asked for a public bucket got a private one
+without being told. Nothing here adds a write path: the headers are read and compared,
+and nothing is stored.
+
+- *The model.* S3 User Guide, "Controlling ownership of objects and disabling ACLs for
+  your bucket": "By default, Object Ownership is set to the Bucket owner enforced setting
+  and all ACLs are disabled", "the bucket owner automatically owns and has full control
+  over every object in the bucket", and "your bucket accepts only `PUT` requests that do
+  not specify an ACL or `PUT` requests with bucket owner full control ACLs ... `PUT`
+  requests that contain other ACLs (for example, custom grants to certain AWS accounts)
+  fail and return a `400` error with the error code `AccessControlListNotSupported`".
+  Litmus follows that page, the API reference CreateBucket page ("By default,
+  `ObjectOwnership` is set to `BucketOwnerEnforced` and ACLs are disabled") and the AWS CLI
+  `create-bucket` and `put-bucket-ownership-controls` reference pages, which repeat it.
+  One page disagrees: the User Guide page "Setting Object Ownership when you create a
+  bucket" says, under "Using the AWS CLI", "If you don't set Object Ownership when you
+  create a bucket by using the AWS CLI, the default setting will be `ObjectWriter` (ACLs
+  enabled)", although the same page says earlier that "By default, S3 Object Ownership is
+  set to the Bucket owner enforced setting, and ACLs are disabled for new buckets". Litmus
+  follows the main Object Ownership page and the API reference over that CLI sentence: a
+  request without `x-amz-object-ownership` gets BucketOwnerEnforced. Which one a real
+  `aws s3api create-bucket` gets is not found; the sentence matters little to Litmus,
+  which receives the header or not.
+- *Authentication is a separate matter.* Litmus has none, that is out of scope and
+  documented, and accepting an ACL header says nothing about network access. Anyone who
+  can reach the port has the owner's full control, whatever ACL they send.
+- *Object writes.* PutObject, CreateMultipartUpload and CopyObject: `x-amz-acl` absent,
+  `private` or `bucket-owner-full-control` is accepted. Any other value, the other canned
+  ACLs (`public-read`, `public-read-write`, `authenticated-read`, `aws-exec-read`,
+  `bucket-owner-read`) and values that are not canned ACLs included, is 400
+  AccessControlListNotSupported, and so is any non-blank `x-amz-grant-full-control`,
+  `x-amz-grant-read`, `x-amz-grant-read-acp` or `x-amz-grant-write-acp` (the four grant
+  headers the three pages define; S3 API reference, PutObject, CreateMultipartUpload and
+  CopyObject, "Request Syntax"). `x-amz-object-ownership` is not defined on these
+  operations and stays ignored.
+- *`private` is accepted.* The PutObject and CopyObject pages say a bucket with the
+  setting "only accept[s] PUT requests that don't specify an ACL or PUT requests that
+  specify bucket owner full control ACLs", and the User Guide Troubleshooting page says
+  "you must either specify bucket owner full control ACLs or not specify an ACL". A
+  literal reading refuses `private`. Whether AWS does is not found. Litmus accepts it:
+  with ACLs disabled the owner has full control and nobody else has any access, which is
+  all `private` grants.
+- *Exact, case sensitive comparison.* `Private` and `PRIVATE` are refused, as is any value
+  not in the list on the PutObject page (`private | public-read | public-read-write |
+  authenticated-read | aws-exec-read | bucket-owner-read | bucket-owner-full-control`).
+  The pages say nothing about case (not found); the list is an enumeration, as for
+  `x-amz-bucket-namespace`. A value that is empty after stripping whitespace counts as
+  absent, as for the feature headers. A header repeated in one request is refused if any
+  of its non-blank values is.
+- *Every grant header is refused, owner only grants included.* A grant is an ACL, and the
+  pages say a bucket with disabled ACLs fails requests "that contain other ACLs (for
+  example, custom grants to certain AWS accounts)" without defining "other" for a grant
+  that names only the owner. `x-amz-grant-full-control: id="<owner>"` would be
+  equivalent to bucket owner full control, and the page that allows "an equivalent form
+  of this ACL expressed in the XML format" (PutObject) says nothing of the grant headers.
+  Litmus does not parse grants, so it refuses them all rather than guess; whether AWS
+  accepts an owner only grant header is not found.
+- *CreateMultipartUpload by inference.* Its API reference page lists the same ACL and
+  grant headers but does not mention disabled ACLs or AccessControlListNotSupported
+  (not found). The User Guide says it of "`PUT` requests", and the upload's object is
+  written by the completing request; Litmus applies the PutObject rule when the upload
+  is created, so an upload that could never be accepted is not started. UploadPart,
+  UploadPartCopy and CompleteMultipartUpload do not define the headers and ignore them.
+- *Order.* The check is in the handler, right after the destination bucket lookup: a
+  missing bucket stays 404 NoSuchBucket. It is before any request body byte is read, and
+  for CopyObject before the copy source is parsed or opened, so a refused ACL with a
+  missing, malformed or conditional source is 400 AccessControlListNotSupported, not
+  NoSuchKey, InvalidArgument or 412. It comes after the guard's 501 refusals and the 403
+  owner check, so a refused ACL beside a refused feature header is 501 and beside a wrong
+  `x-amz-expected-bucket-owner` is 403. The pages give no order for AWS (not found); Litmus
+  looks up the bucket first, as every other handler does.
+- *CreateBucket.* `x-amz-object-ownership` other than `BucketOwnerEnforced` (the page
+  lists `BucketOwnerPreferred | ObjectWriter | BucketOwnerEnforced`), including a junk
+  value, is 501 NotImplemented in the guard with the other 501 refusals: Litmus has no
+  bucket with ACLs enabled, so the setting cannot be honored, and the value is compared
+  exactly. `x-amz-acl` other than `private` (the page lists `private | public-read |
+  public-read-write | authenticated-read`) and any non-blank `x-amz-grant-full-control`,
+  `-read`, `-read-acp`, `-write` or `-write-acp` is 400 InvalidBucketAclWithObjectOwnership.
+  The CreateBucket page says "To set an ACL on a bucket as part of a `CreateBucket`
+  request, you must explicitly set S3 Object Ownership for the bucket to a different value
+  than the default, `BucketOwnerEnforced`", and "If you try to create a bucket with a
+  public ACL, the request will fail"; the Troubleshooting page gives the code for a
+  `CreateBucket` that "sets Bucket owner enforced and specifies a bucket ACL that provides
+  access to an external AWS account". `private` is accepted because the page says that
+  with `private`, or no ACL, only `s3:CreateBucket` is required. The check is in the
+  handler after the bucket name is validated and before the existence check: an invalid
+  name with a refused ACL is InvalidBucketName, and an existing bucket with a refused ACL
+  is 400 InvalidBucketAclWithObjectOwnership, not 409. The pages give no order (not
+  found). With `ObjectWriter` and `public-read` together the guard's 501 comes first.
+- *Messages.* Both codes appear only on the User Guide Troubleshooting page (Object
+  Ownership error responses), not in the S3 API error code list (page "Error"). The
+  messages are the page's: "The bucket does not allow ACLs" (AccessControlListNotSupported,
+  from its `put-object` example) and "Bucket cannot have ACLs set with ObjectOwnership's
+  BucketOwnerEnforced setting" (InvalidBucketAclWithObjectOwnership, from its
+  `put-bucket-ownership-controls` example, which is a different operation from the one
+  Litmus raises it for). Both are 400. The page does not say the messages are the same
+  for other operations (not found).
+
+The five selected ceph/s3-tests that create a bucket or put an object with a public ACL
+now fail on purpose: `test_object_raw_get`, `test_object_raw_get_bucket_gone`,
+`test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and
+`test_object_anon_put_write_access`. AWS refuses a public ACL on a bucket with the
+default Object Ownership setting, and they also need anonymous access, which is out of
+scope. They passed before only because the ACL was dropped. `test_object_raw_response_headers`
+still passes: `private` is accepted. The other ACL tests still fail, some at an earlier
+step than before.
 
 **Request headers Litmus still ignores.** A header Litmus does not read has no effect, and
 the request succeeds as if it were absent. Where this file already says so, the entry
@@ -1196,10 +1312,9 @@ points there instead of repeating it.
 
 Ignored, where a client can observe the difference:
 
-- `x-amz-acl` and the `x-amz-grant-*` headers on PutObject, CreateMultipartUpload,
-  CopyObject and CreateBucket (see "Anonymous and ACL-based access" under Results by
-  category, and "`x-amz-tagging` on PutObject and CreateMultipartUpload").
-- `x-amz-object-ownership` on CreateBucket.
+- `x-amz-object-ownership` on PutObject, CreateMultipartUpload and CopyObject, and the
+  ACL and grant headers on UploadPart, UploadPartCopy and CompleteMultipartUpload, which
+  do not define them (see "ACL and grant headers" for the operations that do).
 - `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` on
   CreateMultipartUpload and CopyObject; `x-amz-checksum-type` on CreateMultipartUpload and
   CompleteMultipartUpload; the `x-amz-checksum-*` headers and `x-amz-mp-object-size` on

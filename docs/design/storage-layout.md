@@ -1400,9 +1400,9 @@ Choices (AWS documents less than this; each is Litmus's own where it says so):
   the same bytes, the new headers, a new Last-Modified, and the old blob garbage. AWS
   accepts a self-copy that changes a storage class, encryption or a website redirect
   too; Litmus refuses those headers (decision 24), so REPLACE is its only change.
-- **Not honored, as for PutObject:** the ACL and checksum headers of the request are
-  ignored; the storage class, SSE, website redirect and Object Lock headers are 501
-  (decision 24). The SSE-C headers for the source
+- **Not honored, as for PutObject:** the checksum headers of the request are ignored,
+  and an ACL or grant header is accepted only as no ACL asks for (decision 25); the
+  storage class, SSE, website redirect and Object Lock headers are 501 (decision 24). The SSE-C headers for the source
   (`x-amz-copy-source-server-side-encryption-customer-*`) are not ignored: they are 501,
   here and on UploadPartCopy (§11, below).
 
@@ -2092,6 +2092,28 @@ Recorded with the feature header refusals:
     Object Lock or website hosting and one storage class, so honoring none of them would
     succeed without doing what the client asked. The refusals sit with the other 501s,
     so the owner check (decision 23) stays last. The guard reads headers only and
-    nothing else changed: no write path, blob or metadata. The ACL, grant, object
-    ownership and checksum headers are not decided here. Details and what AWS leaves
+    nothing else changed: no write path, blob or metadata. The checksum headers are
+    not decided here; the ACL, grant and object ownership headers are decision 25. Details and what AWS leaves
     unsaid: docs/compatibility.md, "Feature headers Litmus refuses".
+
+Recorded with the ACL header handling:
+
+25. **ACLs are disabled (BucketOwnerEnforced).** Litmus answers the ACL, grant and object
+    ownership request headers as a bucket with Object Ownership set to
+    BucketOwnerEnforced, the default for a new bucket: the owner has full control and
+    there are no other grants. On PutObject, CreateMultipartUpload and CopyObject,
+    `x-amz-acl` absent, `private` or `bucket-owner-full-control` is accepted and any other
+    value, and any non-blank `x-amz-grant-full-control`, `-read`, `-read-acp` or
+    `-write-acp`, is 400 AccessControlListNotSupported. On CreateBucket, any non-blank
+    `x-amz-object-ownership` other than `BucketOwnerEnforced` is 501 NotImplemented in the
+    request guard, and `x-amz-acl` other than `private` or any non-blank grant header
+    (those four and `x-amz-grant-write`) is 400 InvalidBucketAclWithObjectOwnership. A
+    value that is empty after stripping whitespace is absent; values are compared
+    exactly. The object write check runs in the handler right after the destination
+    bucket lookup, before the body is read and, for CopyObject, before the copy source is
+    parsed or opened (§6.2, §6.5, §6.10); after the guard's 501s and the 403 owner check
+    (decision 23). The CreateBucket check runs after the name is validated and before the
+    existence check. Headers are read and compared; nothing is stored, and no write path,
+    blob or metadata changed. Authentication is a separate matter, out of scope as before:
+    accepting an ACL header says nothing about network access. Details and what AWS
+    leaves unsaid: docs/compatibility.md, "ACL and grant headers".

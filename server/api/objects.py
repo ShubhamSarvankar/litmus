@@ -7,6 +7,7 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
+from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
 from server.api.conditions import (
     delete_precondition,
@@ -191,6 +192,7 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
+    check_object_write(request.headers)
 
     # Refused before the body is read and before any blob is registered.
     stored = request_object_headers(request.headers)

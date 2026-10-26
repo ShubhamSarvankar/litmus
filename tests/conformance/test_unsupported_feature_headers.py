@@ -1,6 +1,6 @@
 """Request headers for features Litmus does not have are refused with 501 NotImplemented,
 before any body byte is read (server/api/request_guard.py): server-side encryption,
-SSE-C, website redirects, Object Lock and storage classes, and two CreateBucket options.
+SSE-C, website redirects, Object Lock and storage classes, and three CreateBucket options.
 Litmus stores plaintext, has no Object Lock and no website hosting, and has one storage
 class, so honoring none of them would succeed without doing what the client asked.
 
@@ -8,12 +8,15 @@ S3 API reference, PutObject, CreateMultipartUpload and CopyObject: x-amz-server-
 encryption, -aws-kms-key-id, -context, -bucket-key-enabled, the three SSE-C headers,
 x-amz-storage-class, x-amz-website-redirect-location and the six x-amz-object-lock-*
 headers. UploadPart and UploadPartCopy: the SSE-C headers (the destination side of the
-copy). CreateBucket: x-amz-bucket-object-lock-enabled and x-amz-bucket-namespace.
+copy). CreateBucket: x-amz-bucket-object-lock-enabled, x-amz-bucket-namespace and
+x-amz-object-ownership.
 
 A value that is empty after stripping whitespace counts as absent. x-amz-storage-class is
-accepted only as STANDARD, x-amz-bucket-object-lock-enabled only as false (any case) and
-x-amz-bucket-namespace only as global. x-amz-object-ownership, the ACL and grant headers
-and the checksum headers are left alone."""
+accepted only as STANDARD, x-amz-bucket-object-lock-enabled only as false (any case),
+x-amz-bucket-namespace only as global and x-amz-object-ownership only as
+BucketOwnerEnforced. The ACL and grant headers are answered by the handlers, not refused
+here (tests/conformance/test_acl_headers.py); x-amz-object-ownership on an object write is
+not defined and is left alone, and so are the checksum headers."""
 
 import socket
 import threading
@@ -323,7 +326,7 @@ def test_create_bucket_with_both_accepted_values_is_created(env):
 
 def test_create_bucket_with_object_ownership_is_left_alone(env):
     client, _, metadata = env
-    resp = _create_bucket(client, {"x-amz-object-ownership": "ObjectWriter"})
+    resp = _create_bucket(client, {"x-amz-object-ownership": "BucketOwnerEnforced"})
     assert resp.status_code == 200
     assert metadata.bucket_exists(NEW_BUCKET)
 

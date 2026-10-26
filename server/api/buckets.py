@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from server.api.acl_headers import check_create_bucket
 from server.api.conditions import delete_objects_precondition
 from server.api.continuation_tokens import decode_token, encode_token
 from server.api.delete_document import parse_delete_document
@@ -440,6 +441,7 @@ async def create_or_configure_bucket(bucket: str, request: Request) -> Response:
     # existence check, so an invalid name that is somehow in the store is still refused.
     if bucket_name_violation(bucket) is not None:
         raise InvalidBucketName(extra={"BucketName": bucket})
+    check_create_bucket(request.headers)
     if metadata.bucket_exists(bucket):
         raise BucketAlreadyExists(extra={"BucketName": bucket})
     metadata.create_bucket(bucket, datetime.now(UTC).replace(tzinfo=None))

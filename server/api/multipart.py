@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
 from server.api.conditions import write_precondition
 from server.api.request_xml import parse_request_xml
@@ -173,6 +174,7 @@ async def _initiate(bucket: str, key: str, request: Request) -> Response:
     metadata = request.app.state.metadata
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
+    check_object_write(request.headers)
     # The same headers and rules as PutObject; refused before the upload is created.
     from server.api.objects import request_object_headers
 

@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from fastapi import Request
 from fastapi.responses import Response
 
+from server.api.acl_headers import check_object_write
 from server.api.conditions import CopySourceConditions, write_precondition
 from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
 from server.api.objects import _CHUNK, _open_current, request_object_headers
@@ -84,6 +85,8 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
+    # Before the copy source is parsed or opened.
+    check_object_write(request.headers)
 
     values = request.headers.getlist(COPY_SOURCE_HEADER)
     if len(values) != 1:
