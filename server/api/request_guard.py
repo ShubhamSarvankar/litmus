@@ -167,6 +167,13 @@ _TAGGING_DIRECTIVE = "x-amz-tagging-directive"
 _TAGGING = "x-amz-tagging"
 _UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
 
+# x-amz-tagging on PutObject and CreateMultipartUpload sets the new object's tags
+# (S3 API reference: "The tag-set must be encoded as URL Query parameters"). Litmus
+# stores none, so a non-empty value is refused, unparsed, rather than dropped. An empty
+# value asks for no tags and is accepted. A PUT with x-amz-copy-source is CopyObject,
+# which decides the header with its directive (_check_copy_object); UploadPart and
+# UploadPartCopy take no such header.
+
 # The SSE-C headers that unlock a source encrypted with a customer-provided key, on
 # CopyObject and UploadPartCopy. Litmus stores nothing encrypted, so a request that
 # supplies a key for the source asks for something it cannot do; ignoring the headers
@@ -236,6 +243,12 @@ def _check_copy_object(headers) -> None:
         raise NotImplementedOperation(extra={"Header": _TAGGING})
 
 
+def _check_new_object_tags(headers) -> None:
+    """Refuse a PutObject or CreateMultipartUpload that asks for tags."""
+    if any(v.strip() for v in headers.getlist(_TAGGING)):
+        raise NotImplementedOperation(extra={"Header": _TAGGING})
+
+
 def _check(method: str, path: str, query, headers) -> None:
     query_keys = set(query.keys())
     if path == "/health":
@@ -275,6 +288,10 @@ def _check(method: str, path: str, query, headers) -> None:
                 _check_copy_source(headers)
             else:
                 _check_copy_object(headers)
+        elif (method == "PUT" and not (query_keys - _IGNORED)) or (
+            method == "POST" and (query_keys - _IGNORED) == {"uploads"}
+        ):
+            _check_new_object_tags(headers)
         if method == "DELETE":
             conditional = (
                 CONDITIONAL_DELETE_HEADERS

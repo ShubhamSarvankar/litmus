@@ -119,6 +119,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Conditional DeleteObjects | 330 | 508 | 180 | The `ETag` element of a DeleteObjects `Object` is evaluated per key, inside the one transaction that deletes the batch, after the write lock and against that key's current row (`*`, quoted, unquoted and lists, strong comparison, as for DeleteObject). A condition that holds puts the key in `Deleted`; one that fails puts it in `Error` with Code PreconditionFailed and leaves the key untouched; one on a key that does not exist is an `Error` with Code NoSuchKey ([AWS, "How to perform conditional deletes"](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-deletes.md)). A refused key does not roll back the others. An empty `ETag` is no condition. `LastModifiedTime` and `Size` stay a per key NotImplemented, deliberately. 1 pass gained, as forecast: `test_delete_objects_if_match`. The results file differs from the previous one in that one line only. It is not incidental (26 stays 26): it fails against the server as of 9dcfba5, where its first request gets NotImplemented, and the new tests fail with this change reverted. Still failing, as forecast: the other 8 `test_delete_objects_*` tests, on purpose (see "Conditional DeleteObjects" under Known gaps). Recorded at the commit that adds the evaluation. |
 | CopyObject | 330 | 508 | 193 | A PUT with `x-amz-copy-source` and no query copies the source's bytes into a new blob and commits the destination like PutObject (see "CopyObject" under Known gaps). UploadPartCopy, a `versionId` other than `null`, an ARN source and a REPLACE of the tag set with tags stay 501. 13 passes gained, as forecast, test by test: `test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, and `test_copy_object_ifmatch_good`, `_ifmatch_failed`, `_ifnonematch_good`, `_ifnonematch_failed`. The results file differs from the previous one in those 13 lines only (26 lines, 13 out and 13 in), and the denominator stays 330. All 13 are genuine (26 incidental and 18 borderline stay, so 149 genuine): each failed before with 501, and the three that expect an error pass only because the check exists: against a server with the source conditions and the self-copy refusal switched off, `test_object_copy_to_itself`, `test_copy_object_ifmatch_failed` and `test_copy_object_ifnonematch_good` fail. Still failing, as forecast: the 7 `test_multipart_copy_*` tests (UploadPartCopy), the 2 versioned copy tests (versioning) and the 2 `test_object_copy_not_owned_*` tests (a second user, and PutObjectAcl). `test_upload_part_copy_percent_encoded_key`, `test_object_copy_bucket_not_found` and `test_object_copy_key_not_found` still pass, incidentally. Recorded at the commit that adds CopyObject. |
 | UploadPartCopy | 330 | 508 | 199 | A PUT with `x-amz-copy-source`, `partNumber` and `uploadId` copies a range of the source's bytes into a new part blob and records it like UploadPart (see "UploadPartCopy" under Known gaps). A `versionId` other than `null`, an ARN source and the `x-amz-copy-source-server-side-encryption-customer-*` headers (on this and on CopyObject) are 501. 6 passes gained, as forecast, test by test: `test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`. The results file differs from the previous one in those 6 lines only (12 lines, 6 out and 6 in), and the denominator stays 330. All 6 are genuine (26 incidental and 18 borderline stay, so 155 genuine): each failed before with 501, and the two that expect an error (`_invalid_range`, `_improper_range`) pass only because the range is parsed and checked against the source's size. Still failing, as forecast: `test_multipart_copy_versioned` (it enables versioning first, 501). `test_upload_part_copy_percent_encoded_key` still passes, now with 404 NoSuchKey (its copy source names `anyfilename%25.txt`, which decodes once to the key `anyfilename%.txt`, and there is none) instead of 501, and stays in the incidental list because a server that answers 501 passes it too. The CLI's copy of an object above its multipart threshold still fails, at GetObjectTagging (501), before it sends an UploadPartCopy. Recorded at the commit that adds UploadPartCopy. |
+| Refuse `x-amz-tagging` | 330 | 508 | 199 | PutObject and CreateMultipartUpload answer 501 to a non-empty `x-amz-tagging` instead of dropping it (see "`x-amz-tagging` on PutObject and CreateMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends the header, because the filter deselects every test marked `tagging` and the lifecycle and policy tests that set tags. The results file is identical to the previous one. Recorded at the commit that adds the refusal. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -1035,11 +1036,24 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   that command still fails. `aws s3api upload-part-copy`, boto3's `client.copy` and
   ceph's tests send UploadPartCopy directly.
 
-**PutObject ignores `x-amz-tagging`.** A PutObject with `x-amz-tagging` stores the object
-without tags and answers 200, since Litmus stores no tags; likewise `x-amz-acl`, the
-storage class and the SSE headers. CopyObject refuses only a REPLACE of the tag set with
-tags (above), where the request says outright that tags replace the source's; PutObject
-was not changed.
+**`x-amz-tagging` on PutObject and CreateMultipartUpload.** A non-empty value is 501
+NotImplemented, decided in the request guard before any body byte is read, so no blob,
+temp file, metadata row or upload is created and an existing object is unchanged. Litmus
+stores no tags, and the S3 API reference gives the header a tag-set ("The tag-set must be
+encoded as URL Query parameters", PutObject and CreateMultipartUpload, "Request
+Syntax"), so storing the object without them would drop what the client asked for. The
+value is not parsed: anything left after stripping whitespace is refused. An empty or
+blank value is accepted, since it asks for no tags. The pages for PutObject and
+CreateMultipartUpload say nothing about an empty value (not found); the CopyObject page's
+"The default value is the empty value" for `x-amz-tagging` is the closest guidance. The
+header on UploadPart and UploadPartCopy, which take none, is not read. A PUT with
+`x-amz-copy-source` is CopyObject, which decides the header with its directive (see
+"Tags" under CopyObject): under COPY, or no directive, the tags come from the source
+("If you choose `COPY` for the `x-amz-tagging-directive`, you don't need to set the
+`x-amz-tagging` header, because the tag-set will be copied from the source object
+directly", CopyObject, `x-amz-tagging`), so the header is accepted and not read. What AWS
+does with a non-empty value there is not found. `x-amz-acl`, the storage class and the SSE
+headers are still ignored by PutObject.
 
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The

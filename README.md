@@ -42,11 +42,11 @@ parameters as follows.
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
 | GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 and V2 also apply `delimiter` and `max-keys`; V1 pages with `marker` and `NextMarker` and shows the configured `Owner` in each `Contents`; V2 pages with `continuation-token` or `start-after`, reports `KeyCount`, and shows `Owner` with `fetch-owner=true`. ListObjectVersions applies `delimiter` and `max-keys`, pages with `key-marker` and `version-id-marker`, and lists each object once as version `null` with the configured `Owner`. All three accept `encoding-type=url`. |
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
-| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
+| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
-| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload |
+| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501. |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match` |
 | GET | `/health` | Health check |
 

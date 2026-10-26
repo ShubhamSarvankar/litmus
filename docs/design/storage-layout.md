@@ -1385,6 +1385,10 @@ Choices (AWS documents less than this; each is Litmus's own where it says so):
   and none are kept from the source. Any other value is 400 InvalidArgument.
 - **Tagging.** Litmus stores no tags. `x-amz-tagging-directive: COPY`, or REPLACE with an
   empty `x-amz-tagging`, proceeds; REPLACE with tags is 501, since they would be dropped.
+  Under COPY, or no directive, a non-empty `x-amz-tagging` is accepted and not read: the
+  tags come from the source (CopyObject page, `x-amz-tagging`). AWS's handling of a
+  non-empty value there is not found. PutObject and CreateMultipartUpload are different:
+  they refuse a non-empty `x-amz-tagging` in the request guard (decision 21).
 - **ETag.** The MD5 of the copied bytes, always a plain MD5. A multipart source's
   `md5-N` ETag becomes the MD5 of the whole object, which is what AWS's "the object copy
   will be a single part object" implies (the value is not stated). A single part source's
@@ -2033,3 +2037,13 @@ Recorded with UploadPartCopy:
     them. The CLI's copy of an object above its multipart threshold still fails, because
     it reads the source's tags with GetObjectTagging first (501); GetObjectTagging is not
     implemented.
+
+Recorded with the `x-amz-tagging` refusal:
+
+21. **`x-amz-tagging` on PutObject and CreateMultipartUpload.** A non-empty value
+    (anything left after stripping whitespace, not parsed) is 501 NotImplemented, decided
+    in the request guard before any body byte is read, so nothing is written. An empty or
+    blank value is accepted: the PutObject and CreateMultipartUpload pages say nothing
+    about it (not found), and the CopyObject page gives `x-amz-tagging` the default "the
+    empty value". The check does not apply to a PUT with `x-amz-copy-source`
+    (CopyObject, decision 19) or to UploadPart and UploadPartCopy.
