@@ -142,15 +142,95 @@ def test_put_part_number_without_upload_id_returns_501(populated):
     _assert_unchanged(populated)
 
 
-def test_copy_object_onto_existing_key_returns_501_and_leaves_it_intact(populated):
-    assert populated.put(f"/{BUCKET}/src.txt", content=b"source").status_code == 200
-    resp = populated.put(f"/{BUCKET}/{KEY}", headers={"x-amz-copy-source": f"/{BUCKET}/src.txt"})
+def _create_upload(client: TestClient) -> str:
+    resp = client.post(f"/{BUCKET}/dest?uploads")
+    assert resp.status_code == 200
+    return ET.fromstring(resp.text).findtext("UploadId")
+
+
+def test_upload_part_copy_returns_501_and_records_no_part(populated):
+    upload_id = _create_upload(populated)
+    resp = populated.put(
+        f"/{BUCKET}/dest?partNumber=1&uploadId={upload_id}",
+        headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}"},
+    )
     _assert_not_implemented(resp, "PUT")
-    assert populated.get(f"/{BUCKET}/{KEY}").content == BODY
+    assert populated.app.state.metadata.get_parts(upload_id) == []
+    assert populated.get(f"/{BUCKET}/dest").status_code == 404
+    _assert_unchanged(populated)
 
 
-def test_copy_object_to_new_key_returns_501_and_creates_nothing(populated):
-    resp = populated.put(f"/{BUCKET}/new.txt", headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}"})
+def test_upload_part_copy_with_a_range_returns_501(populated):
+    upload_id = _create_upload(populated)
+    resp = populated.put(
+        f"/{BUCKET}/dest?partNumber=1&uploadId={upload_id}",
+        headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}", "x-amz-copy-source-range": "bytes=0-3"},
+    )
+    _assert_not_implemented(resp, "PUT")
+    assert populated.app.state.metadata.get_parts(upload_id) == []
+
+
+@pytest.mark.parametrize("version_id", ["3HL4kqtJlcpXroDTDmJ", "", "null2", "NULL"])
+def test_copy_with_a_non_null_version_id_returns_501_and_creates_nothing(populated, version_id):
+    resp = populated.put(
+        f"/{BUCKET}/new.txt",
+        headers={"x-amz-copy-source": f"/{BUCKET}/{KEY}?versionId={version_id}"},
+    )
+    _assert_not_implemented(resp, "PUT")
+    assert populated.get(f"/{BUCKET}/new.txt").status_code == 404
+    _assert_unchanged(populated)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "arn:aws:s3:us-west-2:123456789012:accesspoint/ap/object/obj.txt",
+        "arn%3Aaws%3As3%3Aus-west-2%3A123456789012%3Aaccesspoint/ap/object/obj.txt",
+        "/arn:aws:s3-outposts:us-west-2:123456789012:outpost/op/object/obj.txt",
+    ],
+)
+def test_copy_from_an_arn_returns_501_and_creates_nothing(populated, source):
+    resp = populated.put(f"/{BUCKET}/new.txt", headers={"x-amz-copy-source": source})
+    _assert_not_implemented(resp, "PUT")
+    assert populated.get(f"/{BUCKET}/new.txt").status_code == 404
+    _assert_unchanged(populated)
+
+
+@pytest.mark.parametrize(
+    ("method", "query"),
+    [
+        ("POST", "?uploads"),
+        ("POST", "?uploadId=x"),
+        ("POST", ""),
+        ("PUT", "?uploadId=x"),
+        ("PUT", "?partNumber=1"),
+        ("PUT", "?acl"),
+        ("PUT", "?tagging"),
+        ("PUT", "?someFutureOp"),
+        ("DELETE", ""),
+        ("GET", ""),
+        ("HEAD", ""),
+    ],
+)
+def test_copy_source_header_outside_a_plain_put_returns_501_and_changes_nothing(
+    populated, method, query
+):
+    resp = populated.request(
+        method, f"/{BUCKET}/{KEY}{query}", headers={"x-amz-copy-source": f"/{BUCKET}/src.txt"}
+    )
+    _assert_not_implemented(resp, method)
+    _assert_unchanged(populated)
+
+
+def test_copy_with_replaced_tags_returns_501_and_creates_nothing(populated):
+    resp = populated.put(
+        f"/{BUCKET}/new.txt",
+        headers={
+            "x-amz-copy-source": f"/{BUCKET}/{KEY}",
+            "x-amz-tagging-directive": "REPLACE",
+            "x-amz-tagging": "a=b",
+        },
+    )
     _assert_not_implemented(resp, "PUT")
     assert populated.get(f"/{BUCKET}/new.txt").status_code == 404
     _assert_unchanged(populated)

@@ -28,8 +28,10 @@ from server.api.aws_chunked import (
     is_framed,
     trailer_is_supported,
 )
+from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
 from server.checksums import unsupported_value_header
 from server.errors.s3errors import (
+    InvalidArgument,
     InvalidBucketName,
     NotImplementedOperation,
     S3Error,
@@ -153,9 +155,15 @@ UNEVALUATED_DELETE_OBJECT_HEADERS = tuple(h for h in CONDITIONAL_DELETE_HEADERS 
 # is refused.
 UNEVALUATED_PUT_OBJECT_HEADERS = ("x-amz-write-offset-bytes",)
 
-# Headers that select an operation Litmus does not implement on an otherwise
-# supported request: CopyObject and UploadPartCopy.
-_UNIMPLEMENTED_HEADERS = ("x-amz-copy-source",)
+# x-amz-copy-source selects CopyObject on a PUT with no query parameters. On any other
+# request it selects an operation Litmus does not implement (UploadPartCopy, with
+# partNumber and uploadId, or a header on a method that takes none), and is refused.
+# A source Litmus cannot name (an ARN, a version ID other than "null") is refused too
+# (server/api/copy_source.py), and so is a copy that would replace the tag set with
+# tags: Litmus stores none, so they would be dropped. x-amz-tagging-directive: REPLACE
+# with a blank x-amz-tagging (an empty tag set) and COPY proceed.
+_TAGGING_DIRECTIVE = "x-amz-tagging-directive"
+_TAGGING = "x-amz-tagging"
 
 # A chunk-framed (aws-chunked) body, as S3 identifies one: x-amz-content-sha256 names a
 # STREAMING- payload, and x-amz-decoded-content-length gives the size without the
@@ -196,6 +204,19 @@ def _check_framing(headers, decodable: bool) -> None:
         raise NotImplementedOperation(extra={"Header": _DECODED_LENGTH_HEADER})
 
 
+def _check_copy_object(headers) -> None:
+    """Refuse the CopyObject requests Litmus cannot honor. A malformed source is not
+    decided here: the handler answers it, after the destination bucket."""
+    try:
+        parse_copy_source(", ".join(headers.getlist(COPY_SOURCE_HEADER)))
+    except InvalidArgument:
+        pass
+    if headers.get(_TAGGING_DIRECTIVE) == "REPLACE" and any(
+        v.strip() for v in headers.getlist(_TAGGING)
+    ):
+        raise NotImplementedOperation(extra={"Header": _TAGGING})
+
+
 def _check(method: str, path: str, query, headers) -> None:
     query_keys = set(query.keys())
     if path == "/health":
@@ -226,8 +247,10 @@ def _check(method: str, path: str, query, headers) -> None:
             _IMPLEMENTED_OBJECT,
             _ALLOWED_MUTATING_OBJECT,
         )
-        if any(h in headers for h in _UNIMPLEMENTED_HEADERS):
-            raise NotImplementedOperation(extra={"Header": "x-amz-copy-source"})
+        if COPY_SOURCE_HEADER in headers:
+            if method != "PUT" or query_keys - _IGNORED:
+                raise NotImplementedOperation(extra={"Header": COPY_SOURCE_HEADER})
+            _check_copy_object(headers)
         if method == "DELETE":
             conditional = (
                 CONDITIONAL_DELETE_HEADERS

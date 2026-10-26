@@ -2,10 +2,10 @@
 # aws_cli_smoke.sh
 #
 # Runs an unmodified AWS CLI v2 against a scratch Litmus server over http and checks
-# the results of mb, ls, cp, sync, s3api head-object / get-object, rm and rb. The CLI
-# runs with its default client behavior: no checksum or s3 config overrides are set.
-# Litmus has no authentication, so the credentials are dummies in a temp credentials
-# file; ~/.aws is never read.
+# the results of mb, ls, cp (including s3 to s3), sync, s3api head-object / get-object,
+# rm and rb. The CLI runs with its default client behavior: no checksum or s3 config
+# overrides are set. Litmus has no authentication, so the credentials are dummies in a
+# temp credentials file; ~/.aws is never read.
 #
 # Requires: AWS CLI v2 >= 2.23 on a Linux PATH, uv (or python3 with the project
 # dependencies), curl, python3.
@@ -249,14 +249,34 @@ step_s3api_head_range() {
     cmp -s "$WORK/range.want" "$WORK/range.bin" || die "range bytes differ from the source"
 }
 
-step_copy_not_implemented() {
+step_copy_object() {
+    # An object under the CLI's multipart threshold is copied with one CopyObject.
     aws s3 cp "s3://$BUCKET/small.bin" "s3://$BUCKET/copied.bin" > "$WORK/out" 2>&1 \
-        && die "s3 to s3 cp succeeded: $(cat "$WORK/out")"
+        || { cat "$WORK/out"; die "s3 to s3 cp failed"; }
+    mkdir -p "$WORK/copydown"
+    aws s3 cp "s3://$BUCKET/copied.bin" "$WORK/copydown/copied.bin" > /dev/null || die "download of the copy failed"
+    cmp -s "$DATA/small.bin" "$WORK/copydown/copied.bin" || die "the copy's bytes differ from the source's"
+
+    local src_etag dst_etag
+    src_etag="$(aws s3api head-object --bucket "$BUCKET" --key small.bin --query ETag --output text)"
+    dst_etag="$(aws s3api head-object --bucket "$BUCKET" --key copied.bin --query ETag --output text)"
+    [[ "$dst_etag" =~ ^\"[0-9a-f]{32}\"$ ]] || die "copy ETag has unexpected shape: $dst_etag"
+    [ "$dst_etag" = "$src_etag" ] || die "copy ETag $dst_etag, source ETag $src_etag"
+    aws s3 ls "s3://$BUCKET/" | ls_names | grep -qx "copied.bin" || die "copied.bin is not listed"
+    aws s3api head-object --bucket "$BUCKET" --key small.bin > /dev/null || die "the source is gone"
+}
+
+step_copy_large_not_implemented() {
+    # Above the threshold the CLI copies in parts with UploadPartCopy, which Litmus does
+    # not implement.
+    aws s3 cp "s3://$BUCKET/large.bin" "s3://$BUCKET/copied-large.bin" > "$WORK/out" 2>&1 \
+        && die "s3 to s3 cp of the 40 MiB object succeeded: $(cat "$WORK/out")"
     grep -q "NotImplemented" "$WORK/out" || die "no NotImplemented in: $(cat "$WORK/out")"
-    if aws s3api head-object --bucket "$BUCKET" --key copied.bin > /dev/null 2>&1; then
-        die "copied.bin exists after the failed copy"
+    if aws s3api head-object --bucket "$BUCKET" --key copied-large.bin > /dev/null 2>&1; then
+        die "copied-large.bin exists after the failed copy"
     fi
-    aws s3 ls "s3://$BUCKET/" | ls_names | grep -qx "copied.bin" && die "copied.bin is listed"
+    aws s3 ls "s3://$BUCKET/" | ls_names | grep -qx "copied-large.bin" && die "copied-large.bin is listed"
+    aws s3api head-object --bucket "$BUCKET" --key large.bin > /dev/null || die "the source is gone"
     return 0
 }
 
@@ -287,7 +307,8 @@ run_step step_s3api_put_get
 run_step step_key_names
 run_step step_sync
 run_step step_s3api_head_range
-run_step step_copy_not_implemented
+run_step step_copy_object
+run_step step_copy_large_not_implemented
 run_step step_rm_rb
 
 echo "All steps passed (aws-cli $AWS_VERSION)."

@@ -149,6 +149,14 @@ class InvalidRequest(S3Error):
     message = "The request is not valid."
 
 
+class CopyOntoItself(InvalidRequest):
+    message = (
+        "This copy request is illegal because it is trying to copy an object to itself "
+        "without changing the object's metadata, storage class, website redirect location "
+        "or encryption attributes."
+    )
+
+
 class MethodNotAllowed(S3Error):
     status_code = 405
     code = "MethodNotAllowed"

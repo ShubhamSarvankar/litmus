@@ -1,7 +1,8 @@
 """Read preconditions on GET and HEAD (RFC 9110 13.1 and 13.2.2), If-Range, and the
 If-Match and If-None-Match preconditions of PutObject (write_precondition()) and the
 If-Match precondition of DeleteObject (delete_precondition()) and the per key ETag
-condition of DeleteObjects (delete_objects_precondition()).
+condition of DeleteObjects (delete_objects_precondition()). CopySourceConditions maps
+the x-amz-copy-source-if-* headers of a CopyObject onto the read preconditions below.
 
 evaluate_read_conditions() takes the request headers and the one row the response will
 be built from, and answers whether the response is 304 Not Modified. It raises
@@ -160,6 +161,27 @@ def if_range_holds(
     if tags is None or len(tags) != 1 or tags[0][2]:
         return False
     return _matches(tags, etag, strong=True)
+
+
+class CopySourceConditions:
+    """The x-amz-copy-source-if-* headers of a CopyObject, seen under the names of the
+    RFC 9110 preconditions so evaluate_read_conditions() can decide them. The request's
+    own If-Match and If-None-Match are conditions on the destination, never on the
+    source, and are not visible through this view."""
+
+    _NAMES = {
+        "if-match": "x-amz-copy-source-if-match",
+        "if-none-match": "x-amz-copy-source-if-none-match",
+        "if-modified-since": "x-amz-copy-source-if-modified-since",
+        "if-unmodified-since": "x-amz-copy-source-if-unmodified-since",
+    }
+
+    def __init__(self, headers) -> None:
+        self._headers = headers
+
+    def getlist(self, name: str) -> list[str]:
+        source = self._NAMES.get(name)
+        return self._headers.getlist(source) if source else []
 
 
 def write_precondition(headers, key: str) -> Callable[[str | None], None] | None:

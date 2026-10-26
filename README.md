@@ -14,7 +14,7 @@ left on disk, in the database and visible to clients after a restart.
 ## What is tested
 
 - **Crash behavior.** Tier B tests start a real server, make it kill itself with
-  SIGKILL at a named step of PutObject, DeleteObject, DeleteObjects, UploadPart,
+  SIGKILL at a named step of PutObject, CopyObject, DeleteObject, DeleteObjects, UploadPart,
   CompleteMultipartUpload, AbortMultipartUpload, DeleteBucket, the startup sweep or
   the first start, and check the state after a restart. Tier A tests inject faults in
   process (raised OSErrors, corrupted or missing files, deterministic races).
@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 180 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 193 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -42,7 +42,7 @@ parameters as follows.
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
 | GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 and V2 also apply `delimiter` and `max-keys`; V1 pages with `marker` and `NextMarker` and shows the configured `Owner` in each `Contents`; V2 pages with `continuation-token` or `start-after`, reports `KeyCount`, and shows `Owner` with `fetch-owner=true`. ListObjectVersions applies `delimiter` and `max-keys`, pages with `key-marker` and `version-id-marker`, and lists each object once as version `null` with the configured `Owner`. All three accept `encoding-type=url`. |
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
-| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart. |
+| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
@@ -52,7 +52,7 @@ parameters as follows.
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
-configuration, CopyObject, ListParts, ListMultipartUploads, POST Object and others)
+configuration, UploadPartCopy, ListParts, ListMultipartUploads, POST Object and others)
 get 501 NotImplemented before reaching a handler, and change nothing. `/{bucket}/`
 (a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
 in the table. Keys are stored as the exact string the client sent.
@@ -68,10 +68,11 @@ are written. PutObject and UploadPart (and DeleteObjects, over its XML body) als
 before the data is made durable; nothing is stored or returned yet. See [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
-its default settings: `mb`, `ls`, `cp` (including multipart uploads), `sync`, `rm`, `rb`
-and `s3api put-object`, `get-object` and `head-object`. `scripts/aws_cli_smoke.sh` runs
-these checks. Only `http://` was tested, credentials are not checked, and an s3 to s3
-copy gets 501 NotImplemented.
+its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies
+of objects under 8 MiB), `sync`, `rm`, `rb` and `s3api put-object`, `get-object` and
+`head-object`. `scripts/aws_cli_smoke.sh` runs these checks. Only `http://` was tested,
+credentials are not checked, and an s3 to s3 copy of a larger object, which the CLI
+sends as UploadPartCopy, gets 501 NotImplemented.
 
 ---
 
@@ -171,8 +172,9 @@ server/
   connection.py        closes the connection after an early error to an Expect: 100-continue request
   api/                 routes: buckets.py for buckets; multipart.py for every
                        /{bucket}/{key} request, handing plain object requests to
-                       the handlers in objects.py; request_guard.py answers 501;
-                       aws_chunked.py decodes aws-chunked bodies
+                       the handlers in objects.py; copy_object.py and copy_source.py
+                       are CopyObject and its x-amz-copy-source; request_guard.py
+                       answers 501; aws_chunked.py decodes aws-chunked bodies
   checksums.py         the checksums a PutObject or UploadPart claims, and their check
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
@@ -198,6 +200,6 @@ docs/
 
 ## Not implemented
 
-Authentication, ACLs and policies, versioning, CopyObject, the `allow-unordered`
+Authentication, ACLs and policies, versioning, UploadPartCopy, the `allow-unordered`
 listing extension, append writes, and conditional deletes other than `If-Match` on DeleteObject. Litmus runs as one process on one
 machine. See [`docs/compatibility.md`](docs/compatibility.md).

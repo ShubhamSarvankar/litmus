@@ -24,6 +24,12 @@ PUT_MID_WRITE = "put-mid-write"
 PUT_AFTER_BYTES = "put-after-bytes"
 PUT_AFTER_COMMIT = "put-after-commit"
 PUT_AFTER_GC_UNLINK = "put-after-gc-unlink"
+# CopyObject (§6.10): the same steps as PutObject, with the bytes read from the source blob
+COPY_AFTER_REGISTER = "copy-after-register"
+COPY_MID_WRITE = "copy-mid-write"
+COPY_AFTER_BYTES = "copy-after-bytes"
+COPY_AFTER_COMMIT = "copy-after-commit"
+COPY_AFTER_GC_UNLINK = "copy-after-gc-unlink"
 # DeleteObject (§6.3) and DeleteObjects (§6.4)
 DELETE_BEFORE_COMMIT = "delete-before-commit"
 DELETE_AFTER_COMMIT = "delete-after-commit"
@@ -60,6 +66,11 @@ CRASH_POINTS = frozenset(
         PUT_AFTER_BYTES,
         PUT_AFTER_COMMIT,
         PUT_AFTER_GC_UNLINK,
+        COPY_AFTER_REGISTER,
+        COPY_MID_WRITE,
+        COPY_AFTER_BYTES,
+        COPY_AFTER_COMMIT,
+        COPY_AFTER_GC_UNLINK,
         DELETE_BEFORE_COMMIT,
         DELETE_AFTER_COMMIT,
         DELETE_OBJECTS_BEFORE_COMMIT,

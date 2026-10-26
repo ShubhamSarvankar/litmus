@@ -869,6 +869,55 @@ from the harness's side is what happens today (minus today's orphaned rows and p
 files). Refusing would have made those buckets fail cleanup: `nuke_prefixed_buckets`
 re-raises the first cleanup error, which pytest would report as a teardown error.
 
+#### §6.10 CopyObject
+
+CopyObject is PutObject (§6.2) whose bytes come from another object's blob (§11).
+
+K1. Read-only checks, in this order: the destination bucket exists (NoSuchBucket); the
+    `x-amz-copy-source` value parses (400 InvalidArgument; 501 for an ARN or a version
+    ID other than `null`); `x-amz-metadata-directive` and `x-amz-tagging-directive` are
+    COPY or REPLACE (400 InvalidArgument); under REPLACE the request's headers are
+    parsed (400 MetadataTooLarge); the source bucket exists (NoSuchBucket) and the
+    source key has a row (NoSuchKey); a copy of an object onto itself without REPLACE
+    is refused (400 InvalidRequest).
+
+K2. Read the source row, decide its `x-amz-copy-source-if-*` conditions against that
+    row (412 PreconditionFailed), and open its blob: GET's sequence (§8 steps 1 to 3),
+    with its ENOENT retry (the conditions are decided again on every re-read row), so
+    the conditions, the headers and the bytes belong to one row. The size of the open
+    file must equal the row's size, else 500. This happens before anything is
+    registered, so a refused or failed read leaves nothing behind.
+
+K3. `id = REGISTER('object', dst_bucket, dst_key)` **[C]**. `⚡copy-after-register`
+
+K4. `WRITE_BLOB(id, source descriptor)` **[Ff] [Fd]** (`⚡copy-mid-write` inside). Before
+    the fsync, a verify step checks that the size written equals the row's and, for a
+    source that was not assembled from parts, that the MD5 written equals the row's
+    ETag; otherwise 500 and the blob is discarded. A multipart source's ETag is not the
+    MD5 of its bytes, so only its size is checked. `⚡copy-after-bytes`
+
+K5. The P4 transaction for the destination key, with the request's `If-Match` and
+    `If-None-Match` as the destination's conditions (§10): the headers are the
+    source's under COPY and the request's under REPLACE; `last_modified` is stamped in
+    the commit; the ETag is the MD5 of the copied bytes. COMMIT **[C]**.
+    `⚡copy-after-commit`
+
+K6. If the commit replaced a row: `GC([old.blob_id])` (`⚡copy-after-gc-unlink` inside)
+    **[C]**.
+
+K7. 200 with a `CopyObjectResult` body holding the ETag and LastModified.
+
+Any failure in K3 to K5 discards the new blob as PutObject does. Kills leave what
+PutObject's leave, with the same sweep reports:
+
+| Kill at | State left behind | Sweep at restart | Clients see after restart |
+|---|---|---|---|
+| `copy-after-register` | `pending` row, no file | delete row; `InterruptedWrite` (bytes_durable = false) | destination as before; source untouched |
+| `copy-mid-write` | `pending` row, partial `tmp/<id>.tmp` | delete temp (`LeftoverTemp`), then row (`InterruptedWrite`, false) | destination as before |
+| `copy-after-bytes` | `pending` row, complete blob | unlink blob, delete row; `InterruptedWrite` (bytes_durable = true) | destination as before, with its old bytes and ETag |
+| `copy-after-commit` | row points at the copy's `live` blob; a replaced destination blob is `garbage`, file present | unlink it, delete row; `InterruptedCleanup`; nothing when there was no old destination | the copy |
+| `copy-after-gc-unlink` | replaced blob `garbage`, file gone | delete row silently | the copy |
+
 ### §7. Startup sequence and consistency sweep
 
 Startup, before any request is accepted. Every refusal exits non-zero with a message
@@ -1231,29 +1280,80 @@ still fails.
 
 ### §11. CopyObject and UploadPartCopy (R13)
 
-Scope: not part of the implementation (decision 15); both keep returning 501 until you
-schedule them.
+Status: CopyObject is implemented as below (sequence in §6.10). UploadPartCopy is not;
+a PUT with `x-amz-copy-source` and `partNumber` and `uploadId` still returns 501.
 
-**Decided (decision 8): copy the bytes into a new ID.** CopyObject is PutObject whose source is
-another object's blob:
+**Decided (decision 8): copy the bytes into a new ID.** CopyObject is PutObject whose
+source is another object's blob:
 
 1. Resolve the source row and open its blob, with GET's ENOENT retry (§8). The source
-   conditions (`x-amz-copy-source-if-match` and the rest) are evaluated against the
-   row that named the opened blob, because those are the bytes being copied.
+   conditions (`x-amz-copy-source-if-match` and the rest) are evaluated against the row
+   that named the opened blob, because those are the bytes being copied. The
+   evaluator is the one GET and HEAD use, over a view of the request that shows only
+   the four `x-amz-copy-source-if-*` headers under the names of the RFC 9110
+   preconditions: the request's own `If-Match` and `If-None-Match` are conditions on
+   the destination and must never be read as conditions on the source.
 2. REGISTER **[C]**; WRITE_BLOB from the source descriptor **[Ff] [Fd]**.
 3. The P4 transaction for the destination key, including destination preconditions
    **[C]**; GC of the destination's old blob.
 
 The source can be overwritten or deleted mid-copy without harm (the descriptor pins
-it). Copying a key onto itself is either 400 InvalidRequest (no metadata change, as
-ceph's `test_object_copy_to_itself` expects) or, with
-`x-amz-metadata-directive: REPLACE`, a metadata-only transaction that keeps the same
-`blob_id`, since the bytes do not change.
+it): the copy is of the version whose row the conditions were decided on. A source
+replaced between the row read and the open is copied as it then is, with the conditions
+decided again on that row; one deleted in that window is NoSuchKey; four replacements in
+a row are 503 SlowDown (decision 14). Lost source bytes (the file gone, the row
+unchanged) are 500.
+
+Choices (AWS documents less than this; each is Litmus's own where it says so):
+
+- **Source format.** `bucket/key`, a leading slash optional, percent-decoded once (a
+  `+` is a plus), with an optional `?versionId=null` split off before decoding. A
+  value that is not bucket and key, has an unknown query, or is not valid UTF-8 once
+  decoded is 400 InvalidArgument naming the header (the API reference gives no code for
+  a malformed source). `versionId` other than `null` and access point or Outposts ARNs
+  are 501.
+- **Error order.** Destination bucket, source syntax, directives, the request's headers
+  under REPLACE, source bucket, source key, the self-copy refusal, the source
+  conditions, then the copy. The 400s come before the conditions, as in §10.
+- **Source conditions.** Each failing alone is 412 PreconditionFailed. AWS documents
+  only two combinations (If-Match true with If-Unmodified-Since false is 200;
+  If-None-Match false with If-Modified-Since true is 412) and ceph expects 412 for
+  If-Match and If-None-Match alone. The RFC 9110 order gives both documented
+  combinations; the evaluator's "not modified" answer is reported as 412.
+- **Destination conditions.** `If-Match` and `If-None-Match` of the request, as for
+  PutObject (§10), in the commit.
+- **Metadata directive.** COPY (the default): Content-Type, the system headers and the
+  user metadata come from the source, and the request's are ignored. REPLACE: they come
+  from the request, as for PutObject (Content-Type defaults to `binary/octet-stream`),
+  and none are kept from the source. Any other value is 400 InvalidArgument.
+- **Tagging.** Litmus stores no tags. `x-amz-tagging-directive: COPY`, or REPLACE with an
+  empty `x-amz-tagging`, proceeds; REPLACE with tags is 501, since they would be dropped.
+- **ETag.** The MD5 of the copied bytes, always a plain MD5. A multipart source's
+  `md5-N` ETag becomes the MD5 of the whole object, which is what AWS's "the object copy
+  will be a single part object" implies (the value is not stated). A single part source's
+  ETag is unchanged.
+- **Copying onto itself.** Source and destination are the same bucket and key (with
+  `versionId` absent or `null`). Without `x-amz-metadata-directive: REPLACE` it is 400
+  InvalidRequest and nothing changes (ceph's `test_object_copy_to_itself`). With REPLACE
+  it is the ordinary byte copy above (decision 19): a new blob with
+  the same bytes, the new headers, a new Last-Modified, and the old blob garbage. AWS
+  accepts a self-copy that changes a storage class, encryption or a website redirect
+  too; Litmus does not honor those headers, so REPLACE is its only change.
+- **Not honored, as for PutObject:** the ACL, storage class, SSE and checksum headers of
+  the request, and the SSE-C headers for the source, are ignored.
+
+*Possible later optimization.* A self-copy with REPLACE could be a metadata-only
+transaction that keeps the same `blob_id`, since the bytes do not change: the headers
+and Last-Modified updated only if the row still names the blob that was read, and no
+blob becoming garbage. It would save copying a large object for a header change. It is
+not done: it needs a second commit procedure and its own crash analysis for a case the
+byte copy already handles correctly.
 
 UploadPartCopy is UploadPart whose bytes come from a byte range of the source blob:
 U2 to U6 with WRITE_BLOB reading `[first, last]` from the source descriptor. A missing
 source must answer NoSuchKey before anything is registered, so
-`test_upload_part_copy_percent_encoded_key` keeps passing for the right reason.
+`test_upload_part_copy_percent_encoded_key` keeps passing for the right reason (today
+it passes because the request is 501).
 
 **Not chosen: shared IDs with reference counts.** Immutable blobs make sharing
 safe in principle: add a `refs` count to `blobs`, change it in the same transaction as
@@ -1417,6 +1517,11 @@ new meaning described in §6.
 | `put-after-bytes` | `test_overwrite_killed_after_bytes_keeps_old_object` | **R2**: the old object's exact bytes and ETag survive |
 | `put-after-commit` | `test_overwrite_killed_after_commit` | new object visible; old blob removed as `InterruptedCleanup` |
 | `put-after-gc-unlink` | `test_overwrite_killed_after_gc_unlink` | `garbage` row without a file is purged silently; report clean |
+| `copy-after-register` | `test_copy_killed_after_register` | registered ID with no bytes: destination not created; row removed; `InterruptedWrite` (false); source intact |
+| `copy-mid-write` | `test_copy_killed_mid_write`, `test_copy_over_an_existing_key_killed_mid_write_keeps_the_old_object` | the first 64 KiB of the source in a temp file; removed with the row; the old destination survives |
+| `copy-after-bytes` | `test_copy_killed_after_bytes_to_a_new_key`, `test_copy_over_an_existing_key_killed_after_bytes_keeps_the_old_object` | **R2**: the complete copy is not visible; the old destination's exact bytes and ETag survive; `InterruptedWrite` (true) |
+| `copy-after-commit` | `test_copy_to_a_new_key_killed_after_commit_is_complete`, `test_copy_over_an_existing_key_killed_after_commit`, `test_copy_onto_itself_with_replace_killed_after_commit` | the copy is visible; the replaced blob (a self-copy's source blob too) removed as `InterruptedCleanup`; nothing to clean for a new key |
+| `copy-after-gc-unlink` | `test_copy_over_an_existing_key_killed_after_gc_unlink` | `garbage` row without a file is purged silently; report clean |
 | `delete-before-commit` | `test_delete_killed_before_commit_keeps_object` | **R3**: object and bytes intact (fails on today's code) |
 | `delete-after-commit` | `test_delete_killed_after_commit` | 404; blob removed; no `OrphanedMetadata` |
 | `delete-objects-after-commit` | `test_delete_objects_killed_after_commit` | all deleted keys 404, keys with per-key errors intact; every blob removed |
@@ -1440,7 +1545,7 @@ new meaning described in §6.
 | `store-init-after-commit` | `test_first_start_killed_after_store_row` | a first start killed between the `store` row and the marker: restarting with the same blob directory finishes it (marker written, row `ready`); restarting with a different blob directory refuses and deletes nothing |
 
 GC is one procedure; its unlink window is proven through PutObject and Complete, and
-DeleteObject, DeleteObjects and Abort reuse it unchanged. The window between
+DeleteObject, DeleteObjects, Abort and CopyObject reuse it unchanged. The window between
 WRITE_BLOB's fsync and its rename leaves the same state class as `*-mid-write` (a temp
 file only) and needs no separate point.
 
@@ -1641,7 +1746,8 @@ implemented. Not flipped even then:
 `test_put_current_object_if_match`, `test_put_current_object_if_none_match`,
 `test_put_object_current_if_match`, `test_multipart_put_current_object_if_match`,
 `test_multipart_put_current_object_if_none_match` (they enable bucket versioning,
-which returns 501), and `test_copy_object_ifmatch_good` / `_failed` (CopyObject).
+which returns 501). `test_copy_object_ifmatch_good` / `_failed` (CopyObject) flip with
+CopyObject (§11).
 
 **Eased, not flipped:** `test_multipart_upload_resend_part` and
 `test_multipart_upload` need Content-Type and user metadata carried from
@@ -1775,7 +1881,8 @@ Recorded on 2026-10-23.
     After (a) and (b), you rewrite `docs/crash-model.md`, `docs/publication-barrier.md`
     and `docs/compatibility.md` before any feature work starts. Conditional writes
     (§10) and CopyObject / UploadPartCopy (§11) come later, in an order you choose.
-    They are not part of this implementation.
+    They are not part of this implementation. Done since: conditional writes and
+    deletes (§10) and CopyObject (§11, §6.10, decision 19); UploadPartCopy remains.
 
 Recorded during step (a):
 
@@ -1793,3 +1900,12 @@ Recorded during step (a):
     multipart work, not in step (a).
 18. **README.** The README's crash and publication-barrier sections are part of your
     doc rewrite after steps (a) and (b) (decision 15).
+
+Recorded with CopyObject:
+
+19. **CopyObject.** Implemented as §6.10 and §11 describe. Choices you made: a copy onto
+    itself with `x-amz-metadata-directive: REPLACE` is the ordinary byte copy, and the
+    metadata-only commit is recorded in §11 as a possible later optimization;
+    `x-amz-tagging-directive: REPLACE` with a non-empty `x-amz-tagging` is 501 while
+    COPY, and REPLACE with an empty tag set, proceed; each source condition that fails
+    on its own is 412 PreconditionFailed. UploadPartCopy stays 501.
