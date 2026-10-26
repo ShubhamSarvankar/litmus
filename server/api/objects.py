@@ -14,6 +14,7 @@ from server.api.conditions import (
     if_range_holds,
     write_precondition,
 )
+from server.api.delete_document import S3_NAMESPACE
 from server.api.user_metadata import parse_user_metadata, response_headers
 from server.checksums import CRC64NVME, UploadChecks
 from server.crash_points import (
@@ -345,6 +346,26 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
     except BaseException:
         f.close()
         raise
+
+
+# GetObjectTagging for a store that holds no tags: PutObject, CreateMultipartUpload and
+# CopyObject refuse a non-empty x-amz-tagging and nothing else sets tags (request_guard),
+# so the tag set of every object is empty.
+_EMPTY_TAGGING = (
+    f'<?xml version="1.0" encoding="UTF-8"?>\n<Tagging xmlns="{S3_NAMESPACE}"><TagSet/></Tagging>'
+)
+
+
+async def _get_object_tagging(bucket: str, key: str, request: Request) -> Response:
+    """GetObjectTagging: the bucket is checked first, then the key. Range, conditional
+    headers and response-* overrides do not apply to it, and, as for GetObject,
+    x-amz-expected-bucket-owner and x-amz-request-payer are not evaluated."""
+    metadata = request.app.state.metadata
+    if not metadata.bucket_exists(bucket):
+        raise NoSuchBucket(extra={"BucketName": bucket})
+    if metadata.get_object_meta(bucket, key) is None:
+        raise NoSuchKey(extra={"Key": key})
+    return Response(content=_EMPTY_TAGGING, status_code=200, media_type="application/xml")
 
 
 async def _head_object(bucket: str, key: str, request: Request) -> Response:

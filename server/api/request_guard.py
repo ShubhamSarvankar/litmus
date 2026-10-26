@@ -91,10 +91,19 @@ OBJECT_SUBRESOURCES = frozenset(
     }
 )
 
-# Subresource requests Litmus implements, as (method, subresource).
+# Subresource requests Litmus implements, as (method, subresource). GET ?tagging is
+# GetObjectTagging, which Litmus answers with an empty tag set: it stores no tags, so
+# that is always true. It is not tagging support; Put/DeleteObjectTagging and the bucket
+# tagging operations stay refused.
 _IMPLEMENTED_BUCKET = frozenset({("GET", "versions"), ("POST", "delete")})
 _IMPLEMENTED_OBJECT = frozenset(
-    {("PUT", "uploadId"), ("POST", "uploadId"), ("DELETE", "uploadId"), ("POST", "uploads")}
+    {
+        ("PUT", "uploadId"),
+        ("POST", "uploadId"),
+        ("DELETE", "uploadId"),
+        ("POST", "uploads"),
+        ("GET", "tagging"),
+    }
 )
 
 # Query-parameter sets each mutating method accepts. "x-id" is an operation-name hint
@@ -321,6 +330,19 @@ def _check(method: str, path: str, query, headers) -> None:
     for name in sorted(query_keys & subresources):
         if (method, name) not in implemented:
             raise NotImplementedOperation(extra={"Subresource": name, "Method": method})
+
+    # GetObjectTagging takes ?tagging and versionId (already checked above) and nothing
+    # else: partNumber, response-* and the like belong to GetObject, so they are refused
+    # rather than ignored.
+    if (
+        key
+        and method == "GET"
+        and "tagging" in query_keys
+        and (query_keys - _IGNORED) != {"tagging"}
+    ):
+        raise NotImplementedOperation(
+            extra={"Method": method, "QueryParameters": ",".join(sorted(query_keys))}
+        )
 
     if method in allowed and (query_keys - _IGNORED) not in allowed[method]:
         raise NotImplementedOperation(

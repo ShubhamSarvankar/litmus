@@ -29,7 +29,9 @@ left on disk, in the database and visible to clients after a restart.
 
 ## API
 
-The app registers 12 routes: 11 for S3 requests and `/health`. FastAPI's default
+The app registers 12 routes: 11 for S3 requests and `/health`. The five `/{bucket}`
+routes also accept a trailing slash (`/{bucket}/`), which is not counted as a route of
+its own. FastAPI's default
 documentation routes are turned off, so a bucket named `docs`, `redoc` or
 `openapi.json` behaves like any other bucket. The S3 routes dispatch on query
 parameters as follows.
@@ -44,6 +46,7 @@ parameters as follows.
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
 | PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
+| GET | `/{bucket}/{key}?tagging` | GetObjectTagging, answered with an empty `TagSet`: Litmus stores no tags, so that is always true. This is not tagging support. `versionId=null` is accepted; any other query parameter is 501. |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501. |
@@ -52,7 +55,7 @@ parameters as follows.
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
-configuration, tagging, ListParts, ListMultipartUploads, POST Object and others)
+configuration, tagging (other than GetObjectTagging), ListParts, ListMultipartUploads, POST Object and others)
 get 501 NotImplemented before reaching a handler, and change nothing. `/{bucket}/`
 (a trailing slash and no key) is the bucket, the same as `/{bucket}`, for every method
 in the table. Keys are stored as the exact string the client sent.
@@ -68,12 +71,12 @@ are written. PutObject and UploadPart (and DeleteObjects, over its XML body) als
 before the data is made durable; nothing is stored or returned yet. See [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
-its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies
-of objects under 8 MiB), `sync`, `rm`, `rb` and `s3api put-object`, `get-object` and
-`head-object`. `scripts/aws_cli_smoke.sh` runs these checks. Only `http://` was tested,
-credentials are not checked, and an s3 to s3 copy of a larger object fails: before the
-CLI copies in parts (UploadPartCopy, which Litmus implements) it reads the source's tags
-with GetObjectTagging, which gets 501 NotImplemented.
+its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies,
+among them a 40 MiB copy in parts), `sync`, `rm`, `rb` and `s3api put-object`,
+`get-object` and `head-object`. `scripts/aws_cli_smoke.sh` runs these checks. Only `http://` was tested,
+and credentials are not checked. Before the CLI copies an object above 8 MiB in parts
+(UploadPartCopy) it reads the source's tags with GetObjectTagging, which Litmus answers
+with an empty tag set, since it stores none.
 
 ---
 
@@ -202,6 +205,7 @@ docs/
 
 ## Not implemented
 
-Authentication, ACLs and policies, versioning, tagging, the `allow-unordered`
+Authentication, ACLs and policies, versioning, tagging (GetObjectTagging only answers
+that an object has no tags), the `allow-unordered`
 listing extension, append writes, and conditional deletes other than `If-Match` on DeleteObject. Litmus runs as one process on one
 machine. See [`docs/compatibility.md`](docs/compatibility.md).

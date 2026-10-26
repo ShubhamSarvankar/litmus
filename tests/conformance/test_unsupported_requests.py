@@ -20,7 +20,12 @@ METHODS = ["GET", "HEAD", "PUT", "POST", "DELETE"]
 
 # Requests that are implemented, so they are not expected to return 501.
 IMPLEMENTED_BUCKET = {("GET", "versions"), ("POST", "delete")}
-IMPLEMENTED_OBJECT = {("POST", "uploadId"), ("DELETE", "uploadId"), ("POST", "uploads")}
+IMPLEMENTED_OBJECT = {
+    ("POST", "uploadId"),
+    ("DELETE", "uploadId"),
+    ("POST", "uploads"),
+    ("GET", "tagging"),
+}
 
 
 @pytest.fixture

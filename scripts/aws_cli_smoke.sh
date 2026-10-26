@@ -266,19 +266,16 @@ step_copy_object() {
     aws s3api head-object --bucket "$BUCKET" --key small.bin > /dev/null || die "the source is gone"
 }
 
-step_copy_large_fails_on_get_object_tagging() {
-    # Above the threshold the CLI copies in parts, and before it sends anything it reads
-    # the source's tags with GetObjectTagging, which Litmus does not implement. The copy
-    # fails there, so no UploadPartCopy is ever sent (the server implements it; the
-    # boto3 managed copy in tests/conformance/test_upload_part_copy_boto3.py sends one).
+step_copy_large() {
+    # Above the threshold the CLI copies in parts: it reads the source's tags with
+    # GetObjectTagging, which Litmus answers with an empty TagSet (it stores no tags),
+    # then sends CreateMultipartUpload, one UploadPartCopy per part and
+    # CompleteMultipartUpload.
     aws s3 cp "s3://$BUCKET/large.bin" "s3://$BUCKET/copied-large.bin" > "$WORK/out" 2>&1 \
-        && die "s3 to s3 cp of the 40 MiB object succeeded: $(cat "$WORK/out")"
-    grep -q "NotImplemented" "$WORK/out" || die "no NotImplemented in: $(cat "$WORK/out")"
-    grep -q "GetObjectTagging" "$WORK/out" || die "NotImplemented does not name GetObjectTagging in: $(cat "$WORK/out")"
-    if aws s3api head-object --bucket "$BUCKET" --key copied-large.bin > /dev/null 2>&1; then
-        die "copied-large.bin exists after the failed copy"
-    fi
-    aws s3 ls "s3://$BUCKET/" | ls_names | grep -qx "copied-large.bin" && die "copied-large.bin is listed"
+        || { cat "$WORK/out"; die "s3 to s3 cp of the 40 MiB object failed"; }
+    aws s3 cp "s3://$BUCKET/copied-large.bin" "$WORK/down/copied-large.bin" > /dev/null || die "download of the copy failed"
+    cmp -s "$DATA/large.bin" "$WORK/down/copied-large.bin" || die "the copy's bytes differ from the source's"
+    aws s3 ls "s3://$BUCKET/" | ls_names | grep -qx "copied-large.bin" || die "copied-large.bin is not listed"
     aws s3api head-object --bucket "$BUCKET" --key large.bin > /dev/null || die "the source is gone"
     return 0
 }
@@ -311,7 +308,7 @@ run_step step_key_names
 run_step step_sync
 run_step step_s3api_head_range
 run_step step_copy_object
-run_step step_copy_large_fails_on_get_object_tagging
+run_step step_copy_large
 run_step step_rm_rb
 
 echo "All steps passed (aws-cli $AWS_VERSION)."

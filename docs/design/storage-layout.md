@@ -2034,9 +2034,8 @@ Recorded with UploadPartCopy:
     greater than 5 MB" is not enforced; the 5 MiB minimum part size stays unenforced
     (there is no EntityTooSmall); the `x-amz-copy-source-server-side-encryption-customer-*`
     headers are 501 on both CopyObject and UploadPartCopy, where CopyObject had ignored
-    them. The CLI's copy of an object above its multipart threshold still fails, because
-    it reads the source's tags with GetObjectTagging first (501); GetObjectTagging is not
-    implemented.
+    them. The CLI's copy of an object above its multipart threshold reads the source's tags
+    with GetObjectTagging first; decision 22 answers it, and the copy succeeds.
 
 Recorded with the `x-amz-tagging` refusal:
 
@@ -2047,3 +2046,19 @@ Recorded with the `x-amz-tagging` refusal:
     about it (not found), and the CopyObject page gives `x-amz-tagging` the default "the
     empty value". The check does not apply to a PUT with `x-amz-copy-source`
     (CopyObject, decision 19) or to UploadPart and UploadPartCopy.
+
+Recorded with GetObjectTagging:
+
+22. **GetObjectTagging.** `GET /{bucket}/{key}?tagging` answers 200 with an empty `TagSet`
+    (namespace `http://s3.amazonaws.com/doc/2006-03-01/` on `Tagging`, as the API
+    reference's sample response). This is an answer from a store that holds no tags, not
+    tagging support: no request can set a tag (decision 21, CopyObject §6.10 and
+    PutObjectTagging being 501), so the true tag set of every object is empty. The
+    handler reads no blob and writes nothing: the bucket is checked (NoSuchBucket), then
+    the key's row (NoSuchKey). `versionId` is handled as for GetObject (`null` or 501);
+    `x-amz-expected-bucket-owner` and `x-amz-request-payer` are not evaluated, and no
+    `x-amz-version-id` is sent, as for GetObject. Range, conditional headers and
+    `response-*` do not apply; `?tagging` with any other parameter (besides `x-id`) is
+    501 in the guard. PutObjectTagging, DeleteObjectTagging, the bucket tagging
+    operations and `HEAD ?tagging` stay 501. The GetObjectTagging page lists no errors
+    and does not say how an empty `TagSet` is written (not found).

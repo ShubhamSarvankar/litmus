@@ -120,6 +120,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | CopyObject | 330 | 508 | 193 | A PUT with `x-amz-copy-source` and no query copies the source's bytes into a new blob and commits the destination like PutObject (see "CopyObject" under Known gaps). UploadPartCopy, a `versionId` other than `null`, an ARN source and a REPLACE of the tag set with tags stay 501. 13 passes gained, as forecast, test by test: `test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, and `test_copy_object_ifmatch_good`, `_ifmatch_failed`, `_ifnonematch_good`, `_ifnonematch_failed`. The results file differs from the previous one in those 13 lines only (26 lines, 13 out and 13 in), and the denominator stays 330. All 13 are genuine (26 incidental and 18 borderline stay, so 149 genuine): each failed before with 501, and the three that expect an error pass only because the check exists: against a server with the source conditions and the self-copy refusal switched off, `test_object_copy_to_itself`, `test_copy_object_ifmatch_failed` and `test_copy_object_ifnonematch_good` fail. Still failing, as forecast: the 7 `test_multipart_copy_*` tests (UploadPartCopy), the 2 versioned copy tests (versioning) and the 2 `test_object_copy_not_owned_*` tests (a second user, and PutObjectAcl). `test_upload_part_copy_percent_encoded_key`, `test_object_copy_bucket_not_found` and `test_object_copy_key_not_found` still pass, incidentally. Recorded at the commit that adds CopyObject. |
 | UploadPartCopy | 330 | 508 | 199 | A PUT with `x-amz-copy-source`, `partNumber` and `uploadId` copies a range of the source's bytes into a new part blob and records it like UploadPart (see "UploadPartCopy" under Known gaps). A `versionId` other than `null`, an ARN source and the `x-amz-copy-source-server-side-encryption-customer-*` headers (on this and on CopyObject) are 501. 6 passes gained, as forecast, test by test: `test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`. The results file differs from the previous one in those 6 lines only (12 lines, 6 out and 6 in), and the denominator stays 330. All 6 are genuine (26 incidental and 18 borderline stay, so 155 genuine): each failed before with 501, and the two that expect an error (`_invalid_range`, `_improper_range`) pass only because the range is parsed and checked against the source's size. Still failing, as forecast: `test_multipart_copy_versioned` (it enables versioning first, 501). `test_upload_part_copy_percent_encoded_key` still passes, now with 404 NoSuchKey (its copy source names `anyfilename%25.txt`, which decodes once to the key `anyfilename%.txt`, and there is none) instead of 501, and stays in the incidental list because a server that answers 501 passes it too. The CLI's copy of an object above its multipart threshold still fails, at GetObjectTagging (501), before it sends an UploadPartCopy. Recorded at the commit that adds UploadPartCopy. |
 | Refuse `x-amz-tagging` | 330 | 508 | 199 | PutObject and CreateMultipartUpload answer 501 to a non-empty `x-amz-tagging` instead of dropping it (see "`x-amz-tagging` on PutObject and CreateMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends the header, because the filter deselects every test marked `tagging` and the lifecycle and policy tests that set tags. The results file is identical to the previous one. Recorded at the commit that adds the refusal. |
+| GetObjectTagging, always empty | 330 | 508 | 199 | `GET /{bucket}/{key}?tagging` answers 200 with an empty TagSet (see "GetObjectTagging" under Known gaps). It is an answer from a store that holds no tags, not tagging support: PUT and DELETE `?tagging` and every bucket tagging request stay 501. No outcome changed, and none was expected to: no selected test calls `get_object_tagging`, `put_object_tagging` or `delete_object_tagging` or sends `?tagging` (checked by parsing every function in `test_s3.py` for those calls; the 13 selected tests that reach `_multipart_upload`, whose `tagging` parameter they never pass, are the only other matches), because the filter deselects the tests whose names say tagging. The results file is identical to the previous one. The AWS CLI's s3 to s3 copy of a 40 MiB object now succeeds (see "AWS CLI"). |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -282,12 +283,14 @@ Verified, with content checks and not only exit codes:
   an empty directory, compared with `diff -r`
 - `s3 cp s3://b/small.bin s3://b/copied.bin` (one CopyObject, under the 8 MiB
   threshold): bytes compared after a download, the copy's ETag equal to the source's,
-  the copy listed. The same copy of the 40 MiB object fails with NotImplemented
-  naming GetObjectTagging and creates no destination key: above the multipart threshold
-  the CLI reads the source's tags first (`HEAD`, then `GET ?tagging`), and Litmus does
-  not implement GetObjectTagging, so the CLI never sends an UploadPartCopy. The server
-  does implement UploadPartCopy; boto3's managed copy of a 20 MiB object, which sends
-  one, is tested in `tests/conformance/test_upload_part_copy_boto3.py`.
+  the copy listed. The same copy of the 40 MiB object (step 9) succeeds: above the
+  multipart threshold the CLI reads the source's tags first (`HEAD`, then `GET
+  ?tagging`, answered with an empty TagSet), then sends CreateMultipartUpload, five
+  UploadPartCopy requests and CompleteMultipartUpload. The destination's bytes equal the
+  source's (sha256 and `cmp`), and its Content-Type, user metadata, size and ETag equal
+  the source's. Until GetObjectTagging was answered, this copy failed with NotImplemented
+  at that call and the CLI never sent an UploadPartCopy. boto3's managed copy of a 20 MiB
+  object is also tested in `tests/conformance/test_upload_part_copy_boto3.py`.
 - `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
   BucketNotEmpty, and `s3 rb --force`
 
@@ -296,10 +299,6 @@ Limits of this check:
 - Only `http://` was tested. Litmus does not serve TLS itself, and what the CLI sends
   over `https://` was not captured.
 - Credentials are not checked: any access key and secret are accepted.
-- `s3 cp s3://b/x s3://b/y` of an object above the multipart threshold fails with 501
-  NotImplemented for GetObjectTagging, which the CLI calls on the source before it
-  copies in parts (UploadPartCopy itself is implemented), and creates no destination
-  key.
 - `s3 sync` compares size and modification time. LastModified has one second
   resolution, so files modified in the same second they were uploaded can be uploaded
   again by the next sync; the script backdates its source files for this reason.
@@ -311,7 +310,8 @@ request is rejected for missing or invalid credentials.
 
 **Unimplemented operations answer 501.** Requests for S3 operations Litmus does not
 implement get 501 NotImplemented and change nothing. That includes ACLs, policies,
-versioning configuration, tagging, CORS (including `OPTIONS`, the CORS preflight),
+versioning configuration, tagging (except GetObjectTagging, below), CORS (including
+`OPTIONS`, the CORS preflight),
 lifecycle, POST Object, ListParts, ListMultipartUploads and GetObjectAttributes. A request
 with `x-amz-copy-source` that is not a plain PUT of a key (any other method, or a
 query other than `x-id`) is 501 too.
@@ -1032,9 +1032,10 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   SSE-C headers for the destination, the request payer and expected owner headers are
   ignored, as for UploadPart.
 - *The AWS CLI.* An `aws s3 cp` between two keys above the multipart threshold copies in
-  parts, but before the first part it calls GetObjectTagging on the source (501 here), so
-  that command still fails. `aws s3api upload-part-copy`, boto3's `client.copy` and
-  ceph's tests send UploadPartCopy directly.
+  parts, and before the first part it calls GetObjectTagging on the source, which Litmus
+  answers with an empty TagSet (see "GetObjectTagging" below). The copy succeeds.
+  `aws s3api upload-part-copy`, boto3's `client.copy` and ceph's tests send UploadPartCopy
+  directly.
 
 **`x-amz-tagging` on PutObject and CreateMultipartUpload.** A non-empty value is 501
 NotImplemented, decided in the request guard before any body byte is read, so no blob,
@@ -1054,6 +1055,36 @@ header on UploadPart and UploadPartCopy, which take none, is not read. A PUT wit
 directly", CopyObject, `x-amz-tagging`), so the header is accepted and not read. What AWS
 does with a non-empty value there is not found. `x-amz-acl`, the storage class and the SSE
 headers are still ignored by PutObject.
+
+**GetObjectTagging.** `GET /{bucket}/{key}?tagging` answers 200 with an empty tag set:
+
+    <?xml version="1.0" encoding="UTF-8"?>
+    <Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet/></Tagging>
+
+This is not tagging support. Litmus stores no tags, and no request can give an object
+any: PutObject and CreateMultipartUpload refuse a non-empty `x-amz-tagging` (above),
+CopyObject refuses a REPLACE with tags and takes the source's tags, which are empty, under
+COPY, and PutObjectTagging is 501. So the tag set of every object is empty, and the empty
+answer is always true. It exists because the AWS CLI reads the source's tags with this
+call before an s3 to s3 copy in parts, and the copy failed at it. What stays 501:
+PutObjectTagging (`PUT ?tagging`), DeleteObjectTagging (`DELETE ?tagging`), the bucket
+tagging operations (`GET`, `PUT` and `DELETE /{bucket}?tagging`), `HEAD ?tagging`, and
+`?tagging` with any query parameter besides `versionId` (`x-id` is ignored), which
+includes `partNumber`, `uploadId` and `response-*`. The tagging subresource decides the
+operation, so none of GetObject's handling applies: `Range`, the conditional headers and
+`response-*` are not read.
+
+The GetObjectTagging API reference page defines the request as `GET /{Key+}?tagging&
+versionId={VersionId}` with `x-amz-expected-bucket-owner` and `x-amz-request-payer`, and
+a 200 response with an optional `x-amz-version-id` header and a `Tagging` root holding a
+`TagSet` of `Tag` elements; its sample response writes the namespace
+`http://s3.amazonaws.com/doc/2006-03-01/` on `Tagging`. The page lists no errors, says
+nothing about an object with no tags or how an empty `TagSet` is written, and lists no
+conditional headers (all not found), so the empty element above is Litmus's reading of a
+`TagSet` array with no members. The bucket is checked first (404 NoSuchBucket), then the
+key (404 NoSuchKey). `versionId` is handled as for GetObject: `null` names the current
+object and any other value is 501. As for GetObject, `x-amz-expected-bucket-owner` and
+`x-amz-request-payer` are not evaluated, and no `x-amz-version-id` is sent.
 
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The
