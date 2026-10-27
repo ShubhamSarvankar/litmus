@@ -1,6 +1,12 @@
 """Tier B: no test, passing or failing, leaves a server process behind."""
 
+import os
+
 import pytest
+
+# Test sessions run with no minimum part size, as in tests/conftest.py; set before
+# server.config is imported, and inherited by the servers the fixtures start.
+os.environ["S3_MIN_PART_SIZE"] = "0"
 
 from chaos.fixtures.subprocess import live_servers, stop_all_servers, stop_servers_started_since
 

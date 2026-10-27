@@ -66,6 +66,7 @@ class LitmusApp(FastAPI):
 def create_app(
     storage: BlobStore | None = None,
     metadata: SQLiteMetadataStore | None = None,
+    min_part_size: int | None = None,
 ) -> FastAPI:
     """Build the app.
 
@@ -74,7 +75,14 @@ def create_app(
     With stores (in-process tests), the blob tree is created right away, so the app
     also works when its startup hook never runs; the hook still takes the lock,
     checks the store identity and runs the sweep.
+
+    min_part_size (bytes) overrides S3_MIN_PART_SIZE for this app; it must be a
+    non-negative int.
     """
+    if min_part_size is None:
+        min_part_size = settings.min_part_size
+    elif isinstance(min_part_size, bool) or not isinstance(min_part_size, int) or min_part_size < 0:
+        raise ValueError(f"min_part_size must be a non-negative integer, got {min_part_size!r}")
     validate_configured_crash_point()
     if settings.test_crash_point:
         logger.warning(
@@ -116,6 +124,7 @@ def create_app(
 
     application.state.storage = storage
     application.state.metadata = metadata
+    application.state.min_part_size = min_part_size
 
     # Unimplemented S3 operations and unsafe paths are answered before routing,
     # so they can never fall through to a handler that changes state.

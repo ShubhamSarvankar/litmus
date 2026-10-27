@@ -303,6 +303,7 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
         # Decided in the commit, after every other Complete error (§10); no early check.
         precondition=write_precondition(request.headers, key),
         expected_size=expected_size,
+        min_part_size=request.app.state.min_part_size,
     )
     return Response(
         content=_complete_xml(bucket, key, composite_etag),

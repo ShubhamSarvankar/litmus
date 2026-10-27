@@ -57,7 +57,7 @@ Setting the owner changed no outcome (the run with it matches the run before it)
 
 ## Result
 
-**194 passed, 129 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
+**195 passed, 128 failed, 7 skipped, of 330 selected tests.** The 7 skipped tests
 (`test_bucket_get_location`, three restore tests, `test_read_through`,
 `test_list_objects_restore_status` and `test_list_object_versions_restore_status`)
 are skipped by s3-tests itself, not by the `-k` expression. Since the last step in the
@@ -77,7 +77,7 @@ and `_overwrite_to_empty`), and the `response-*` overrides moved 1 more
 (`test_object_raw_response_headers`), and the headers and metadata of CreateMultipartUpload
 moved 1 more (`test_multipart_upload_resend_part`), and conditional GET and HEAD moved 3 more
 (`test_get_object_ifnonematch_good`, `test_get_object_ifmodifiedsince_failed` and
-`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`), and UploadPartCopy moved 6 more (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`). Disabling ACLs moved 5 from passed to failed, on purpose (`test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`: they create a bucket or put an object with a public ACL, which AWS refuses on a bucket with the default Object Ownership setting). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
+`test_get_object_ifunmodifiedsince_good`), and `If-Match` and `If-None-Match` on PutObject moved 11 more (the four `test_put_object_ifmatch_*`, the four `test_put_object_ifnonmatch_*`, `test_put_object_if_match` and the two `test_atomic_*conditional_write_1mb`), and the Complete body validation moved 1 more (`test_multipart_upload_empty`), and CopyObject moved 13 more (the nine `test_object_copy_*` tests without ACLs, versioning or a second account, and the four `test_copy_object_if*`). `If-Match` on DeleteObject moved no test (see the table), and the per key `ETag` of DeleteObjects moved 1 more (`test_delete_objects_if_match`), and UploadPartCopy moved 6 more (`test_multipart_copy_small`, `_without_range`, `_special_names`, `_multiple_sizes`, `_invalid_range` and `_improper_range`). Disabling ACLs moved 5 from passed to failed, on purpose (`test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`: they create a bucket or put an object with a public ACL, which AWS refuses on a bucket with the default Object Ownership setting). The minimum part size moved 1 more, from failed to passed (`test_multipart_upload_size_too_small`). Nothing else changed, although botocore sends `encoding-type=url` on every listing it builds,
 so every selected test that lists a bucket, and every teardown, now reads encoded keys
 and decodes them.
 
@@ -126,6 +126,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | ACLs disabled | 330 | 508 | 194 | `x-amz-acl`, the `x-amz-grant-*` headers and `x-amz-object-ownership` are no longer accepted and dropped: Litmus behaves as a bucket with Object Ownership set to BucketOwnerEnforced (see "ACL and grant headers" under Known gaps). 5 passes lost, on purpose, exactly as forecast: `test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`, because CreateBucket with `public-read` or `public-read-write` is 400 InvalidBucketAclWithObjectOwnership. The results file differs from the previous one in those 5 lines only. `test_object_raw_response_headers` stays passed (`private` is accepted). The other ACL tests stay failed, some at an earlier step: `test_create_bucket_bucket_owner_preferred` and `test_create_bucket_object_writer` now fail at CreateBucket (501), where they failed at GetBucketOwnershipControls (501) before. Of the 5, `test_object_raw_get` and `test_object_anon_put_write_access` were incidental and the other three borderline, so the figures are 24 incidental, 15 borderline and 155 genuine (genuine unchanged). Recorded at the commit that adds the handling. |
 | Complete size and checksum headers | 330 | 508 | 194 | CompleteMultipartUpload verifies `x-amz-mp-object-size` (400 InvalidRequest on a mismatch with the total of the listed parts, 400 InvalidArgument on a malformed value) and refuses the `x-amz-checksum-*` headers and `x-amz-checksum-type` with 501 (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of these on Complete. The tests that send a checksum header there (`test_multipart_checksum_sha256`, `test_multipart_reupload_checksum_and_etag` and the five `test_multipart_use_cksum_helper_*` tests) carry the `checksum` marker, which the `-k` filter deselects, no ceph test sends `x-amz-mp-object-size` (`MpuObjectSize`) or `ChecksumType` on Complete, and boto3 sends neither that header nor a checksum header on Complete by default. The results file is identical to the previous one. Recorded at the commit that adds the checks. |
 | Checksum trailers | 330 | 508 | 194 | The aws-chunked trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256` are decoded and verified like the CRC64NVME one, on PutObject and UploadPart. No outcome changed, and none was expected to: no selected test sends an aws-chunked body (boto3 over `http://` sends a checksum header), and the results file is identical to the previous one. Recorded at the commit that adds the trailers. |
+| Minimum part size | 330 | 508 | 195 | CompleteMultipartUpload answers 400 EntityTooSmall when a listed part other than the last listed one is stored smaller than `S3_MIN_PART_SIZE` (5 MiB by default; see "The minimum part size" under Known gaps). 1 pass gained, exactly as forecast: `test_multipart_upload_size_too_small`, which uploads ten parts of 10 KiB and expects 400 EntityTooSmall. The results file differs from the previous one in that one line only. No other selected test changed outcome, and none was expected to: every selected test that completes a multipart upload uses parts of 5 MiB or more except the last, or has a single part, or fails before the check (the 1 byte and 8 byte parts of `test_multipart_upload_small`, `test_multipart_resend_first_finishes_last` and the conditional tests are single part uploads). Recorded at the commit that adds the check. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -144,8 +145,11 @@ A pass is listed here when the test would also pass against a server that does n
 implement the behavior it exercises: because Litmus ignores a header or parameter and
 the expected answer equals ignoring it, because the request under test never reaches
 Litmus, because the expected answer is a 501 or another failure, or because nothing
-is authenticated or owned. By that rule, **24 of the 194 passes are incidental**.
-Of the 194 passes, 24 are incidental and 15 are borderline, which leaves 155 genuine.
+is authenticated or owned. By that rule, **24 of the 195 passes are incidental**.
+Of the 195 passes, 24 are incidental and 15 are borderline, which leaves 156 genuine.
+The pass gained with the minimum part size, `test_multipart_upload_size_too_small`, is
+genuine: against a server that does not enforce the minimum the Complete succeeds and the
+test fails.
 Disabling ACLs took 2 incidental and 3 borderline passes off the lists (see "ACL and
 grant headers" under Known gaps): 26 and 18 before.
 
@@ -256,7 +260,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). The per key `ETag` tests are under Conditional delete. |
-| Multipart upload | 14 | 10 | 4 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, an empty Complete body (400 MalformedXML), overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); the minimum part size is not enforced (1); a Complete that lists a part number twice (`test_multipart_resend_first_finishes_last`, with two different ETags for part 1) is refused, now with InvalidPartOrder, where the test expects success (1). See "The Complete body" under Known gaps; EntityTooSmall is not enforced, so `test_multipart_upload_size_too_small` fails. |
+| Multipart upload | 14 | 11 | 3 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, an empty Complete body (400 MalformedXML), overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); a Complete that lists a part number twice (`test_multipart_resend_first_finishes_last`, with two different ETags for part 1) is refused, now with InvalidPartOrder, where the test expects success (1). See "The Complete body" under Known gaps. The minimum part size is enforced (see "The minimum part size"), so `test_multipart_upload_size_too_small` passes. |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
@@ -269,7 +273,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | POST Object (browser form upload) | 27 | 0 | 27 | 0 | Fail: 501. |
 | Presigned URLs (`X-Amz-Expires`) | 5 | 0 | 5 | 0 | Fail: signatures and expiry are not checked, so expired presigned requests are served (3). The other 2 first send `OPTIONS` to the presigned URL and expect 400; `OPTIONS` is S3's CORS preflight, which Litmus does not implement, so it answers 501 NotImplemented (2). |
 | Ownership controls and public access block | 13 | 0 | 13 | 0 | Fail: 501. |
-| **Total** | **330** | **194** | **129** | **7** |
+| **Total** | **330** | **195** | **128** | **7** |
 
 ## AWS CLI
 
@@ -823,7 +827,8 @@ whatever the headers say, and only a request that passes them can be 412 or 404.
   was. AWS defines it only on AbortMultipartUpload, where it is still 501.
 - A retried Complete after a kill that follows the commit is NoSuchUpload, as without a
   condition (the gap above, unchanged).
-- EntityTooSmall still does not exist here (see "The Complete body" below). InvalidPartOrder
+- EntityTooSmall did not exist at this step (it is enforced now, see "The minimum part
+  size" below). InvalidPartOrder
   and MalformedXML for a Complete body were added after this step (see the same section).
 - `test_multipart_put_object_if_match` is not marked `fails_on_aws` and sends `*`, `badetag`
   and the current ETag, so it depends on the entity-tag rule above; it counts as genuine,
@@ -1029,9 +1034,9 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   (NoSuchKey), the source conditions (412), the range against the size (416), then the
   copy and the commit. The part number checks are UploadPart's, in its order.
 - *Part size.* The user guide gives parts of 5 MiB to 5 GiB and no minimum for the last
-  part. Neither bound is checked when a part is uploaded, as for UploadPart, and
-  EntityTooSmall is not implemented, so a copied part of 1 byte is accepted whatever its
-  number.
+  part. Neither bound is checked when a part is uploaded, as for UploadPart, so a copied
+  part of 1 byte is accepted whatever its number; Complete refuses it with EntityTooSmall
+  unless it is the last listed part (see "The minimum part size").
 - *The response.* 200 with a `CopyPartResult` body holding the ETag and LastModified. The
   ETag is the MD5 of the copied bytes, quoted, plain even when the source was uploaded in
   parts; the reference says only "Entity tag of the object" and does not give the rule.
@@ -1386,6 +1391,8 @@ CompleteMultipartUpload"):
   by the same rule, and the list is never sorted. Gaps are allowed (1 then 3 is fine).
 - InvalidPart (400): a `PartNumber` outside 1 to 10000, or a part that was never uploaded
   or whose ETag differs.
+- EntityTooSmall (400): a listed part other than the last listed one is stored smaller
+  than `S3_MIN_PART_SIZE` bytes (5 MiB by default); see the minimum part size below.
 - InvalidRequest (400): `x-amz-mp-object-size` differs from the total size of the listed
   parts.
 - Then the `If-Match` and `If-None-Match` conditions (412, or 404).
@@ -1406,9 +1413,36 @@ These are Litmus's choices where the S3 documentation does not fix the answer:
 - A `PartNumber` outside 1 to 10000 is InvalidPart, not MalformedXML or InvalidArgument:
   the number is an integer, and no such part exists. A number of any length is accepted
   as text and is out of range.
-- EntityTooSmall is not enforced: a part other than the last may be of any size. The
-  ceph tests that need it are listed under "Multipart upload" in the table above;
-  `test_multipart_upload_size_too_small` is the one selected.
+- The order of the errors, with EntityTooSmall after InvalidPart and before the
+  `x-amz-mp-object-size` mismatch, is Litmus's. Neither "CompleteMultipartUpload" nor
+  "Error" says where EntityTooSmall comes among the other errors: not found.
+
+**The minimum part size.** CompleteMultipartUpload answers 400 EntityTooSmall when a
+listed part other than the last listed one is stored smaller than `S3_MIN_PART_SIZE`
+bytes. The default is 5242880 (5 MiB). S3 API reference, "CompleteMultipartUpload",
+Special errors: EntityTooSmall, "Each part must be at least 5 MB in size, except the last
+part", 400 Bad Request. S3 User Guide, "Amazon S3 multipart upload limits": part size
+5 MiB to 5 GiB, "no minimum size limit on the last part". S3 API reference, "Error":
+EntityTooSmall, "Your proposed upload is smaller than the minimum allowed object size",
+400. Choices and what the pages leave unsaid:
+
+- The setting is a non-negative decimal integer, read when the server starts like the
+  others. A value that is not one (`-1`, `1.5`, `abc`, empty) stops the start with an
+  error naming `S3_MIN_PART_SIZE`. `0` turns the check off. Lowering it diverges from AWS
+  and is meant for tests; the test sessions of this repository set it to 0.
+- The size judged is the stored size of the part, and only the parts listed in the
+  request count: a part uploaded and not listed is not judged. The last listed part is
+  exempt, whatever its number or size (a zero byte one included), and an upload with one
+  listed part has no minimum. "CompleteMultipartUpload" says "except the last part"; that
+  this means the last listed part, not the highest uploaded one, is Litmus's reading.
+- UploadPart and UploadPartCopy do not check. "UploadPart" lists only NoSuchUpload among
+  its special errors, and "CompleteMultipartUpload" is the page that lists
+  EntityTooSmall.
+- The error response carries Code and Message only. Elements such as the offending part
+  number and sizes are not in the pages read: not found.
+- The check reads the part rows, so it is decided before a blob is registered. A refusal
+  leaves the upload open with all its parts, and the write sequence is unchanged. Design
+  decision 27 in docs/design/storage-layout.md records it.
 
 `test_multipart_resend_first_finishes_last` fails on purpose. It lists part 1 twice, first
 with a stale ETag and then with the current one, and expects the Complete to succeed.
@@ -1439,7 +1473,8 @@ Now:
   for the checksum headers.
 - The order of the errors is Litmus's; the documentation lists the errors and not which
   comes first. NoSuchUpload, then the `x-amz-mp-object-size` syntax check
-  (InvalidArgument), then MalformedXML, InvalidPartOrder and InvalidPart, then the size
+  (InvalidArgument), then MalformedXML, InvalidPartOrder and InvalidPart, then
+  EntityTooSmall (see "The minimum part size"), then the size
   mismatch (InvalidRequest), then the conditions. Every one of them is decided before a
   blob is registered, so a refusal leaves the upload open with all its parts, as a failed
   condition does, and the write sequence of Complete (docs/design/storage-layout.md
@@ -1656,8 +1691,7 @@ that documents them, and the tests in ceph/s3-tests expect it.
   it gives an object with `binary/octet-stream` and no other header or metadata, dated by
   its initiation time. No migration is needed.
 
-**Multipart details.** The minimum part size is not enforced. `partNumber`
-on GET is ignored.
+**Multipart details.** `partNumber` on GET is ignored.
 
 **Conditional GET and HEAD.** `If-Match`, `If-None-Match`, `If-Modified-Since` and
 `If-Unmodified-Since` are evaluated on GET and HEAD, against the one row the response is

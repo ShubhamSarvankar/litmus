@@ -791,11 +791,13 @@ C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part com
     3. InvalidPart: a part number outside 1 to 10000, or a part that is not recorded
        or whose ETag does not match. Read the part rows for this. Remember each
        requested part's `blob_id` and size.
-    4. InvalidRequest: `x-amz-mp-object-size` is not the total of the remembered sizes
+    4. EntityTooSmall: a listed part other than the last listed one is stored smaller
+       than `S3_MIN_PART_SIZE` bytes (5 MiB by default), judged by the remembered sizes
+       and by the listed parts only (decision 27).
+    5. InvalidRequest: `x-amz-mp-object-size` is not the total of the remembered sizes
        of exactly the listed parts (decision 26).
-    5. The condition (C4.c): there is no early conditional check (§10), so a refused
+    6. The condition (C4.c): there is no early conditional check (§10), so a refused
        Complete costs a full assembly.
-    EntityTooSmall (a part but the last under 5 MiB) is not enforced.
 
 C2. `id = REGISTER('object', bucket, key, upload_id)` **[C]**. `⚡complete-after-register`
 
@@ -1451,7 +1453,8 @@ the request was 501). Choices, each Litmus's own where it says so:
   conditional writes for PutObject and CompleteMultipartUpload only, and UploadPart
   ignores them too.
 - **Part size.** The reference gives 5 MiB to 5 GiB and no minimum for the last part.
-  Neither bound is enforced at upload, as for UploadPart; there is no EntityTooSmall.
+  Neither bound is enforced at upload, as for UploadPart; the minimum is enforced at
+  Complete (decision 27).
 - **ETag and body.** The part's ETag is the MD5 of the copied bytes, quoted, in the
   `CopyPartResult` body next to LastModified (the time of the response). There is no
   `ETag` header and no checksum element, and no `x-amz-copy-source-version-id` (Litmus has
@@ -2035,8 +2038,8 @@ Recorded with UploadPartCopy:
 
 20. **UploadPartCopy.** Implemented as §6.6A and §11 describe. Choices you made: a reversed
     range is 400 InvalidArgument; "you can copy a range only if the source object is
-    greater than 5 MB" is not enforced; the 5 MiB minimum part size stays unenforced
-    (there is no EntityTooSmall); the `x-amz-copy-source-server-side-encryption-customer-*`
+    greater than 5 MB" is not enforced; the 5 MiB minimum part size is not enforced
+    at upload (Complete enforces it, decision 27); the `x-amz-copy-source-server-side-encryption-customer-*`
     headers are 501 on both CopyObject and UploadPartCopy, where CopyObject had ignored
     them. The CLI's copy of an object above its multipart threshold reads the source's tags
     with GetObjectTagging first; decision 22 answers it, and the copy succeeds.
@@ -2133,7 +2136,8 @@ Recorded with the Complete size and checksum headers:
     differs from the total of the stored sizes of exactly the listed parts is 400
     InvalidRequest; a part uploaded and not listed does not count. The order of the errors
     extends §6.7 C1: NoSuchUpload, the size syntax, MalformedXML, InvalidPartOrder,
-    InvalidPart, the size mismatch, then the conditions. Every check is decided from the
+    InvalidPart, (decision 27 adds EntityTooSmall here,) the size mismatch, then the
+    conditions. Every check is decided from the
     part rows before a blob is registered, so a refusal leaves the upload open with all
     its parts, and the write sequence (§6.7 C2 to C5) is unchanged. Separately, a
     non-blank `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`,
@@ -2150,3 +2154,28 @@ Recorded with the Complete size and checksum headers:
     integrity for data uploads" (500) for non-consecutive part numbers with checksums.
     Details and what AWS leaves unsaid: docs/compatibility.md, "Checksum and size headers
     on CompleteMultipartUpload".
+
+Recorded with the minimum part size:
+
+27. **CompleteMultipartUpload enforces the minimum part size.** Every listed part except
+    the last listed one must be stored at `S3_MIN_PART_SIZE` bytes or more, otherwise
+    400 EntityTooSmall (S3 API reference, "CompleteMultipartUpload", Special errors:
+    "Each part must be at least 5 MB in size, except the last part", HTTP 400; S3 User
+    Guide, "Amazon S3 multipart upload limits": 5 MiB to 5 GiB, no minimum for the last
+    part; S3 API reference, "Error": EntityTooSmall, 400). The default is 5242880, the
+    5 MiB of the User Guide. The setting is a non-negative decimal integer read when the
+    server starts, and a value that is not one stops the start; `create_app` takes a
+    `min_part_size` that overrides it, which is how tests choose theirs. Lowering it
+    diverges from AWS and is meant for tests; 0 turns the check off. The size judged is
+    the part row's stored size, and only the listed parts count: a part uploaded and not
+    listed is not judged, and the last listed part is exempt whatever its number. An
+    upload with one listed part has no minimum. UploadPart and UploadPartCopy do not
+    check, as AWS raises the error at Complete ("UploadPart" lists no EntityTooSmall).
+    The check sits in §6.7 C1 between InvalidPart and the `x-amz-mp-object-size`
+    mismatch, so the order is NoSuchUpload, the size syntax, MalformedXML,
+    InvalidPartOrder, InvalidPart, EntityTooSmall, the size mismatch, then the
+    conditions. The AWS pages say nothing of the order of EntityTooSmall against the other errors (not
+    found); this order is Litmus's choice. The check reads the part rows only, so it is decided before a blob
+    is registered, a refusal leaves the upload open with all its parts, and the write
+    sequence (§6.7 C2 to C5) is unchanged. Details: docs/compatibility.md, "The Complete
+    body".

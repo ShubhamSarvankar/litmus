@@ -22,7 +22,7 @@ left on disk, in the database and visible to clients after a restart.
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
   directory before the commit that makes it visible.
 - **Protocol conformance.** Conformance tests cover the implemented operations.
-  Against ceph/s3-tests, 194 of 330 selected tests pass; every failure is explained in
+  Against ceph/s3-tests, 195 of 330 selected tests pass; every failure is explained in
   [`docs/compatibility.md`](docs/compatibility.md).
 
 ---
@@ -50,7 +50,7 @@ parameters as follows.
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
-| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the `x-amz-checksum-*` headers and `x-amz-checksum-type` are 501, since Litmus cannot verify them yet. The per part `Checksum*` elements of the body are accepted and not verified. |
+| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; every listed part but the last must be at least `S3_MIN_PART_SIZE` bytes (400 EntityTooSmall); `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the `x-amz-checksum-*` headers and `x-amz-checksum-type` are 501, since Litmus cannot verify them yet. The per part `Checksum*` elements of the body are accepted and not verified. |
 | GET | `/health` | Health check |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
@@ -134,6 +134,7 @@ Configuration is by environment variable:
 | `S3_DB_PATH` | `data/litmus.db` | SQLite database |
 | `S3_OWNER_ID` | `litmus` | ID in every `Owner` element, and the value `x-amz-expected-bucket-owner` and `x-amz-source-expected-bucket-owner` must equal (otherwise 403 AccessDenied); Litmus has one account and no authentication |
 | `S3_OWNER_DISPLAY_NAME` | `litmus` | DisplayName in every `Owner` element |
+| `S3_MIN_PART_SIZE` | `5242880` | Smallest size in bytes of a part CompleteMultipartUpload accepts, the last listed part excepted (400 EntityTooSmall); a non-negative integer. Lowering it diverges from AWS and is meant for tests; `0` turns the check off |
 
 The server refuses to start:
 
@@ -141,6 +142,7 @@ The server refuses to start:
   layout);
 - on a database with schema version 1 (earlier data is not migrated: use a new data
   directory);
+- if `S3_MIN_PART_SIZE` is not a non-negative integer;
 - if the database and the blob directory do not belong together (each holds the same
   store ID, written at first start);
 - if another server already uses the same blob directory.
@@ -164,6 +166,11 @@ uv run pytest                       # tests/ and chaos/scenarios/
 uv run pytest tests/                # unit and conformance tests
 uv run pytest chaos/scenarios/      # Tier A and Tier B chaos tests
 ```
+
+The test sessions run with `S3_MIN_PART_SIZE=0` (set in `tests/conftest.py` and
+`chaos/conftest.py`), since most tests upload parts of a few bytes; the tests of the
+minimum itself, in `tests/conformance/test_entity_too_small.py`, name theirs. The ceph and
+smoke runs use the default.
 
 The Tier B tests (`test_crash_points.py`, `test_crash_multipart.py`,
 `test_store_identity.py`, `test_raw_paths.py`) start server processes and need
