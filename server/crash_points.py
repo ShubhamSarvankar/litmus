@@ -64,6 +64,10 @@ SWEEP_AFTER_UNLINK = "sweep-after-unlink"
 # First start (§7 step 6): the store row is committed as 'initializing'; the
 # STORE_ID marker is not written yet.
 STORE_INIT_AFTER_COMMIT = "store-init-after-commit"
+# Schema migration (§20, run after §7 step 6): all statements ran inside the transaction, not
+# committed / the commit ran.
+MIGRATE_BEFORE_COMMIT = "migrate-before-commit"
+MIGRATE_AFTER_COMMIT = "migrate-after-commit"
 
 CRASH_POINTS = frozenset(
     {
@@ -99,6 +103,8 @@ CRASH_POINTS = frozenset(
         BUCKET_DELETE_AFTER_COMMIT,
         SWEEP_AFTER_UNLINK,
         STORE_INIT_AFTER_COMMIT,
+        MIGRATE_BEFORE_COMMIT,
+        MIGRATE_AFTER_COMMIT,
     }
 )
 

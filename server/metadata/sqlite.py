@@ -1,10 +1,12 @@
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.crash_points import MIGRATE_AFTER_COMMIT, MIGRATE_BEFORE_COMMIT, crash_point
 from server.metadata.base import (
     BlobRecord,
     BucketHasObjects,
@@ -20,11 +22,42 @@ from server.metadata.base import (
 )
 from server.storage.blobs import new_blob_id
 
-# Schema version 2: docs/design/storage-layout.md §5. Version 1 (keys mapped to
-# paths) is refused, not migrated (decision 4).
-_SCHEMA_VERSION = 2
+# Schema version 3: docs/design/storage-layout.md §5 and §20. Version 2 is migrated in
+# place at startup (decision 28); version 1 (keys mapped to paths) is refused, not
+# migrated (decision 4).
+_SCHEMA_VERSION = 3
+_OLDEST_VERSION = 2
 
-_DDL = [
+_ALGORITHMS = "'CRC32','CRC32C','CRC64NVME','SHA1','SHA256'"
+_TYPES = "'FULL_OBJECT','COMPOSITE'"
+
+# The columns version 3 adds, per table, in order. The fresh CREATE TABLE statements
+# and the migration's ALTER TABLE statements are both built from this, so they cannot
+# drift apart.
+_V3_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "multipart_uploads": [
+        ("checksum_algorithm", f"TEXT CHECK (checksum_algorithm IN ({_ALGORITHMS}))"),
+        ("checksum_type", f"TEXT CHECK (checksum_type IN ({_TYPES}))"),
+    ],
+    "multipart_parts": [
+        ("checksum", "TEXT"),
+        ("checksum_algorithm", f"TEXT CHECK (checksum_algorithm IN ({_ALGORITHMS}))"),
+        ("last_modified", "TEXT"),
+    ],
+    "objects": [
+        ("checksum", "TEXT"),
+        ("checksum_algorithm", f"TEXT CHECK (checksum_algorithm IN ({_ALGORITHMS}))"),
+        ("checksum_type", f"TEXT CHECK (checksum_type IN ({_TYPES}))"),
+    ],
+}
+
+
+def _v3_columns_sql(table: str) -> str:
+    """The table's v3 columns, each led by a comma, to follow its last v2 column."""
+    return "".join(f",\n        {name} {decl}" for name, decl in _V3_COLUMNS[table])
+
+
+_DDL_TEMPLATES = [
     "CREATE TABLE schema_version (version INTEGER NOT NULL)",
     """CREATE TABLE store (
         singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -60,7 +93,7 @@ _DDL = [
         content_encoding     TEXT,
         content_language     TEXT,
         expires              TEXT,
-        user_metadata        TEXT NOT NULL DEFAULT '{}'
+        user_metadata        TEXT NOT NULL DEFAULT '{}'@V3:multipart_uploads@
     )""",
     "CREATE INDEX uploads_by_bucket ON multipart_uploads (bucket, state)",
     """CREATE TABLE multipart_parts (
@@ -68,7 +101,7 @@ _DDL = [
         part_number  INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
         blob_id      TEXT UNIQUE REFERENCES blobs (blob_id),
         etag         TEXT NOT NULL,
-        size         INTEGER NOT NULL,
+        size         INTEGER NOT NULL@V3:multipart_parts@,
         PRIMARY KEY (upload_id, part_number)
     )""",
     """CREATE TABLE objects (
@@ -85,9 +118,29 @@ _DDL = [
         content_language     TEXT,
         expires              TEXT,
         user_metadata        TEXT NOT NULL DEFAULT '{}',
-        upload_id            TEXT UNIQUE REFERENCES multipart_uploads (upload_id),
+        upload_id            TEXT UNIQUE REFERENCES multipart_uploads (upload_id)@V3:objects@,
         PRIMARY KEY (bucket, key)
     ) WITHOUT ROWID""",
+]
+
+_DDL = [
+    re.sub(r"@V3:(\w+)@", lambda m: _v3_columns_sql(m.group(1)), statement)
+    for statement in _DDL_TEMPLATES
+]
+
+# The version 2 to 3 migration, run in one transaction by migrate(). New columns are
+# NULL on every existing row; a part still holding bytes gets the creation time of its
+# blob as last_modified (storage-layout.md §20).
+_MIGRATE_2_TO_3 = [
+    *(
+        f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+        for table, columns in _V3_COLUMNS.items()
+        for name, decl in columns
+    ),
+    "UPDATE multipart_parts SET last_modified = "
+    "(SELECT created_at FROM blobs WHERE blobs.blob_id = multipart_parts.blob_id) "
+    "WHERE blob_id IS NOT NULL",
+    "UPDATE schema_version SET version = 3",
 ]
 
 _ISO = "%Y-%m-%dT%H:%M:%S.%f"
@@ -215,7 +268,8 @@ class SQLiteMetadataStore:
     def __init__(self, db_path: Path):
         self._db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        self._version: int | None = None
+        self._open()
 
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None: transactions are explicit (BEGIN IMMEDIATE below), so
@@ -268,7 +322,7 @@ class SQLiteMetadataStore:
 
     def _refuse_other_versions(self) -> None:
         """Read the schema version over a plain connection, before any PRAGMA can
-        change the file, and refuse a database of another schema version."""
+        change the file, and refuse a database of an unsupported schema version."""
         if not self._db_path.exists():
             return
         conn = sqlite3.connect(str(self._db_path), isolation_level=None)
@@ -285,19 +339,33 @@ class SQLiteMetadataStore:
         self._check_version(tables, version)
 
     def _check_version(self, tables: set[str], version: int | None) -> None:
-        if "schema_version" in tables and version != _SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"{self._db_path} has schema version {version}; this server needs "
-                f"version {_SCHEMA_VERSION}. The storage layout changed and old data "
-                "is not migrated: empty the data directory or use a new one."
-            )
+        """Refuse what this server cannot open; otherwise record a version found."""
+        if "schema_version" in tables:
+            if version is not None and version > _SCHEMA_VERSION:
+                raise SchemaVersionError(
+                    f"{self._db_path} has schema version {version}; this server supports "
+                    f"versions {_OLDEST_VERSION} and {_SCHEMA_VERSION}, and migrates "
+                    f"{_OLDEST_VERSION} to {_SCHEMA_VERSION}. It was written by a newer "
+                    "server: use that server or a new data directory."
+                )
+            if version is None or version < _OLDEST_VERSION:
+                raise SchemaVersionError(
+                    f"{self._db_path} has schema version {version}; this server needs "
+                    f"version {_OLDEST_VERSION}. The storage layout changed and old data "
+                    "is not migrated: empty the data directory or use a new one."
+                )
+            self._version = version
         if tables and "schema_version" not in tables:
             raise SchemaVersionError(
                 f"{self._db_path} has tables but no schema version: {sorted(tables)}"
             )
 
-    def _migrate(self) -> None:
+    def _open(self) -> None:
+        """Inspect an existing database without writing; create a missing or empty one
+        as the current version. Migrating a version 2 database is migrate()'s job."""
         self._refuse_other_versions()
+        if self._version is not None:
+            return
         with self._write() as conn:
             tables = {
                 r["name"]
@@ -314,6 +382,23 @@ class SQLiteMetadataStore:
             for statement in _DDL:
                 conn.execute(statement)
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
+            self._version = _SCHEMA_VERSION
+
+    def migrate(self) -> None:
+        """Bring a version 2 database to version 3, in place, in one transaction
+        (docs/design/storage-layout.md §20). A no-op on a current database."""
+        if self._version == _SCHEMA_VERSION:
+            return
+        with self._write() as conn:
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+            if row is not None and row["version"] == _SCHEMA_VERSION:
+                self._version = _SCHEMA_VERSION
+                return
+            for statement in _MIGRATE_2_TO_3:
+                conn.execute(statement)
+            crash_point(MIGRATE_BEFORE_COMMIT)
+        crash_point(MIGRATE_AFTER_COMMIT)
+        self._version = _SCHEMA_VERSION
 
     # --- Store identity (I7, §7) ---
 

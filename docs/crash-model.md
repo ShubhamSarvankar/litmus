@@ -31,6 +31,10 @@ Not covered and not tested:
 6. A GET returns one whole version of an object, with that version's ETag and
    length, or an error status. It never mixes two versions, and never returns an
    empty or partial body under a success status.
+7. A start killed during the schema migration leaves a version 2 or a version 3
+   database, never a mix: the migration is one transaction, so a kill before its
+   commit leaves version 2 with every row and no new column, and a kill after it
+   leaves version 3 with every row. The next start migrates or serves the data.
 
 ## What the tests prove, and what they do not
 
@@ -41,7 +45,9 @@ while the server is down, the startup sweep's report, what clients see after the
 restart, and what the client's retry does. These tests prove the order of the steps:
 what is visible, and what is left behind, after a kill at each step of PutObject,
 DeleteObject, DeleteObjects, UploadPart, CompleteMultipartUpload,
-AbortMultipartUpload, DeleteBucket, the startup sweep and the first start.
+AbortMultipartUpload, DeleteBucket, the startup sweep and the first start. The
+tests in `chaos/scenarios/test_crash_migration.py` do the same for the schema
+migration, with kills at `migrate-before-commit` and `migrate-after-commit`.
 
 Under SIGKILL the operating system's page cache survives, so data that was written
 but not fsynced is still there after the restart. The fsync calls on files and
@@ -62,18 +68,33 @@ Before the server accepts requests it runs these steps in order:
 
 1. Refuse to start if `S3_DATA_DIR` or `S3_PARTS_DIR` is set. Both belong to the
    storage layout used before this one.
-2. Open the database. Refuse a database with schema version 1. Data written under
-   the earlier layout is not migrated.
+2. Open the database without changing it, or create it at schema version 3 if it is
+   missing or empty. Refuse a database with schema version 1 (data written under the
+   earlier layout is not migrated) or above 3 (written by a newer server). Version 2
+   is migrated in step 6.
 3. Refuse to start if the blob directory does not exist while the database already
    has a store ID.
 4. Create the blob directory if needed and take an exclusive lock on `blobs/LOCK`. A
    second server using the same blob directory refuses to start.
 5. Check the store ID (below).
-6. Create the fanout directories and `blobs/tmp/`.
-7. Run the startup sweep (below).
+6. Migrate a version 2 database to version 3 (below). A version 3 database is left
+   alone.
+7. Create the fanout directories and `blobs/tmp/`.
+8. Run the startup sweep (below).
 
-Every refusal happens before the sweep, so a refused configuration loses nothing:
-the refusal tests check that every file is unchanged apart from `LOCK`.
+Every refusal happens before the migration and the sweep, so a refused configuration
+loses nothing: the refusal tests check that every file is unchanged apart from
+`LOCK`, and that a version 2 database is still version 2.
+
+### Schema migration
+
+The migration adds the version 3 columns and sets the version in one transaction
+(`BEGIN IMMEDIATE`), after the lock and the store ID check, so only the server that
+holds the blob directory ever migrates its database. A kill before the commit rolls
+the whole transaction back: the database is version 2, as it was, and the next start
+migrates it again. A kill after the commit leaves version 3. The tests kill the
+server at both points and compare every row. A power loss during the commit is out of
+scope, like every power loss here.
 
 ### Store ID
 

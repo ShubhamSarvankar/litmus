@@ -124,6 +124,16 @@ class PartsChanged(Exception):
 
 
 class MetadataStore(Protocol):
+    def migrate(self) -> None:
+        """Bring the store to the current schema version, in place.
+
+        Called once at startup, after the blob directory lock and the store identity
+        check (docs/design/storage-layout.md §7, §20). A no-op when the store is
+        current. Constructing a store only inspects an existing database; it never
+        migrates one.
+        """
+        ...
+
     def create_bucket(self, bucket: str, created_at: datetime) -> None: ...
 
     def delete_bucket(self, bucket: str) -> list[str]: ...

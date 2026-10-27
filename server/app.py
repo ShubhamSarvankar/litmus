@@ -95,7 +95,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # docs/design/storage-layout.md §7, in order. Every refusal comes before the
-        # sweep, so nothing in blobs/ is deleted on a configuration that is refused.
+        # migration and the sweep, so nothing in blobs/ is deleted and no database is
+        # migrated on a configuration that is refused.
         refuse_old_environment()
         md = metadata or SQLiteMetadataStore(db_path=settings.db_path)
         st = storage or BlobStore(settings.blob_dir, write_delay_ms=settings.test_write_delay_ms)
@@ -103,6 +104,7 @@ def create_app(
         lock = lock_blob_dir(st)
         try:
             establish_store_identity(md, st)
+            md.migrate()
             st.create_tree()
             app.state.metadata, app.state.storage = md, st
             # The sweep runs before the server accepts any requests.

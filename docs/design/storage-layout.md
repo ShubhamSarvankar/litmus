@@ -1040,6 +1040,8 @@ naming the cause, before anything in `blobs/` is deleted.
    `tmp/` that is empty or holds only `tmp/STORE_ID.tmp`, and `STORE_ID` when it holds
    this store's own ID (left by a kill between c and d). Otherwise the server refuses
    to start.
+
+   The schema migration of §20 runs at this point, after the store identity check and before step 7.
 7. Create the fanout directories and `tmp/` and fsync them (§4).
 8. Run the sweep.
 
@@ -2179,3 +2181,65 @@ Recorded with the minimum part size:
     is registered, a refusal leaves the upload open with all its parts, and the write
     sequence (§6.7 C2 to C5) is unchanged. Details: docs/compatibility.md, "The Complete
     body".
+
+Recorded with schema version 3:
+
+28. **Schema version 3, migrated in place from version 2.** The schema version becomes
+    3. A version 2 database is migrated in place at startup; a version 3 database is
+    left alone; version 1 is refused as decision 4 says, and a version above 3 is
+    refused as written by a newer server. This revises decision 4 for version 2 only:
+    decision 4's text stands, and it still governs version 1. The constructor of the
+    metadata store only inspects an existing database (it creates a missing or empty
+    one at version 3, its only write), and `migrate()` makes the change. The startup
+    order is: refuse the old environment, build the store (the version refusals
+    happen here, before the lock), refuse a missing blob directory, take the lock,
+    check the store identity, `migrate()`, then create the tree and run the sweep. The
+    migration runs after the identity check, so an identity refusal leaves the
+    database unmigrated. The new columns are unused by this commit. Details: §20.
+
+
+### §20. Checksums and schema version 3
+
+Schema version 3 adds the columns that later commits use to store checksums with
+objects, uploads and parts. This section covers the migration and the columns; nothing
+reads or writes the columns yet.
+
+**The columns.** Each is added after the table's version 2 columns. The algorithm
+columns accept `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` and `SHA256` or NULL; the type
+columns accept `FULL_OBJECT` and `COMPOSITE` or NULL.
+
+- `multipart_uploads`: `checksum_algorithm`, `checksum_type`.
+- `multipart_parts`: `checksum` (text), `checksum_algorithm`, `last_modified` (text).
+- `objects`: `checksum` (text), `checksum_algorithm`, `checksum_type`.
+
+One definition of these columns builds both the fresh `CREATE TABLE` statements and the
+migration's `ALTER TABLE` statements, so a new database and a migrated one have the same
+columns in the same order, the same CHECK constraints and the same indexes. A test
+compares them with `PRAGMA table_xinfo`, the index list and the CHECK behavior.
+
+**The migration.** `migrate()` runs, in one `BEGIN IMMEDIATE` transaction: the eight
+`ALTER TABLE ... ADD COLUMN` statements, an `UPDATE` that backfills
+`multipart_parts.last_modified`, and `UPDATE schema_version SET version = 3`. It returns
+at once when the store knows the database is version 3, and re-reads the version inside
+the transaction, so a second server that migrated first makes it a no-op. The last thing
+inside the transaction is the crash point `migrate-before-commit`; the commit is followed
+by `migrate-after-commit`. A failure of any statement, including a full disk, rolls
+everything back: the database stays version 2 with no new column, and the next start
+tries again. A kill at either crash point leaves version 2 or version 3, never a mix
+(docs/crash-model.md).
+
+**The order.** `migrate()` runs after the blob directory lock and the store identity
+check (§7, decision 28), and before the tree is created and the sweep runs. Only the
+server that holds the lock can migrate, and a database that is refused for its identity
+or its blob directory is not changed. The version refusals come earlier still, from the
+constructor, before the lock.
+
+**The backfill.** A part of an open upload that still holds its bytes gets the
+`created_at` of its blob row as `last_modified`: the registry records when the blob was
+registered, which for a part is when its UploadPart began, and no earlier record of when
+the part was written exists in version 2. It is the closest value the database has, and
+it is exact to the registration, not to the commit. S3's ListParts reports a
+`LastModified` per part, which Litmus does not answer yet; a later commit will use this
+column for it. A part whose bytes Complete released
+(`blob_id` NULL) has no blob row to read, so its `last_modified` stays NULL, as do all
+the other new columns on every existing row.

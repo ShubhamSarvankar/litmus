@@ -15,8 +15,8 @@ left on disk, in the database and visible to clients after a restart.
 
 - **Crash behavior.** Tier B tests start a real server, make it kill itself with
   SIGKILL at a named step of PutObject, CopyObject, DeleteObject, DeleteObjects, UploadPart,
-  CompleteMultipartUpload, AbortMultipartUpload, DeleteBucket, the startup sweep or
-  the first start, and check the state after a restart. Tier A tests inject faults in
+  CompleteMultipartUpload, AbortMultipartUpload, DeleteBucket, the startup sweep, the
+  schema migration or the first start, and check the state after a restart. Tier A tests inject faults in
   process (raised OSErrors, corrupted or missing files, deterministic races).
 - **Write ordering.** Barrier order tests check that PutObject, UploadPart and
   CompleteMultipartUpload fsync the new file, rename it into place and fsync its
@@ -142,10 +142,16 @@ The server refuses to start:
   layout);
 - on a database with schema version 1 (earlier data is not migrated: use a new data
   directory);
+- on a database with a schema version above 3 (it was written by a newer server: use
+  that server or a new data directory);
 - if `S3_MIN_PART_SIZE` is not a non-negative integer;
 - if the database and the blob directory do not belong together (each holds the same
   store ID, written at first start);
 - if another server already uses the same blob directory.
+
+A database at schema version 2 is migrated in place to version 3 when the server
+starts, once it holds the blob directory lock and the store ID matches; a database that
+is refused is left as it was. Version 3 adds columns that nothing reads or writes yet.
 
 Example requests:
 
@@ -202,7 +208,7 @@ server/
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit
-  metadata/sqlite.py   schema, blob registry and transactions
+  metadata/sqlite.py   schema (version 3, migrated in place from 2), blob registry and transactions
   multipart/           CompleteMultipartUpload and the composite ETag
   errors/s3errors.py   S3 error responses
   request_ids.py       x-amz-request-id and x-amz-id-2 on every response
