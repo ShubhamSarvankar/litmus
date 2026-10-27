@@ -7,7 +7,8 @@ before the blob is made durable:
   Content-MD5                      base64 of the 16 byte MD5 (RFC 1864)
   x-amz-checksum-<algorithm>       base64 of the digest, for crc32, crc32c, crc64nvme,
                                    sha1 or sha256
-  x-amz-trailer / the trailer      CRC64NVME in an aws-chunked body (server/api/aws_chunked.py)
+  x-amz-trailer / the trailer      any of those five in an aws-chunked body
+                                   (server/api/aws_chunked.py)
 
 Content-MD5 may accompany one checksum, and both are checked. x-amz-sdk-checksum-algorithm
 names the algorithm the SDK used and must agree with the checksum that is sent.

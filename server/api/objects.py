@@ -17,7 +17,7 @@ from server.api.conditions import (
 )
 from server.api.delete_document import S3_NAMESPACE
 from server.api.user_metadata import parse_user_metadata, response_headers
-from server.checksums import CRC64NVME, UploadChecks
+from server.checksums import UploadChecks
 from server.crash_points import (
     DELETE_AFTER_COMMIT,
     DELETE_BEFORE_COMMIT,
@@ -199,7 +199,9 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
     # A framed body is decoded straight into the blob; the plain path buffers it whole.
     framed = preflight(request.headers) if is_framed(request.headers) else None
-    checks = UploadChecks.from_headers(request.headers, trailer=CRC64NVME if framed else None)
+    checks = UploadChecks.from_headers(
+        request.headers, trailer=framed.algorithm if framed else None
+    )
     body = b"" if framed else await request.body()
 
     blob_id = metadata.register_blob("object", bucket, key)

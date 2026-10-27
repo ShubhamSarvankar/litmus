@@ -125,6 +125,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Refuse unsupported feature headers | 330 | 508 | 199 | Server-side encryption, SSE-C, website redirect, Object Lock and storage class headers on PutObject, CreateMultipartUpload, CopyObject, UploadPart and UploadPartCopy, and `x-amz-bucket-object-lock-enabled` and `x-amz-bucket-namespace` on CreateBucket, answer 501 instead of being dropped (see "Feature headers Litmus refuses" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of them, and the results file is identical to the previous one. The 11 selected tests whose source mentions a storage class are the five GetObjectAttributes tests, which ask for `StorageClass` in `ObjectAttributes` (not the header; the operation is 501), and the six skipped cloud tests, which skip before sending anything. |
 | ACLs disabled | 330 | 508 | 194 | `x-amz-acl`, the `x-amz-grant-*` headers and `x-amz-object-ownership` are no longer accepted and dropped: Litmus behaves as a bucket with Object Ownership set to BucketOwnerEnforced (see "ACL and grant headers" under Known gaps). 5 passes lost, on purpose, exactly as forecast: `test_object_raw_get`, `test_object_raw_get_bucket_gone`, `test_object_raw_get_object_gone`, `test_object_delete_key_bucket_gone` and `test_object_anon_put_write_access`, because CreateBucket with `public-read` or `public-read-write` is 400 InvalidBucketAclWithObjectOwnership. The results file differs from the previous one in those 5 lines only. `test_object_raw_response_headers` stays passed (`private` is accepted). The other ACL tests stay failed, some at an earlier step: `test_create_bucket_bucket_owner_preferred` and `test_create_bucket_object_writer` now fail at CreateBucket (501), where they failed at GetBucketOwnershipControls (501) before. Of the 5, `test_object_raw_get` and `test_object_anon_put_write_access` were incidental and the other three borderline, so the figures are 24 incidental, 15 borderline and 155 genuine (genuine unchanged). Recorded at the commit that adds the handling. |
 | Complete size and checksum headers | 330 | 508 | 194 | CompleteMultipartUpload verifies `x-amz-mp-object-size` (400 InvalidRequest on a mismatch with the total of the listed parts, 400 InvalidArgument on a malformed value) and refuses the `x-amz-checksum-*` headers and `x-amz-checksum-type` with 501 (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). No outcome changed, and none was expected to: no selected test sends any of these on Complete. The tests that send a checksum header there (`test_multipart_checksum_sha256`, `test_multipart_reupload_checksum_and_etag` and the five `test_multipart_use_cksum_helper_*` tests) carry the `checksum` marker, which the `-k` filter deselects, no ceph test sends `x-amz-mp-object-size` (`MpuObjectSize`) or `ChecksumType` on Complete, and boto3 sends neither that header nor a checksum header on Complete by default. The results file is identical to the previous one. Recorded at the commit that adds the checks. |
+| Checksum trailers | 330 | 508 | 194 | The aws-chunked trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256` are decoded and verified like the CRC64NVME one, on PutObject and UploadPart. No outcome changed, and none was expected to: no selected test sends an aws-chunked body (boto3 over `http://` sends a checksum header), and the results file is identical to the previous one. Recorded at the commit that adds the trailers. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -278,6 +279,10 @@ outside `/mnt/`); the script refuses versions older than 2.23. It sets no checks
 transfer client or s3 config overrides, uses temporary dummy credentials, and passes
 `--endpoint-url http://127.0.0.1:PORT`.
 
+The script has 10 steps: `mb` and `ls`, `cp` round trip, `s3api` put and get, key names,
+`sync`, `s3api` head and range, one CopyObject, a copy in parts, `cp
+--checksum-algorithm`, and `rm` and `rb`. All 10 passed.
+
 Verified, with content checks and not only exit codes:
 
 - `s3 mb`, `s3 ls` (buckets, a prefix, and `--recursive`) with keys containing a space,
@@ -298,6 +303,10 @@ Verified, with content checks and not only exit codes:
   the source's. Until GetObjectTagging was answered, this copy failed with NotImplemented
   at that call and the CLI never sent an UploadPartCopy. boto3's managed copy of a 20 MiB
   object is also tested in `tests/conformance/test_upload_part_copy_boto3.py`.
+- `s3 cp --checksum-algorithm CRC32`, `CRC32C`, `SHA1` and `SHA256`, up and down, of a
+  1 KiB file (one PutObject) and a 20 MiB file (three UploadParts of 8, 8 and 4 MiB),
+  bytes compared. The CLI sends each checksum as an aws-chunked trailer, which Litmus
+  decodes and verifies.
 - `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
   BucketNotEmpty, and `s3 rb --force`
 
@@ -616,12 +625,18 @@ it: such a request is stored as an ordinary body. Its `aws-chunked` token is dro
 from the stored `Content-Encoding` (see "System headers" below).
 
 - Supported, on PutObject and UploadPart only: `x-amz-content-sha256:
-  STREAMING-UNSIGNED-PAYLOAD-TRAILER` (compared exactly) with `x-amz-trailer:
-  x-amz-checksum-crc64nvme` (one entry, any letter case), `x-amz-decoded-content-length`
-  and `Content-Length`. This is what the AWS CLI v2 sends with its default settings over
-  `http://`. The body is a lower case hex size line, the data, CRLF, any number of
-  chunks, `0`, CRLF, one trailer line `x-amz-checksum-crc64nvme:<base64 of the 8 byte
-  big endian CRC64NVME>`, CRLF, and a final CRLF. The decoded bytes are what is stored:
+  STREAMING-UNSIGNED-PAYLOAD-TRAILER` (compared exactly) with `x-amz-trailer` naming
+  one of the five trailers S3 lists (S3 User Guide, "Checking object integrity for data
+  uploads", trailing checksum headers): `x-amz-checksum-crc32`, `-crc32c`,
+  `-crc64nvme`, `-sha1` or `-sha256` (one entry, any letter case),
+  `x-amz-decoded-content-length` and `Content-Length`. This is what the AWS CLI v2 sends
+  over `http://`, with its default settings (CRC64NVME) and with `--checksum-algorithm`
+  CRC32, CRC32C, SHA1 or SHA256 (captured with aws-cli 2.38.5; all four are framed like
+  CRC64NVME, one chunk per part). The body is a lower case hex size line, the data, CRLF,
+  any number of chunks, `0`, CRLF, one trailer line `x-amz-checksum-<algorithm>:<base64
+  of the digest>`, CRLF, and a final CRLF, where the digest is the big endian CRC for
+  CRC32, CRC32C and CRC64NVME (4, 4 and 8 bytes) and the SHA digest for SHA1 and SHA256
+  (20 and 32 bytes). The decoded bytes are what is stored:
   the ETag is their MD5, and the framing, the trailer and the checksum are not kept.
   The trailer, and any `Content-MD5` or `x-amz-sdk-checksum-algorithm`, is verified
   before the blob is made durable (see "Checksums" below).
@@ -635,10 +650,8 @@ from the stored `Content-Encoding` (see "System headers" below).
   XML), and an `x-amz-content-sha256` naming a `STREAMING-` payload or an
   `x-amz-decoded-content-length` on any such request, whatever its method; the supported
   streaming value without `x-amz-trailer`; and an `x-amz-trailer` that lists more than
-  one entry or names anything but `x-amz-checksum-crc64nvme`, so CRC32, CRC32C, SHA-1
-  and SHA-256 trailers are refused. botocore sends them over `https://` by default, and
-  the AWS CLI sends them over `http://` too when asked for the algorithm
-  (`--checksum-algorithm CRC32`, captured with aws-cli 2.38.5).
+  one entry or names anything but those five (so `x-amz-checksum-sha512`, `-md5` and
+  the XXHash trailers are refused, though S3 lists those algorithms for headers).
   The AWS CLI v2 sends the supported framing over `http://` with its default settings
   (see "AWS CLI" above). A client can also avoid framing by setting
   `request_checksum_calculation = when_required`.
@@ -646,7 +659,8 @@ from the stored `Content-Encoding` (see "System headers" below).
   whitespace or chunk extension; every line ends in CRLF and a bare LF is an error;
   nothing may follow the final CRLF; the framed body must be exactly `Content-Length`
   bytes; the trailer is exactly one line whose name matches `x-amz-trailer` in any
-  letter case; its value must be strict base64 of 8 bytes. Reading stops as soon as the
+  letter case; its value must be strict base64 of exactly the digest size of that
+  algorithm. Reading stops as soon as the
   decoded bytes exceed `x-amz-decoded-content-length` (at most 5 GiB).
 - Errors AWS documents (S3 API reference, "Error responses",
   https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html): a checksum that
@@ -679,8 +693,9 @@ made durable, so a refused request leaves no object, part or file. Checked:
   and both are verified.
 - One of `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`: base64 of
   the digest (4, 4, 8, 20 and 32 bytes), checked against the body.
-- The CRC64NVME trailer of a framed body, as before. On a framed body `Content-MD5` is
-  checked against the decoded bytes, not the framed ones.
+- The trailer of a framed body (CRC32, CRC32C, CRC64NVME, SHA1 or SHA256), computed over
+  the decoded bytes with the same calculators as the header form. On a framed body
+  `Content-MD5` is checked against the decoded bytes, not the framed ones.
 - `x-amz-sdk-checksum-algorithm`, which must name the algorithm of the checksum header
   (or of the trailer) in the request, in any letter case.
 
@@ -732,11 +747,6 @@ Not done:
   `x-amz-checksum-type` are 501, and `x-amz-mp-object-size` is verified (see "Checksum
   and size headers on CompleteMultipartUpload" below). The 501 for other algorithms
   applies to PutObject, UploadPart and DeleteObjects.
-- The trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256`, which botocore
-  sends over `https://` and the AWS CLI sends over `http://` when asked for the algorithm,
-  are still 501 (see above); only CRC64NVME is decoded. An AWS CLI upload with
-  `--checksum-algorithm CRC32` (or CRC32C, SHA1 or SHA256) therefore fails at the first
-  UploadPart with NotImplemented, and the CLI aborts the upload.
 - `x-amz-content-sha256` holding a hex digest is not compared with the body.
 - The algorithms S3's documentation now lists beyond these five (MD5, SHA512 and the
   XXHash family) are not computed.
@@ -1467,14 +1477,24 @@ Now:
   Internal Server` error. The two pages conflict. Litmus allows gaps today (1 then 3 is
   fine) and does not choose here.
 
-**The AWS CLI's `--checksum-algorithm` for CRC32, CRC32C, SHA1 and SHA256 fails.** An
-upload with `aws s3 cp --checksum-algorithm CRC32` (aws-cli 2.38.5, over `http://`)
-sends `x-amz-checksum-algorithm: CRC32` on CreateMultipartUpload, then each UploadPart
-as an aws-chunked body with the trailer `x-amz-checksum-crc32`. Litmus decodes only the
-CRC64NVME trailer, so every UploadPart is 501 NotImplemented and the CLI aborts the
-upload. The same applies to CRC32C, SHA1 and SHA256. CRC64NVME, the CLI's default, is
-decoded. This is the same refusal as "Chunk-framed (aws-chunked) bodies" above; the
-trailers are sent over `http://` by the CLI, not only over `https://`.
+**A framed upload with `Transfer-Encoding: chunked` and no `Content-Length` is 411.**
+botocore builds an aws-chunked upload for an `https://` endpoint with `Transfer-Encoding:
+chunked`, removes `Content-Length` and sets `x-amz-decoded-content-length`
+(`botocore/httpchecksum.py`, `_apply_request_trailer_checksum`, botocore 1.42.89). Litmus
+requires `Content-Length` for a framed body (the framed size is checked against it), so it
+answers 411 MissingContentLength before the body is read. The S3 API reference says a
+chunked upload must do one of two things: give the total length in `Content-Length`, or
+send `Transfer-Encoding` with a value other than `identity` and omit `Content-Length` (S3
+API reference, "Signature Calculations for the Authorization Header: Transferring
+Payload in Multiple Chunks (Chunked Upload) (AWS Signature Version 4)"). So real S3
+accepts this request and Litmus does not; this is a gap, not a decision, and it is not
+tested for the checksum trailers beyond the refusal itself. The pages "Signature
+calculations for trailing headers (chunked uploads) (AWS Signature Version 4)" and
+"Checking object integrity for data uploads" do not mention `Transfer-Encoding` (not
+found); both show `x-amz-decoded-content-length` as required. No client reaches this
+today: Litmus has no TLS, and botocore over `http://` sends a checksum header and a plain
+body instead of a trailer. The AWS CLI sends `Content-Length` with its trailers over
+`http://` (captured with aws-cli 2.38.5), which Litmus decodes.
 
 **Response header overrides.** GetObject and HeadObject take the query parameters
 `response-cache-control`, `response-content-disposition`, `response-content-encoding`,

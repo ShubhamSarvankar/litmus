@@ -472,7 +472,7 @@ def test_preflight_accepts_exactly_5_gib():
 
 
 def test_preflight_refuses_a_trailer_other_than_the_checksum():
-    for value in (None, "", "x-amz-checksum-crc32", f"{TRAILER},{TRAILER}"):
+    for value in (None, "", "x-amz-checksum-sha512", f"{TRAILER},{TRAILER}"):
         with pytest.raises(InvalidRequest):
             preflight(
                 _headers(
@@ -499,8 +499,8 @@ def test_preflight_refuses_a_trailer_other_than_the_checksum():
         {"x-amz-content-sha256": "UNSIGNED-PAYLOAD"},
         {"x-amz-content-sha256": None},
         {"x-amz-trailer": None},
-        {"x-amz-trailer": "x-amz-checksum-crc32"},
-        {"x-amz-trailer": "x-amz-checksum-sha256"},
+        {"x-amz-trailer": "x-amz-checksum-sha512"},
+        {"x-amz-trailer": "x-amz-checksum-md5"},
         {"x-amz-trailer": "x-amz-checksum-crc64nvme,x-amz-checksum-crc32"},
         {"x-amz-trailer": "x-amz-checksum-crc64nvme,x-amz-checksum-crc64nvme"},
         {"x-amz-trailer": "x-amz-checksum-crc64nvme,"},

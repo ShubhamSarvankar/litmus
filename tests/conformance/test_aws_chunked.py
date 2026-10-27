@@ -147,6 +147,8 @@ def test_botocore_request_is_chunk_framed():
 def test_botocore_chunked_put_object_is_refused(server):
     port, metadata, blob_dir = server
     path, headers, body = _botocore_https_request("put_object", Bucket=BUCKET, Key="k", Body=BODY)
+    assert headers["X-Amz-Trailer"] == "x-amz-checksum-crc32"
+    headers["X-Amz-Trailer"] = "x-amz-checksum-sha512"  # a trailer that stays refused
     status, payload = _send(port, "PUT", path, headers, body)
     assert status == 501
     assert ET.fromstring(payload).findtext("Code") == "NotImplemented"
@@ -161,6 +163,8 @@ def test_botocore_chunked_upload_part_is_refused(server):
     path, headers, body = _botocore_https_request(
         "upload_part", Bucket=BUCKET, Key="k", UploadId=upload_id, PartNumber=1, Body=BODY
     )
+    assert headers["X-Amz-Trailer"] == "x-amz-checksum-crc32"
+    headers["X-Amz-Trailer"] = "x-amz-checksum-sha512"  # a trailer that stays refused
     status, payload = _send(port, "PUT", path, headers, body)
     assert status == 501
     assert ET.fromstring(payload).findtext("Code") == "NotImplemented"
@@ -324,6 +328,11 @@ def test_refused_framed_put_keeps_connection_usable(server):
     port, metadata, blob_dir = server
     get_request = _seed_and_get_request(port)
     head, body = _framed_put(port, metadata, expect=False)
+    # botocore's CRC32 trailer is accepted now; a SHA512 one stays refused.
+    assert b"X-Amz-Trailer: x-amz-checksum-crc32\r\n" in head
+    head = head.replace(
+        b"X-Amz-Trailer: x-amz-checksum-crc32", b"X-Amz-Trailer: x-amz-checksum-sha512"
+    )
     with socket.create_connection(("127.0.0.1", port)) as s:
         s.settimeout(5)
         s.sendall(head + body)
@@ -346,6 +355,11 @@ def test_refused_framed_put_with_expect_continue_closes(server):
     port, metadata, blob_dir = server
     get_request = _seed_and_get_request(port)
     head, _ = _framed_put(port, metadata, expect=True)
+    # botocore's CRC32 trailer is accepted now; a SHA512 one stays refused.
+    assert b"X-Amz-Trailer: x-amz-checksum-crc32\r\n" in head
+    head = head.replace(
+        b"X-Amz-Trailer: x-amz-checksum-crc32", b"X-Amz-Trailer: x-amz-checksum-sha512"
+    )
     with socket.create_connection(("127.0.0.1", port)) as s:
         s.settimeout(5)
         s.sendall(head)
@@ -369,6 +383,11 @@ def test_refused_framed_put_with_expect_and_body_sent_anyway_closes(server):
     port, metadata, blob_dir = server
     get_request = _seed_and_get_request(port)
     head, body = _framed_put(port, metadata, expect=True)
+    # botocore's CRC32 trailer is accepted now; a SHA512 one stays refused.
+    assert b"X-Amz-Trailer: x-amz-checksum-crc32\r\n" in head
+    head = head.replace(
+        b"X-Amz-Trailer: x-amz-checksum-crc32", b"X-Amz-Trailer: x-amz-checksum-sha512"
+    )
     with socket.create_connection(("127.0.0.1", port)) as s:
         s.settimeout(5)
         s.sendall(head + body + get_request)

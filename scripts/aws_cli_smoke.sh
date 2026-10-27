@@ -280,6 +280,27 @@ step_copy_large() {
     return 0
 }
 
+step_cp_checksum_algorithms() {
+    # --checksum-algorithm makes the CLI send the checksum as an aws-chunked trailer on
+    # PutObject and on every UploadPart (CreateMultipartUpload carries the algorithm).
+    head -c $((20 * 1024 * 1024)) /dev/urandom > "$DATA/checksum20.bin"
+    mkdir -p "$WORK/checksumdown"
+    local alg size
+    for alg in CRC32 CRC32C SHA1 SHA256; do
+        for size in small large; do
+            local src key
+            if [ "$size" = small ]; then src="$DATA/small.bin"; else src="$DATA/checksum20.bin"; fi
+            key="checksum-$alg-$size.bin"
+            aws s3 cp "$src" "s3://$BUCKET/$key" --checksum-algorithm "$alg" > "$WORK/out" 2>&1 \
+                || { cat "$WORK/out"; die "upload of the $size file with $alg failed"; }
+            aws s3 cp "s3://$BUCKET/$key" "$WORK/checksumdown/$key" > /dev/null \
+                || die "download of the $size file uploaded with $alg failed"
+            cmp -s "$src" "$WORK/checksumdown/$key" || die "the $size file uploaded with $alg differs"
+        done
+    done
+    return 0
+}
+
 step_rm_rb() {
     aws s3 rm "s3://$BUCKET/small.bin" > /dev/null || die "rm failed"
     if aws s3api head-object --bucket "$BUCKET" --key small.bin > /dev/null 2>&1; then
@@ -309,6 +330,7 @@ run_step step_sync
 run_step step_s3api_head_range
 run_step step_copy_object
 run_step step_copy_large
+run_step step_cp_checksum_algorithms
 run_step step_rm_rb
 
 echo "All steps passed (aws-cli $AWS_VERSION)."

@@ -71,11 +71,11 @@ CreateBucket answers 400 InvalidBucketAclWithObjectOwnership to an ACL other tha
 in the table. Keys are stored as the exact string the client sent.
 
 PutObject and UploadPart also accept an aws-chunked body, but only the one framing the
-AWS CLI sends over `http://` by default: `x-amz-content-sha256:
-STREAMING-UNSIGNED-PAYLOAD-TRAILER` with a CRC64NVME trailer (`x-amz-trailer:
-x-amz-checksum-crc64nvme`). Litmus decodes it as it arrives, verifies the checksum, and
-stores the decoded bytes. The signed `STREAMING-AWS4-HMAC-SHA256-*` variants and other
-trailers get 501. Plain request bodies are still read whole into memory before they
+AWS CLI sends over `http://`: `x-amz-content-sha256:
+STREAMING-UNSIGNED-PAYLOAD-TRAILER` with a CRC32, CRC32C, CRC64NVME, SHA1 or SHA256
+trailer (`x-amz-trailer: x-amz-checksum-crc64nvme` is the CLI's default). Litmus decodes
+it as it arrives, verifies the checksum, and stores the decoded bytes. The signed
+`STREAMING-AWS4-HMAC-SHA256-*` variants and other trailers get 501. Plain request bodies are still read whole into memory before they
 are written. PutObject and UploadPart (and DeleteObjects, over its XML body) also verify
 `Content-MD5` and one `x-amz-checksum-{crc32,crc32c,crc64nvme,sha1,sha256}` header
 before the data is made durable; nothing is stored or returned yet. See [`docs/compatibility.md`](docs/compatibility.md).
@@ -83,7 +83,8 @@ before the data is made durable; nothing is stored or returned yet. See [`docs/c
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
 its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies,
 among them a 40 MiB copy in parts), `sync`, `rm`, `rb` and `s3api put-object`,
-`get-object` and `head-object`. `scripts/aws_cli_smoke.sh` runs these checks. Only `http://` was tested,
+`get-object` and `head-object`, and `cp --checksum-algorithm` with CRC32, CRC32C, SHA1 and
+SHA256. `scripts/aws_cli_smoke.sh` runs these checks, in 10 steps. Only `http://` was tested,
 and credentials are not checked. Before the CLI copies an object above 8 MiB in parts
 (UploadPartCopy) it reads the source's tags with GetObjectTagging, which Litmus answers
 with an empty tag set, since it stores none.

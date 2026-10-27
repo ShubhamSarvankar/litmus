@@ -10,7 +10,7 @@ from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
 from server.api.conditions import write_precondition
 from server.api.request_xml import parse_request_xml
-from server.checksums import CRC64NVME, UploadChecks
+from server.checksums import UploadChecks
 from server.crash_points import (
     ABORT_AFTER_COMMIT,
     ABORT_BEFORE_COMMIT,
@@ -238,7 +238,9 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     import io
 
     framed = preflight(request.headers) if is_framed(request.headers) else None
-    checks = UploadChecks.from_headers(request.headers, trailer=CRC64NVME if framed else None)
+    checks = UploadChecks.from_headers(
+        request.headers, trailer=framed.algorithm if framed else None
+    )
     body = b"" if framed else await request.body()
     # docs/design/storage-layout.md §6.6: a fresh blob per attempt; the previous
     # part stays recorded and intact until the commit that replaces it.

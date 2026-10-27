@@ -270,7 +270,8 @@ _COPY_SOURCE_SSE_C_PREFIX = "x-amz-copy-source-server-side-encryption-customer-"
 # checksum headers). Content-Encoding: aws-chunked is optional there, so it is not a
 # marker. botocore 1.36+ and AWS CLI 2.23+ send such bodies for PutObject and
 # UploadPart. Litmus decodes exactly one framing (server/api/aws_chunked.py):
-# STREAMING-UNSIGNED-PAYLOAD-TRAILER with the single trailer x-amz-checksum-crc64nvme.
+# STREAMING-UNSIGNED-PAYLOAD-TRAILER with one trailer, x-amz-checksum-crc32, -crc32c,
+# -crc64nvme, -sha1 or -sha256.
 # Everything else is refused, because storing such a body as it arrives would keep the
 # chunk sizes (and signatures, and trailer) as object bytes: the signed
 # STREAMING-AWS4-HMAC-SHA256-* variants, x-amz-decoded-content-length under any other

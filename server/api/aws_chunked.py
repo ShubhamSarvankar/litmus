@@ -1,16 +1,16 @@
 """Decoding of aws-chunked request bodies with an unsigned payload and a trailing
-CRC64NVME checksum, for PutObject and UploadPart.
+checksum (CRC32, CRC32C, CRC64NVME, SHA1 or SHA256), for PutObject and UploadPart.
 
 This is the one framing the AWS CLI sends over http by default:
 
     x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER
     x-amz-decoded-content-length: <size without framing>
-    x-amz-trailer: x-amz-checksum-crc64nvme
+    x-amz-trailer: x-amz-checksum-<algorithm>
     Content-Length: <framed size>
 
     <hex size> CRLF <data> CRLF   (any number of chunks)
     0 CRLF
-    x-amz-checksum-crc64nvme:<base64 of the 8 byte big endian CRC> CRLF
+    x-amz-checksum-<algorithm>:<base64 of the digest, big endian for a CRC> CRLF
     CRLF
 
 There are no chunk signatures and no chunk extensions. The signed STREAMING-AWS4-*
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from fastapi import Request
 from starlette.datastructures import Headers
 
-from server.checksums import UploadChecks
+from server.checksums import ALGORITHMS, CRC64NVME, Algorithm, UploadChecks
 from server.crc64nvme import decode_b64_digest
 from server.errors.s3errors import (
     IncompleteBody,
@@ -41,7 +41,7 @@ STREAMING_UNSIGNED_PAYLOAD_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 CONTENT_SHA256_HEADER = "x-amz-content-sha256"
 DECODED_LENGTH_HEADER = "x-amz-decoded-content-length"
 TRAILER_HEADER = "x-amz-trailer"
-CHECKSUM_TRAILER = "x-amz-checksum-crc64nvme"
+CHECKSUM_TRAILER = CRC64NVME.header
 
 # S3's largest object (PutObject) and largest part (UploadPart) are both 5 GiB.
 MAX_DECODED_LENGTH = 5 * 1024**3
@@ -63,20 +63,30 @@ def is_framed(headers: Headers) -> bool:
     return headers.get(CONTENT_SHA256_HEADER, "") == STREAMING_UNSIGNED_PAYLOAD_TRAILER
 
 
-def trailer_is_supported(headers: Headers) -> bool:
-    """x-amz-trailer names exactly x-amz-checksum-crc64nvme, once, in any case."""
+_TRAILER_ALGORITHMS = {a.header: a for a in ALGORITHMS.values()}
+
+
+def trailer_algorithm(headers: Headers) -> Algorithm | None:
+    """The algorithm x-amz-trailer names, if it names exactly one of the five checksum
+    trailers S3 supports (S3 User Guide, "Checking object integrity for data uploads",
+    trailing checksum headers), once, in any case; else None."""
     entries = [
         entry.strip().lower()
         for value in headers.getlist(TRAILER_HEADER)
         for entry in value.split(",")
     ]
-    return entries == [CHECKSUM_TRAILER]
+    return _TRAILER_ALGORITHMS.get(entries[0]) if len(entries) == 1 else None
+
+
+def trailer_is_supported(headers: Headers) -> bool:
+    return trailer_algorithm(headers) is not None
 
 
 @dataclass(frozen=True)
 class FramedRequest:
     decoded_length: int
     content_length: int
+    algorithm: Algorithm
 
 
 def preflight(headers: Headers) -> FramedRequest:
@@ -91,9 +101,10 @@ def preflight(headers: Headers) -> FramedRequest:
         raise MissingContentLength()
     if not _DIGITS.fullmatch(content_length):
         raise InvalidRequest(extra={"Header": "Content-Length"})
-    if not trailer_is_supported(headers):
+    algorithm = trailer_algorithm(headers)
+    if algorithm is None:
         raise InvalidRequest(extra={"Header": TRAILER_HEADER})
-    return FramedRequest(int(declared), int(content_length))
+    return FramedRequest(int(declared), int(content_length), algorithm)
 
 
 def _framing(reason: str) -> InvalidRequest:
@@ -109,8 +120,9 @@ class ChunkDecoder:
     _SIZE, _SIZE_LF, _DATA, _DATA_CR, _DATA_LF = range(5)
     _TRAILER, _TRAILER_LF, _END_CR, _END_LF, _DONE = range(5, 10)
 
-    def __init__(self, decoded_length: int):
+    def __init__(self, decoded_length: int, algorithm: Algorithm = CRC64NVME):
         self._limit = decoded_length
+        self._algorithm = algorithm
         self._state = self._SIZE
         self._line = bytearray()
         self._remaining = 0
@@ -193,16 +205,16 @@ class ChunkDecoder:
         return out
 
     def trailer_checksum(self) -> bytes:
-        """The 8 checksum bytes of the trailer line. The line must be
-        x-amz-checksum-crc64nvme:<base64>, the name in any case."""
+        """The checksum bytes of the trailer line. The line must be
+        <the header of the algorithm>:<base64>, the name in any case."""
         name, sep, value = (self.trailer or b"").decode("latin-1").partition(":")
         if not sep:
             raise _framing("trailer line has no colon")
-        if name.lower() != CHECKSUM_TRAILER:
+        if name.lower() != self._algorithm.header:
             raise InvalidRequest(extra={"Reason": "trailer name does not match x-amz-trailer"})
-        raw = decode_b64_digest(value)
+        raw = decode_b64_digest(value, self._algorithm.size)
         if raw is None:
-            raise InvalidDigest(extra={"Header": CHECKSUM_TRAILER})
+            raise InvalidDigest(extra={"Header": self._algorithm.header})
         return raw
 
 
@@ -217,9 +229,9 @@ async def write_framed_body(
     """Decode request.stream() into the blob, writing each received buffer as it
     arrives. Returns (ETag, size) of the decoded bytes. Nothing is made durable unless
     the framing, both lengths, the trailer checksum and the claims in checks (made with
-    trailer=CRC64NVME) all check out; on any failure no file of the blob is left
+    trailer=framed.algorithm) all check out; on any failure no file of the blob is left
     (BlobStore.open_writer)."""
-    decoder = ChunkDecoder(framed.decoded_length)
+    decoder = ChunkDecoder(framed.decoded_length, framed.algorithm)
 
     def verify(writer: BlobWriter) -> None:
         if not decoder.done:
