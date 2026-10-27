@@ -21,6 +21,7 @@ from starlette.datastructures import Headers
 from server.checksums import (
     ALGORITHMS,
     CRC64NVME,
+    Algorithm,
     UploadChecks,
     unsupported_value_header,
     value_headers,
@@ -301,3 +302,46 @@ def test_the_sdk_header_is_compared_with_the_trailer_algorithm():
     run(h(("x-amz-sdk-checksum-algorithm", "CRC64NVME")), trailer=CRC64NVME, trailer_value=good)
     with pytest.raises(BadDigest):
         run(h(("x-amz-sdk-checksum-algorithm", "CRC32")), trailer=CRC64NVME, trailer_value=good)
+
+
+# --- the stored checksum ---
+
+
+def stored(headers: Headers, data: bytes = DATA, trailer=None, trailer_value=None):
+    checks = UploadChecks.from_headers(headers, trailer=trailer)
+    checks.feed(data[:3])
+    checks.feed(data[3:])
+    checks.verify(FakeWriter(data), trailer_value=trailer_value)
+    return checks.stored_checksum()
+
+
+def test_the_stored_algorithm_defaults_to_crc64nvme():
+    for headers in (h(), h(("Content-MD5", b64(hashlib.md5(DATA).digest())))):
+        algorithm, value = stored(headers)
+        assert algorithm is CRC64NVME
+        assert value == b64(digest("crc64nvme", DATA))
+
+
+@pytest.mark.parametrize("name", sorted(ALGORITHMS))
+def test_the_stored_algorithm_is_the_claimed_one(name):
+    algorithm, _ = stored(h(claim(name)))
+    assert algorithm is ALGORITHMS[name]
+    assert Algorithm.by_name(name.upper()) is algorithm
+    assert Algorithm.by_name(name.capitalize()) is algorithm
+
+
+@pytest.mark.parametrize("name", sorted(ALGORITHMS))
+def test_the_stored_value_is_the_base64_of_the_computed_digest(name):
+    # A trailer: the value stored is the digest computed here, as canonical base64.
+    _, value = stored(h(), trailer=ALGORITHMS[name], trailer_value=digest(name, DATA))
+    assert value == b64(digest(name, DATA))
+    assert base64.b64decode(value, validate=True) == digest(name, DATA)
+
+
+def test_delete_objects_stores_nothing():
+    checks = UploadChecks.from_headers(h(claim("sha256")))
+    checks.verify_body(DATA)
+    assert checks.stored_checksum() is None
+    checks = UploadChecks.from_headers(h())
+    checks.verify_body(DATA)
+    assert checks.stored_checksum() is None

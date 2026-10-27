@@ -78,7 +78,12 @@ it as it arrives, verifies the checksum, and stores the decoded bytes. The signe
 `STREAMING-AWS4-HMAC-SHA256-*` variants and other trailers get 501. Plain request bodies are still read whole into memory before they
 are written. PutObject and UploadPart (and DeleteObjects, over its XML body) also verify
 `Content-MD5` and one `x-amz-checksum-{crc32,crc32c,crc64nvme,sha1,sha256}` header
-before the data is made durable; nothing is stored or returned yet. See [`docs/compatibility.md`](docs/compatibility.md).
+before the data is made durable. PutObject stores one checksum with the object, the
+claimed algorithm or CRC64NVME when none was claimed, and returns it as
+`x-amz-checksum-<algorithm>` with `x-amz-checksum-type: FULL_OBJECT`; the value is the
+base64 of the digest Litmus computed. UploadPart, CompleteMultipartUpload and CopyObject
+store none yet, and GetObject and HeadObject do not return the checksum yet. See
+[`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
 its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies,
@@ -204,7 +209,8 @@ server/
                        are CopyObject and its x-amz-copy-source; upload_part_copy.py
                        is UploadPartCopy; request_guard.py
                        answers 501; aws_chunked.py decodes aws-chunked bodies
-  checksums.py         the checksums a PutObject or UploadPart claims, and their check
+                       checksum_headers.py names the checksum response headers
+  checksums.py         the checksums a PutObject or UploadPart claims, their check, and the one PutObject stores
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit

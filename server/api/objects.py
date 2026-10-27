@@ -9,6 +9,7 @@ from starlette.background import BackgroundTask
 
 from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.api.checksum_headers import response_header
 from server.api.conditions import (
     delete_precondition,
     evaluate_read_conditions,
@@ -224,6 +225,8 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         raise
     crash_point(PUT_AFTER_BYTES)
 
+    # Valid because the body was verified above; the same transaction stores it (§20).
+    algorithm, checksum = checks.stored_checksum()
     meta = ObjectMeta(
         bucket=bucket,
         key=key,
@@ -231,6 +234,9 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
         etag=etag,
         last_modified=None,  # stamped inside the commit (§9)
         blob_id=blob_id,
+        checksum=checksum,
+        checksum_algorithm=algorithm.name,
+        checksum_type="FULL_OBJECT",
         **stored,
     )
     # If-Match and If-None-Match are decided in the commit, against the row it replaces
@@ -248,7 +254,14 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     crash_point(PUT_AFTER_COMMIT)
     if replaced:
         collect_garbage(storage, metadata, [replaced], after_unlink_point=PUT_AFTER_GC_UNLINK)
-    return Response(status_code=200, headers={"ETag": etag})
+    return Response(
+        status_code=200,
+        headers={
+            "ETag": etag,
+            response_header(algorithm): checksum,
+            "x-amz-checksum-type": "FULL_OBJECT",
+        },
+    )
 
 
 def _not_modified(meta: ObjectMeta) -> Response:

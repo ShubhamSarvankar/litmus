@@ -162,17 +162,34 @@ def _accepted_cases() -> dict[str, tuple[str, Callable[[bytes], list]]]:
 ACCEPTED = _accepted_cases()
 
 
+def stored_algorithm(name: str) -> str:
+    """The algorithm a PutObject of the accepted case name stores and returns: the one
+    it claimed, else CRC64NVME (a framed case claims CRC64NVME through its trailer)."""
+    if name == "plain-all-three":
+        return "sha256"
+    claimed = name.split("-")[1]
+    return claimed if claimed in ALGOS else "crc64nvme"
+
+
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("name", sorted(ACCEPTED))
-async def test_matching_claims_are_accepted_and_nothing_is_returned(env, kind, name):
+async def test_matching_claims_are_accepted(env, kind, name):
     framing, extra = ACCEPTED[name]
     headers, chunks = request(framing, DATA, extra(DATA))
     r = await env.send(kind, headers, chunks)
     assert r.status == 200, r.body
     assert env.stored_bytes(kind) == (DATA, md5(DATA))
     assert r.headers["etag"] == md5(DATA)
-    # Stored and returned checksums are a later step.
-    assert not [h for h in r.headers if h.startswith("x-amz-checksum")]
+    returned = {h: v for h, v in r.headers.items() if h.startswith("x-amz-checksum")}
+    if kind == "put":
+        algorithm = stored_algorithm(name)
+        assert returned == {
+            f"x-amz-checksum-{algorithm}": b64(digest(algorithm, DATA)),
+            "x-amz-checksum-type": "FULL_OBJECT",
+        }
+    else:
+        # A part's checksum is a later step.
+        assert returned == {}
 
 
 @pytest.mark.parametrize("kind", KINDS)

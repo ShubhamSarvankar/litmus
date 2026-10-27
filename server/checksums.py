@@ -29,9 +29,15 @@ docs/compatibility.md:
 DeleteObjects takes the same claims over its XML body (UploadChecks.verify_body); none is
 required, though the S3 API reference says Content-MD5 is (docs/compatibility.md).
 
-Nothing is stored or returned yet.
+PutObject stores one checksum with the object (UploadChecks.stored_checksum): the claimed
+algorithm, or CRC64NVME when no checksum was claimed, which is what the S3 API reference
+says S3 adds to an object uploaded without one. A trailer counts as a claim. The value is
+the base64 of the digest computed here, not the string the request carried. A Content-MD5
+alone is not a checksum claim. UploadPart computes the same value and discards it, and
+DeleteObjects (verify_body) stores nothing.
 """
 
+import base64
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,6 +93,11 @@ class Algorithm:
     def header(self) -> str:
         return VALUE_HEADER_PREFIX + self.name.lower()
 
+    @classmethod
+    def by_name(cls, name: str) -> "Algorithm | None":
+        """The computed algorithm called name, in any letter case, or None."""
+        return ALGORITHMS.get(name.lower())
+
 
 ALGORITHMS: dict[str, Algorithm] = {
     a.name.lower(): a
@@ -135,6 +146,11 @@ class UploadChecks:
         self._expected = expected  # None: the value arrives later, in the trailer
         self._content_md5 = content_md5
         self._hasher = algorithm.new() if algorithm else None
+        # What is stored: the claimed algorithm, else CRC64NVME. It shares the claim's
+        # hasher when it is the claimed algorithm.
+        self._stored = algorithm or CRC64NVME
+        self._stored_hasher = self._hasher if algorithm else self._stored.new()
+        self._verified = False
 
     @classmethod
     def from_headers(cls, headers: Headers, trailer: Algorithm | None = None) -> "UploadChecks":
@@ -173,15 +189,28 @@ class UploadChecks:
     def feed(self, data: bytes) -> None:
         if self._hasher is not None:
             self._hasher.update(data)
+        if self._stored_hasher is not self._hasher:
+            self._stored_hasher.update(data)
 
     def verify(self, writer: BlobWriter, trailer_value: bytes | None = None) -> None:
         """BadDigest unless what was written matches every claim. trailer_value is the
         decoded trailer, for a body that has one."""
         self._check(writer.md5_digest, trailer_value)
+        self._verified = True
+
+    def stored_checksum(self) -> tuple[Algorithm, str] | None:
+        """The algorithm to store with the object and the base64 of its digest of the
+        bytes fed. None until verify() has succeeded, and always None after
+        verify_body()."""
+        if not self._verified:
+            return None
+        return self._stored, base64.b64encode(self._stored_hasher.digest()).decode("ascii")
 
     def verify_body(self, body: bytes) -> None:
-        """feed() and verify() for a request body held whole in memory."""
-        self.feed(body)
+        """feed() and verify() for a request body held whole in memory. Nothing is stored
+        for it: only the claimed checksum is computed."""
+        if self._hasher is not None:
+            self._hasher.update(body)
         self._check(hashlib.md5(body).digest(), None)
 
     def _check(self, md5_digest: bytes, trailer_value: bytes | None) -> None:

@@ -128,6 +128,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Checksum trailers | 330 | 508 | 194 | The aws-chunked trailers `x-amz-checksum-crc32`, `-crc32c`, `-sha1` and `-sha256` are decoded and verified like the CRC64NVME one, on PutObject and UploadPart. No outcome changed, and none was expected to: no selected test sends an aws-chunked body (boto3 over `http://` sends a checksum header), and the results file is identical to the previous one. Recorded at the commit that adds the trailers. |
 | Minimum part size | 330 | 508 | 195 | CompleteMultipartUpload answers 400 EntityTooSmall when a listed part other than the last listed one is stored smaller than `S3_MIN_PART_SIZE` (5 MiB by default; see "The minimum part size" under Known gaps). 1 pass gained, exactly as forecast: `test_multipart_upload_size_too_small`, which uploads ten parts of 10 KiB and expects 400 EntityTooSmall. The results file differs from the previous one in that one line only. No other selected test changed outcome, and none was expected to: every selected test that completes a multipart upload uses parts of 5 MiB or more except the last, or has a single part, or fails before the check (the 1 byte and 8 byte parts of `test_multipart_upload_small`, `test_multipart_resend_first_finishes_last` and the conditional tests are single part uploads). Recorded at the commit that adds the check. |
 | Schema version 3 | 330 | 508 | 195 | The schema becomes version 3 and a version 2 database is migrated in place at startup, after the blob directory lock and the store ID check (docs/design/storage-layout.md decision 28 and §20). The new columns are not read or written yet. No outcome changed, and none was expected to: the results file is identical to the previous one (195 passed, 128 failed, 7 skipped, of 330 selected, 508 deselected). |
+| PutObject stores its checksum | 330 | 508 | 195 | PutObject stores the checksum of the object (the claimed algorithm, else CRC64NVME) in the object row and returns `x-amz-checksum-<algorithm>` and `x-amz-checksum-type: FULL_OBJECT` (see "Checksums"). CompleteMultipartUpload and CopyObject leave the columns NULL. No outcome changed, and none was expected to: GetObject and HeadObject return no checksum yet, and the selected tests that read a checksum back or send `x-amz-checksum-algorithm` carry the `checksum` marker or need it on Get. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the storage. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -642,7 +643,7 @@ from the stored `Content-Encoding` (see "System headers" below).
   of the digest>`, CRLF, and a final CRLF, where the digest is the big endian CRC for
   CRC32, CRC32C and CRC64NVME (4, 4 and 8 bytes) and the SHA digest for SHA1 and SHA256
   (20 and 32 bytes). The decoded bytes are what is stored:
-  the ETag is their MD5, and the framing, the trailer and the checksum are not kept.
+  the ETag is their MD5, and the framing and the trailer are not kept (PutObject keeps the checksum: see "Checksums" below).
   The trailer, and any `Content-MD5` or `x-amz-sdk-checksum-algorithm`, is verified
   before the blob is made durable (see "Checksums" below).
 - Still 501 NotImplemented, before the body is read and before anything is registered or
@@ -690,7 +691,7 @@ from the stored `Content-Encoding` (see "System headers" below).
   memory does not grow with the object. Plain bodies are not streamed: they are still
   read whole into memory before they are written, as before.
 
-**Checksums: verified on PutObject, UploadPart and DeleteObjects, not stored.** A PutObject
+**Checksums: verified on PutObject, UploadPart and DeleteObjects; stored and returned by PutObject only.** A PutObject
 or UploadPart body is checked against the checksums its request claims, before the blob is
 made durable, so a refused request leaves no object, part or file. Checked:
 
@@ -739,12 +740,46 @@ Litmus requires no checksum at all. botocore 1.36+ sends `x-amz-checksum-crc32` 
 that; a client that sends nothing is accepted too. Not requiring one is Litmus's own
 choice, and so is the error for each refusal above that AWS does not document.
 
+What PutObject stores and returns (schema version 3, `objects.checksum`,
+`checksum_algorithm`, `checksum_type`; docs/design/storage-layout.md decision 29 and §20).
+The 200 response carries `x-amz-checksum-<algorithm>`, in lower case, and
+`x-amz-checksum-type: FULL_OBJECT`, and the same three values are committed in the
+transaction that writes the object row, so a crash leaves both or neither. A refused
+request (4xx, 412) carries neither. S3 API reference, PutObject: the `x-amz-checksum-crc64nvme`
+response header "is present if the object was uploaded with the `CRC64NVME` checksum
+algorithm, or if it was uploaded without a checksum (and Amazon S3 added the default
+checksum, `CRC64NVME`, to the uploaded object)"; "For `PutObject` uploads, the checksum type
+is always `FULL_OBJECT`"; and the response syntax lists `x-amz-checksum-crc32`, `-crc32c`,
+`-crc64nvme`, `-sha1`, `-sha256` and `x-amz-checksum-type`. Choices, where the reference
+says nothing:
+
+- *The default.* A request with no checksum stores and returns CRC64NVME, computed over the
+  bytes (the reference above). A request with only `Content-MD5` counts as having none.
+- *A trailer is a checksum provided with the request.* The reference does not say how an
+  aws-chunked trailer is treated; Litmus stores the trailer's algorithm, not CRC64NVME.
+- *Canonical encoding.* The value stored and returned is the base64 of the digest Litmus
+  computed, not the request's string. A claim whose base64 differs from the canonical one only
+  in the unused trailing bits (which Litmus accepts as a valid claim of that digest) is
+  answered with the canonical string. The reference says nothing about this.
+- *`x-amz-checksum-algorithm` is ignored on PutObject.* It is not a PutObject request header
+  in the reference (the request syntax has `x-amz-sdk-checksum-algorithm` and the
+  `x-amz-checksum-<algorithm>` value headers only), so any value, valid or not, is neither
+  checked nor an error; the algorithm stored follows the value header or the trailer.
+- *An empty body* is checksummed like any other.
+- *Overwrites replace the checksum*, with NULL when the new object has none.
+
+UploadPart computes the same value and drops it. CompleteMultipartUpload and CopyObject
+write the three columns as NULL, so an object they write over a PutObject object has no
+checksum, and neither returns a checksum header. DeleteObjects stores nothing.
+
 Not done:
 
-- Nothing is stored and nothing is returned: PutObject and UploadPart answer with `ETag`
-  only, and GetObject and HeadObject return no `x-amz-checksum-*` header whatever
-  `x-amz-checksum-mode` says. S3 stores the checksum and, without one from the client,
-  adds CRC64NVME.
+- GetObject and HeadObject return no `x-amz-checksum-*` header whatever
+  `x-amz-checksum-mode` says, which is still among the ignored headers, so a stored
+  checksum is not yet readable. UploadPart, CompleteMultipartUpload and CopyObject
+  store and return no checksum, and neither does an object written before this change,
+  whose columns are NULL. S3 stores the checksum for all of them and adds CRC64NVME
+  when the client sends none.
 - Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
   `x-amz-checksum-type` on CreateMultipartUpload are ignored, the `Checksum*` elements of
   the CompleteMultipartUpload body are accepted and not verified, and composite and full

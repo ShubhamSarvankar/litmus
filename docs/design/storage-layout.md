@@ -2197,12 +2197,28 @@ Recorded with schema version 3:
     migration runs after the identity check, so an identity refusal leaves the
     database unmigrated. The new columns are unused by this commit. Details: §20.
 
+29. **PutObject stores and returns its checksum.** The `objects` checksum columns are
+    written by PutObject, in the same transaction as the rest of the row, and returned
+    by its 200 response as `x-amz-checksum-<algorithm>` and `x-amz-checksum-type:
+    FULL_OBJECT`. The algorithm is the one the request claimed, by header or by
+    aws-chunked trailer, else CRC64NVME (S3 API reference, PutObject). Choices: a
+    trailer counts as a checksum provided with the request, which the reference does not
+    say; a request with only `Content-MD5` stores CRC64NVME; the stored value is the
+    base64 of the digest Litmus computed, so a claim in a non-canonical base64 form is
+    answered canonically; `x-amz-checksum-algorithm` stays ignored on PutObject, since
+    the reference does not list it as a PutObject request header. CompleteMultipartUpload
+    and CopyObject write NULL in all three columns, replacing a previous object's.
+    GetObject and HeadObject do not return the checksum yet. Details: §20.
+
 
 ### §20. Checksums and schema version 3
 
 Schema version 3 adds the columns that later commits use to store checksums with
-objects, uploads and parts. This section covers the migration and the columns; nothing
-reads or writes the columns yet.
+objects, uploads and parts. This section covers the migration and the columns. After
+decision 29 only the `objects` columns are used: PutObject writes them, CompleteMultipartUpload
+and CopyObject write NULL in them, and every read of an object row (`_object`) reads them,
+so the store's data API is used only after `migrate()`. The `multipart_uploads` and
+`multipart_parts` columns are still neither read nor written.
 
 **The columns.** Each is added after the table's version 2 columns. The algorithm
 columns accept `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` and `SHA256` or NULL; the type
@@ -2243,3 +2259,17 @@ it is exact to the registration, not to the commit. S3's ListParts reports a
 column for it. A part whose bytes Complete released
 (`blob_id` NULL) has no blob row to read, so its `last_modified` stays NULL, as do all
 the other new columns on every existing row.
+
+**PutObject (decision 29).** `_upsert_object` writes `checksum`, `checksum_algorithm` and
+`checksum_type` on insert and in the `ON CONFLICT` update, so every overwrite replaces
+them, with NULL when the new object has none. `UploadChecks` (server/checksums.py)
+computes the stored digest while the body is written: with the claim's hasher when an
+algorithm was claimed, else with a CRC64NVME hasher of its own, and `stored_checksum()`
+returns the algorithm and the base64 of the digest only after the verify callback has
+succeeded. `_put_object` puts them, with `FULL_OBJECT`, in the `ObjectMeta` that
+`put_object_meta` commits, after the crash point `put-after-bytes` and before
+`put-after-commit`; a kill before the commit leaves the old row, checksum included. The
+response headers are named by `server/api/checksum_headers.py`. CompleteMultipartUpload
+and CopyObject build their `ObjectMeta` without the three fields, so their rows hold NULL.
+`UploadPart` computes the same value and discards it; the DeleteObjects body check
+(`verify_body`) computes only the claimed checksum and stores nothing.

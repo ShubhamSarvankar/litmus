@@ -244,6 +244,9 @@ def _object(row: sqlite3.Row) -> ObjectMeta:
         content_language=row["content_language"],
         expires=row["expires"],
         user_metadata=json.loads(row["user_metadata"]),
+        checksum=row["checksum"],
+        checksum_algorithm=row["checksum_algorithm"],
+        checksum_type=row["checksum_type"],
     )
 
 
@@ -547,8 +550,9 @@ class SQLiteMetadataStore:
             """INSERT INTO objects (bucket, key, blob_id, size, etag, last_modified,
                                     content_type, cache_control, content_disposition,
                                     content_encoding, content_language, expires,
-                                    user_metadata, upload_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    user_metadata, upload_id, checksum,
+                                    checksum_algorithm, checksum_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(bucket, key) DO UPDATE SET
                    blob_id             = excluded.blob_id,
                    size                = excluded.size,
@@ -561,7 +565,10 @@ class SQLiteMetadataStore:
                    content_language    = excluded.content_language,
                    expires             = excluded.expires,
                    user_metadata       = excluded.user_metadata,
-                   upload_id           = excluded.upload_id""",
+                   upload_id           = excluded.upload_id,
+                   checksum            = excluded.checksum,
+                   checksum_algorithm  = excluded.checksum_algorithm,
+                   checksum_type       = excluded.checksum_type""",
             (
                 meta.bucket,
                 meta.key,
@@ -577,6 +584,9 @@ class SQLiteMetadataStore:
                 meta.expires,
                 json.dumps(meta.user_metadata, ensure_ascii=False, sort_keys=True),
                 meta.upload_id,
+                meta.checksum,
+                meta.checksum_algorithm,
+                meta.checksum_type,
             ),
         )
 

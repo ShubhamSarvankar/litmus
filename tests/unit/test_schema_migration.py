@@ -196,10 +196,15 @@ def test_inspecting_a_v2_database_writes_nothing(tmp_path):
 def test_v2_database_is_not_migrated_until_migrate_is_called(tmp_path):
     data = build_v2_database(tmp_path / "data")
     store = SQLiteMetadataStore(db_path=data.db_path)
+    # Checked through direct sqlite3 connections: before migrate() the store's data API
+    # is not used, since its reads expect the version 3 columns.
     assert _version(data.db_path) == 2
+    assert sum(len(columns) for columns in NEW_COLUMNS.values()) == 8
     for table in NEW_COLUMNS:
         assert not set(NEW_COLUMNS[table]) & set(_column_names(data.db_path, table))
-    assert store.get_object_meta(BUCKET, "k1") is not None
+    rows = _v2_rows(data.db_path)
+    assert all(rows[t] for t in TABLES)
+    assert sorted(r[1] for r in rows["objects"]) == sorted(data.objects)
     store.migrate()
     assert _version(data.db_path) == 3
 
