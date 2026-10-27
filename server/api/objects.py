@@ -9,7 +9,7 @@ from starlette.background import BackgroundTask
 
 from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
-from server.api.checksum_headers import response_header
+from server.api.checksum_headers import checksum_mode_enabled, response_header
 from server.api.conditions import (
     delete_precondition,
     evaluate_read_conditions,
@@ -18,7 +18,7 @@ from server.api.conditions import (
 )
 from server.api.delete_document import S3_NAMESPACE
 from server.api.user_metadata import parse_user_metadata, response_headers
-from server.checksums import UploadChecks
+from server.checksums import Algorithm, UploadChecks
 from server.crash_points import (
     DELETE_AFTER_COMMIT,
     DELETE_BEFORE_COMMIT,
@@ -264,6 +264,16 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
     )
 
 
+def _checksum_headers(meta: ObjectMeta) -> dict[str, str]:
+    """The checksum headers of a whole object response to a request with the mode
+    enabled: none for a row without a checksum (CompleteMultipartUpload and CopyObject
+    objects, and objects written before schema version 3)."""
+    if meta.checksum is None:
+        return {}
+    algorithm = Algorithm.by_name(meta.checksum_algorithm)
+    return {response_header(algorithm): meta.checksum, "x-amz-checksum-type": meta.checksum_type}
+
+
 def _not_modified(meta: ObjectMeta) -> Response:
     """304 for GET and HEAD (RFC 9110 15.4.5): the ETag and, when stored, Cache-Control
     and Expires, which a 200 would carry, and no body. Last-Modified is left out: the
@@ -313,6 +323,7 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     overrides = _response_overrides(request)
+    checksum_mode = checksum_mode_enabled(request.headers)
     meta, f = _open_current(metadata, storage, bucket, key, request.headers)
     if f is None:
         return _not_modified(meta)
@@ -347,6 +358,9 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                 background=BackgroundTask(f.close),
             )
 
+        # Only a whole object carries the checksum: botocore checks the header against
+        # the body it receives, and a range is not the object (a choice, see
+        # docs/compatibility.md "Checksums").
         return StreamingResponse(
             _stream(f, 0, meta.size),
             status_code=200,
@@ -355,6 +369,7 @@ async def _get_object(bucket: str, key: str, request: Request) -> Response:
                 "Accept-Ranges": "bytes",
                 "ETag": meta.etag,
                 "Last-Modified": _http_date(meta.last_modified),
+                **(_checksum_headers(meta) if checksum_mode else {}),
                 **headers,
             },
             media_type=headers["Content-Type"],
@@ -393,6 +408,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
         raise NoSuchBucket(extra={"BucketName": bucket})
 
     overrides = _response_overrides(request)
+    checksum_mode = checksum_mode_enabled(request.headers)
     meta = metadata.get_object_meta(bucket, key)
     if meta is None:
         raise NoSuchKey(extra={"Key": key})
@@ -400,13 +416,14 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
     if evaluate_read_conditions(request.headers, meta.etag, meta.last_modified):
         return _not_modified(meta)
 
+    ranged = False
     range_header = request.headers.get("range")
     if range_header:
         # Raises InvalidRange for a range that GET would refuse. A range GET would
         # serve is ignored here, as before: HEAD does not narrow Content-Length. If-Range
         # is not evaluated: RFC 9110 13.2.2 step 5 is for GET, and 14.2 defines range
-        # handling for GET alone.
-        _resolve_range(range_header, meta.size)
+        # handling for GET alone. The checksum is left out of what GET would serve as a 206.
+        ranged = _resolve_range(range_header, meta.size) is not None
 
     return Response(
         status_code=200,
@@ -416,6 +433,7 @@ async def _head_object(bucket: str, key: str, request: Request) -> Response:
             "Last-Modified": _http_date(meta.last_modified),
             "Content-Type": meta.content_type,
             "Accept-Ranges": "bytes",
+            **(_checksum_headers(meta) if checksum_mode and not ranged else {}),
             **_stored_headers(meta),
             **overrides,
         },

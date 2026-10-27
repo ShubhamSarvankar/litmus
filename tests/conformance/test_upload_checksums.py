@@ -576,10 +576,22 @@ async def test_other_requests_are_not_given_a_checksum_error(env):
     assert r.status == 200
 
 
-async def test_head_and_get_ignore_the_claim_headers(env):
+async def test_head_and_get_ignore_the_claim_headers_and_return_the_checksum_with_the_mode(env):
     headers, chunks = request("plain", DATA, [])
     assert (await env.send("put", headers, chunks)).status == 200
     for method in ("GET", "HEAD"):
-        r = await call(env.app, method, f"/{BUCKET}/{KEY}", {"x-amz-checksum-mode": "ENABLED"}, [])
+        # A claim header on a read is not a checksum to check: it is ignored.
+        r = await call(env.app, method, f"/{BUCKET}/{KEY}", {claim("sha256")[0]: "AAAA"}, [])
         assert r.status == 200
         assert not [h for h in r.headers if h.startswith("x-amz-checksum")]
+        r = await call(
+            env.app,
+            method,
+            f"/{BUCKET}/{KEY}",
+            {"x-amz-checksum-mode": "ENABLED", claim("sha256")[0]: "AAAA"},
+            [],
+        )
+        assert r.status == 200
+        assert r.headers["x-amz-checksum-crc64nvme"] == b64(digest("crc64nvme", DATA))
+        assert r.headers["x-amz-checksum-type"] == "FULL_OBJECT"
+        assert "x-amz-checksum-sha256" not in r.headers

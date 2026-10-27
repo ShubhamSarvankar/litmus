@@ -129,6 +129,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Minimum part size | 330 | 508 | 195 | CompleteMultipartUpload answers 400 EntityTooSmall when a listed part other than the last listed one is stored smaller than `S3_MIN_PART_SIZE` (5 MiB by default; see "The minimum part size" under Known gaps). 1 pass gained, exactly as forecast: `test_multipart_upload_size_too_small`, which uploads ten parts of 10 KiB and expects 400 EntityTooSmall. The results file differs from the previous one in that one line only. No other selected test changed outcome, and none was expected to: every selected test that completes a multipart upload uses parts of 5 MiB or more except the last, or has a single part, or fails before the check (the 1 byte and 8 byte parts of `test_multipart_upload_small`, `test_multipart_resend_first_finishes_last` and the conditional tests are single part uploads). Recorded at the commit that adds the check. |
 | Schema version 3 | 330 | 508 | 195 | The schema becomes version 3 and a version 2 database is migrated in place at startup, after the blob directory lock and the store ID check (docs/design/storage-layout.md decision 28 and §20). The new columns are not read or written yet. No outcome changed, and none was expected to: the results file is identical to the previous one (195 passed, 128 failed, 7 skipped, of 330 selected, 508 deselected). |
 | PutObject stores its checksum | 330 | 508 | 195 | PutObject stores the checksum of the object (the claimed algorithm, else CRC64NVME) in the object row and returns `x-amz-checksum-<algorithm>` and `x-amz-checksum-type: FULL_OBJECT` (see "Checksums"). CompleteMultipartUpload and CopyObject leave the columns NULL. No outcome changed, and none was expected to: GetObject and HeadObject return no checksum yet, and the selected tests that read a checksum back or send `x-amz-checksum-algorithm` carry the `checksum` marker or need it on Get. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the storage. |
+| Checksum mode on GET and HEAD | 330 | 508 | 195 | GetObject and HeadObject return the stored checksum (`x-amz-checksum-<algorithm>` and `x-amz-checksum-type`) on a whole object 200 when the request sends `x-amz-checksum-mode: ENABLED` (see "Checksums"). No outcome changed, as forecast: the selected tests that send the mode or read a checksum back carry the `checksum` marker, and botocore's own validation of a whole object GET passes, since the stored value is the digest of the stored bytes. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). The count of passing tests that received a checksum header was not measured: the server log does not record response headers. Recorded at the commit that adds the mode. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -313,6 +314,9 @@ Verified, with content checks and not only exit codes:
   1 KiB file (one PutObject) and a 20 MiB file (three UploadParts of 8, 8 and 4 MiB),
   bytes compared. The CLI sends each checksum as an aws-chunked trailer, which Litmus
   decodes and verifies.
+- Downloads: the CLI sets `x-amz-checksum-mode` on GET, so a whole object download of an
+  object written by PutObject is validated against its stored checksum. Objects written by
+  CompleteMultipartUpload and CopyObject have none yet, and a ranged download carries none.
 - `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
   BucketNotEmpty, and `s3 rb --force`
 
@@ -772,14 +776,49 @@ UploadPart computes the same value and drops it. CompleteMultipartUpload and Cop
 write the three columns as NULL, so an object they write over a PutObject object has no
 checksum, and neither returns a checksum header. DeleteObjects stores nothing.
 
+**GetObject and HeadObject (decision 30).** A request with `x-amz-checksum-mode: ENABLED`
+gets the stored checksum back on a whole object 200, as `x-amz-checksum-<algorithm>` in
+lower case and `x-amz-checksum-type`. S3 API reference, GetObject and HeadObject: "To
+retrieve the checksum, this mode must be enabled"; the valid value is `ENABLED`; the
+response headers are `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`
+and `x-amz-checksum-type`; and, for GetObject, the checksum headers are "only present if
+the checksum was uploaded with the object". Without the mode no checksum header is sent,
+as before. The mode is parsed after the bucket check and before the key lookup, so the
+order of errors on GET and HEAD is NoSuchBucket, InvalidArgument (a `response-*` override,
+then the mode), NoSuchKey, then the conditions (412, 304). The reference says nothing about
+the following, so each is Litmus's own choice:
+
+- *Case.* The value is compared case insensitively after stripping, so `enabled` (which the
+  CLI sends on GET) and `Enabled` are accepted. A blank or whitespace value counts as absent.
+- *Other values.* Any other value is 400 InvalidArgument, which names the header and the
+  value. The reference lists no error for it. A repeated header arrives joined with ", ", so
+  `ENABLED, ENABLED` is refused.
+- *A ranged response carries no checksum.* The reference does not say what a Range request
+  returns. A 206 on GET, and on HEAD a Range that GET would answer with a 206, carry none:
+  botocore compares the header with the body it receives, and the CLI downloads large
+  objects as ranged GETs with the mode set, so a whole object checksum on a part of the
+  bytes would fail every such download. A false `If-Range` makes the Range ignored and the
+  response a whole 200, which carries the checksum. An unsatisfiable range stays 416 and
+  carries none.
+- *A 304 and a 412 carry none.* The 304 response is unchanged.
+- *A row without a checksum returns none*, with or without the mode. Until later commits
+  these are the objects written by CompleteMultipartUpload and CopyObject and the objects
+  written before schema version 3. An object that a PutObject replaced has the new
+  object's checksum.
+- *`partNumber` is still ignored* (see "Multipart details" and the GetObject `partNumber`
+  row above). A GET or HEAD with `?partNumber=N` and the mode returns the whole object and
+  its whole object checksum, which match each other; it is not the checksum of a part.
+
+The value is read from the row, not computed, so it is the checksum of the bytes as
+PutObject stored them. botocore (1.36 and later) sets the mode on every GetObject by
+default and validates a whole object body against the header, so boto3 now raises
+`FlexibleChecksumError` when the stored checksum and the bytes differ.
+
 Not done:
 
-- GetObject and HeadObject return no `x-amz-checksum-*` header whatever
-  `x-amz-checksum-mode` says, which is still among the ignored headers, so a stored
-  checksum is not yet readable. UploadPart, CompleteMultipartUpload and CopyObject
-  store and return no checksum, and neither does an object written before this change,
-  whose columns are NULL. S3 stores the checksum for all of them and adds CRC64NVME
-  when the client sends none.
+- UploadPart, CompleteMultipartUpload and CopyObject store and return no checksum, and
+  neither does an object written before schema version 3, whose columns are NULL. S3
+  stores the checksum for all of them and adds CRC64NVME when the client sends none.
 - Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
   `x-amz-checksum-type` on CreateMultipartUpload are ignored, the `Checksum*` elements of
   the CompleteMultipartUpload body are accepted and not verified, and composite and full
@@ -1374,7 +1413,7 @@ Ignored, where a client can observe the difference:
 - `x-amz-object-ownership` on PutObject, CreateMultipartUpload and CopyObject, and the
   ACL and grant headers on UploadPart, UploadPartCopy and CompleteMultipartUpload, which
   do not define them (see "ACL and grant headers" for the operations that do).
-- `x-amz-checksum-mode` on GetObject and HeadObject; `x-amz-checksum-algorithm` and
+- `x-amz-checksum-algorithm` and
   `x-amz-checksum-type` on CreateMultipartUpload; `x-amz-checksum-algorithm` on
   CopyObject (see "Checksums", Not done). The checksum headers and `x-amz-mp-object-size`
   on CompleteMultipartUpload are no longer ignored (see "Checksum and size headers on
@@ -1727,7 +1766,7 @@ that documents them, and the tests in ceph/s3-tests expect it.
   it gives an object with `binary/octet-stream` and no other header or metadata, dated by
   its initiation time. No migration is needed.
 
-**Multipart details.** `partNumber` on GET is ignored.
+**Multipart details.** `partNumber` on GET is ignored (with `x-amz-checksum-mode` it returns the whole object and its whole object checksum).
 
 **Conditional GET and HEAD.** `If-Match`, `If-None-Match`, `If-Modified-Since` and
 `If-Unmodified-Since` are evaluated on GET and HEAD, against the one row the response is

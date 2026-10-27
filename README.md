@@ -81,8 +81,11 @@ are written. PutObject and UploadPart (and DeleteObjects, over its XML body) als
 before the data is made durable. PutObject stores one checksum with the object, the
 claimed algorithm or CRC64NVME when none was claimed, and returns it as
 `x-amz-checksum-<algorithm>` with `x-amz-checksum-type: FULL_OBJECT`; the value is the
-base64 of the digest Litmus computed. UploadPart, CompleteMultipartUpload and CopyObject
-store none yet, and GetObject and HeadObject do not return the checksum yet. See
+base64 of the digest Litmus computed. GetObject and HeadObject return it, with the same
+two headers, on a whole object 200 when the request sends `x-amz-checksum-mode: ENABLED`
+(case insensitive; any other value is 400 InvalidArgument); a ranged response, a 304, a 412
+and an object without a stored checksum carry none. UploadPart, CompleteMultipartUpload and
+CopyObject store none yet. See
 [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with

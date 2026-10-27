@@ -2210,13 +2210,26 @@ Recorded with schema version 3:
     and CopyObject write NULL in all three columns, replacing a previous object's.
     GetObject and HeadObject do not return the checksum yet. Details: §20.
 
+30. **GetObject and HeadObject return the stored checksum when asked.** With
+    `x-amz-checksum-mode: ENABLED`, a whole object 200 carries `x-amz-checksum-<algorithm>`
+    and `x-amz-checksum-type`, read from the row (S3 API reference, GetObject and
+    HeadObject: the mode must be enabled to retrieve the checksum; the valid value is
+    ENABLED). Choices, where the reference says nothing: the value is matched case
+    insensitively after stripping, and blank is absent; any other value is 400
+    InvalidArgument; the mode is parsed after the bucket check and before the key lookup;
+    a 206, a HEAD whose Range GET would answer 206, a 304, a 412 and a 416 carry no
+    checksum, because botocore validates the header against the body it receives and the CLI
+    downloads large objects as ranged GETs with the mode set; a false `If-Range` gives a
+    whole 200 with the checksum; a row with NULL columns returns none; `partNumber` stays
+    ignored, so it returns the whole object and its own checksum. Details: §20.
+
 
 ### §20. Checksums and schema version 3
 
 Schema version 3 adds the columns that later commits use to store checksums with
 objects, uploads and parts. This section covers the migration and the columns. After
-decision 29 only the `objects` columns are used: PutObject writes them, CompleteMultipartUpload
-and CopyObject write NULL in them, and every read of an object row (`_object`) reads them,
+decision 30 only the `objects` columns are used: PutObject writes them, CompleteMultipartUpload
+and CopyObject write NULL in them, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
 so the store's data API is used only after `migrate()`. The `multipart_uploads` and
 `multipart_parts` columns are still neither read nor written.
 
@@ -2273,3 +2286,14 @@ response headers are named by `server/api/checksum_headers.py`. CompleteMultipar
 and CopyObject build their `ObjectMeta` without the three fields, so their rows hold NULL.
 `UploadPart` computes the same value and discards it; the DeleteObjects body check
 (`verify_body`) computes only the claimed checksum and stores nothing.
+
+**GetObject and HeadObject (decision 30).** `checksum_mode_enabled`
+(`server/api/checksum_headers.py`) reads `x-amz-checksum-mode` once, in `_get_object` and
+`_head_object` right after `_response_overrides` and before the key lookup, so the order of
+errors is NoSuchBucket, InvalidArgument, NoSuchKey, then the conditions. `_checksum_headers`
+turns the row's three columns into the response headers, or into nothing when `checksum` is
+NULL. GET adds them only on its whole object 200: when `_resolve_range` returns a range (the
+206 branch) it adds none, and when a false `If-Range` made the Range ignored the 200 carries
+them. HEAD adds them unless `_resolve_range` returns a range; a 304 (`_not_modified`) and a
+412 are built as before. The columns are read with the row, in the same query that gives the
+size and the blob, so the checksum and the bytes served are those of one row (§8).
