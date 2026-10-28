@@ -8,9 +8,10 @@ from fastapi.responses import Response
 
 from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
+from server.api.checksum_headers import create_checksum, response_header
 from server.api.conditions import write_precondition
 from server.api.request_xml import parse_request_xml
-from server.checksums import UploadChecks
+from server.checksums import CRC64NVME, Algorithm, UploadChecks
 from server.crash_points import (
     ABORT_AFTER_COMMIT,
     ABORT_BEFORE_COMMIT,
@@ -205,10 +206,20 @@ async def _initiate(bucket: str, key: str, request: Request) -> Response:
     from server.api.objects import request_object_headers
 
     stored = request_object_headers(request.headers)
+    # Refused before the upload is created; an upload that names no algorithm stores NULL
+    # in both columns and echoes neither header.
+    named = create_checksum(request.headers)
+    algorithm, type_ = named or (None, None)
     upload_id = uuid.uuid4().hex
     try:
         metadata.create_upload(
-            upload_id, bucket, key, datetime.now(UTC).replace(tzinfo=None), **stored
+            upload_id,
+            bucket,
+            key,
+            datetime.now(UTC).replace(tzinfo=None),
+            **stored,
+            checksum_algorithm=algorithm,
+            checksum_type=type_,
         )
     except BucketMissing:
         raise NoSuchBucket(extra={"BucketName": bucket}) from None
@@ -216,6 +227,9 @@ async def _initiate(bucket: str, key: str, request: Request) -> Response:
         content=_initiate_xml(bucket, key, upload_id),
         status_code=200,
         media_type="application/xml",
+        headers={"x-amz-checksum-algorithm": algorithm, "x-amz-checksum-type": type_}
+        if named
+        else None,
     )
 
 
@@ -229,7 +243,8 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     except ValueError:
         raise InvalidPart()
 
-    if not metadata.upload_exists(upload_id):
+    upload = metadata.get_open_upload(upload_id)
+    if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
     if not (1 <= part_number <= 10000):
@@ -237,9 +252,15 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
 
     import io
 
+    # The effective algorithm: the one the upload named, else CRC64NVME.
+    named = upload.checksum_algorithm is not None
+    effective = Algorithm.by_name(upload.checksum_algorithm) if named else CRC64NVME
     framed = preflight(request.headers) if is_framed(request.headers) else None
     checks = UploadChecks.from_headers(
-        request.headers, trailer=framed.algorithm if framed else None
+        request.headers,
+        trailer=framed.algorithm if framed else None,
+        store_as=effective,
+        named=named,
     )
     body = b"" if framed else await request.body()
     # docs/design/storage-layout.md §6.6: a fresh blob per attempt; the previous
@@ -265,8 +286,15 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
         discard_new_blob(storage, metadata, blob_id)
         raise
     crash_point(PART_AFTER_BYTES)
+    stored_algorithm, stored_checksum = checks.stored_checksum()
     part = PartMeta(
-        upload_id=upload_id, part_number=part_number, etag=part_etag, size=size, blob_id=blob_id
+        upload_id=upload_id,
+        part_number=part_number,
+        etag=part_etag,
+        size=size,
+        blob_id=blob_id,
+        checksum=stored_checksum,
+        checksum_algorithm=stored_algorithm.name,
     )
     try:
         replaced = metadata.record_part(upload_id, part)
@@ -279,7 +307,12 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     crash_point(PART_AFTER_COMMIT)
     if replaced:
         collect_garbage(storage, metadata, [replaced])
-    return Response(status_code=200, headers={"ETag": part_etag})
+    # API_UploadPart: the checksum response headers are present only if the checksum was
+    # provided in the request, so only the claim's header goes out, with its verified value.
+    headers = {"ETag": part_etag}
+    if claimed := checks.claimed_checksum():
+        headers[response_header(claimed[0])] = claimed[1]
+    return Response(status_code=200, headers=headers)
 
 
 async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> Response:

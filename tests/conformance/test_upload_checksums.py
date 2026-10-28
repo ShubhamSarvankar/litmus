@@ -171,6 +171,14 @@ def stored_algorithm(name: str) -> str:
     return claimed if claimed in ALGOS else "crc64nvme"
 
 
+def claimed_algorithm(name: str) -> str | None:
+    """The algorithm the accepted case name claims, by header or by trailer (a framed case
+    claims CRC64NVME through its trailer), or None when it claims no checksum."""
+    if name in ("plain-md5", "plain-mode-algorithm-type"):
+        return None
+    return stored_algorithm(name)
+
+
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("name", sorted(ACCEPTED))
 async def test_matching_claims_are_accepted(env, kind, name):
@@ -188,8 +196,17 @@ async def test_matching_claims_are_accepted(env, kind, name):
             "x-amz-checksum-type": "FULL_OBJECT",
         }
     else:
-        # A part's checksum is a later step.
-        assert returned == {}
+        # The response carries the header of the claim, with its verified value, and
+        # nothing else; the part row holds CRC64NVME, because the upload names no algorithm.
+        claimed = claimed_algorithm(name)
+        assert returned == (
+            {} if claimed is None else {f"x-amz-checksum-{claimed}": b64(digest(claimed, DATA))}
+        )
+        (part,) = env.metadata.get_parts(env.upload_id)
+        assert (part.checksum_algorithm, part.checksum) == (
+            "CRC64NVME",
+            b64(digest("crc64nvme", DATA)),
+        )
 
 
 @pytest.mark.parametrize("kind", KINDS)

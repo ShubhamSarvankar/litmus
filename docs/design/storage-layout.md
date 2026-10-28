@@ -2223,15 +2223,42 @@ Recorded with schema version 3:
     whole 200 with the checksum; a row with NULL columns returns none; `partNumber` stays
     ignored, so it returns the whole object and its own checksum. Details: §20.
 
+31. **Uploads name a checksum algorithm and type, and parts store a checksum and a time.**
+    CreateMultipartUpload stores `x-amz-checksum-algorithm` and `x-amz-checksum-type` with
+    the upload and echoes both (S3 API reference, CreateMultipartUpload: both are request
+    and response headers). The allowed pairs are the S3 User Guide's, "Checking object
+    integrity for data uploads in Amazon S3": CRC64NVME with FULL_OBJECT, CRC32 and CRC32C
+    with either, SHA1 and SHA256 with COMPOSITE. An upload is named when it carried a
+    non-blank algorithm; the effective algorithm E is the named one, or CRC64NVME. UploadPart
+    stores E and the digest of the part's bytes, and the commit time, with the part row;
+    UploadPartCopy hashes the copied bytes in E and does the same. UploadPart answers with
+    the claim's header only (API_UploadPart: the response headers are "only present if the
+    checksum was provided in the request"); CopyPartResult carries `Checksum<E>` only for a
+    named upload (API_CopyPartResult: "present if the multipart upload request was created
+    with" the algorithm) and the stored time as `LastModified`. Choices, where the reference
+    says nothing: the default types (CRC64NVME FULL_OBJECT, the other four COMPOSITE);
+    InvalidRequest for a disallowed pair, a type alone, and a claim in another algorithm
+    than a named upload's (decided from the header or trailer name before the body is read);
+    InvalidArgument for a value that is not an AWS name; echoing nothing, and storing NULL,
+    for an unnamed upload; computing and storing E for a part sent without a claim; for an
+    unnamed upload a claim in another computed algorithm is verified, CRC64NVME is stored,
+    and only the claim is echoed; blank `x-amz-checksum-algorithm` and `-type` on Create are
+    absent (claim headers are not changed); the five uncomputed algorithm names are 501 in
+    the guard; request checksum headers stay ignored on UploadPartCopy, whose page defines
+    none. CompleteMultipartUpload is not changed: it still accepts the per part
+    `Checksum*` elements unverified. Details: §20.
+
 
 ### §20. Checksums and schema version 3
 
 Schema version 3 adds the columns that later commits use to store checksums with
 objects, uploads and parts. This section covers the migration and the columns. After
-decision 30 only the `objects` columns are used: PutObject writes them, CompleteMultipartUpload
+decision 31 every column is used. PutObject writes the `objects` columns, CompleteMultipartUpload
 and CopyObject write NULL in them, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
-so the store's data API is used only after `migrate()`. The `multipart_uploads` and
-`multipart_parts` columns are still neither read nor written.
+so the store's data API is used only after `migrate()`. CreateMultipartUpload writes the two
+`multipart_uploads` columns and UploadPart and UploadPartCopy write the three
+`multipart_parts` columns; `_upload` and `get_parts` read them. CompleteMultipartUpload
+neither reads nor verifies them yet.
 
 **The columns.** Each is added after the table's version 2 columns. The algorithm
 columns accept `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` and `SHA256` or NULL; the type
@@ -2284,7 +2311,8 @@ succeeded. `_put_object` puts them, with `FULL_OBJECT`, in the `ObjectMeta` that
 `put-after-commit`; a kill before the commit leaves the old row, checksum included. The
 response headers are named by `server/api/checksum_headers.py`. CompleteMultipartUpload
 and CopyObject build their `ObjectMeta` without the three fields, so their rows hold NULL.
-`UploadPart` computes the same value and discards it; the DeleteObjects body check
+`UploadPart` stores the checksum of its upload's effective algorithm with the part (decision
+31); the DeleteObjects body check
 (`verify_body`) computes only the claimed checksum and stores nothing.
 
 **GetObject and HeadObject (decision 30).** `checksum_mode_enabled`
@@ -2297,3 +2325,43 @@ NULL. GET adds them only on its whole object 200: when `_resolve_range` returns 
 them. HEAD adds them unless `_resolve_range` returns a range; a 304 (`_not_modified`) and a
 412 are built as before. The columns are read with the row, in the same query that gives the
 size and the blob, so the checksum and the bytes served are those of one row (§8).
+
+**CreateMultipartUpload (decision 31).** `_initiate` parses the two headers with
+`create_checksum` (`server/api/checksum_headers.py`) right after `request_object_headers`
+and before the upload ID is made, so a refusal creates no row. The guard
+(`_check_create_checksum_algorithm`, `server/api/request_guard.py`) has already answered
+501 for SHA512, MD5, XXHASH64, XXHASH3 and XXHASH128. The parser strips and upper-cases both
+values; a blank value is absent; it applies the default type and the allowed pairs and
+raises InvalidArgument for a name that is not an AWS one and InvalidRequest for a type
+alone or a disallowed pair. `create_upload` takes `checksum_algorithm` and `checksum_type`
+as keyword only arguments and writes them in the insert of the upload row, NULL in both for
+an upload that names none; the response carries the two headers only for a named upload.
+`UploadMeta` gains the two fields at its end, and `get_open_upload` returns the upload in one
+read, or None unless it is open.
+
+**UploadPart (decision 31).** `_upload_part` reads the open upload once with
+`get_open_upload`, in the position `upload_exists` had (after the part number is parsed as an
+integer, before its interval is checked), and computes E. `UploadChecks.from_headers`
+(`server/checksums.py`) takes `store_as=E` and `named`: for a named upload a claim whose
+algorithm, known from the `x-amz-checksum-<algorithm>` header or the `x-amz-trailer` name,
+is not E is InvalidRequest, decided after the claim syntax checks, including the Content-MD5
+decode, and before the body is read or a blob is registered. The stored algorithm is E; when
+the claim is in another algorithm (only an unnamed upload can reach that) both digests are
+computed, the claim is verified as before and E is stored. `claimed_checksum()` returns the
+claim and its verified value for the response header. `PartMeta` gains `checksum`,
+`checksum_algorithm` and `last_modified` at its end, each None by default. `record_part`
+writes the three columns on insert and in the `ON CONFLICT` update, and stamps a
+`last_modified` of None under the write lock, setting it on the passed object, as
+`put_object_meta` does, so its return value is unchanged. The checksum and the time are
+committed in the same transaction as the part row, after the crash point `part-after-bytes`
+and before `part-after-commit`: a kill before the commit leaves the previous part row with its
+own checksum and time, and a kill after leaves the new row with all three.
+
+**UploadPartCopy (decision 31).** `upload_part_copy` reads the open upload with
+`get_open_upload` where it read `upload_exists`, hashes each chunk of the existing copy loop
+in E, and puts the digest, E and no time in the `PartMeta` that `record_part` commits (the
+commit stamps the time). `CopyPartResult` takes `LastModified` from that stored time, in
+whole seconds, instead of the time of the response, and carries `Checksum<E>` only when the
+upload is named. The source row's own checksum is not used and need not exist. A kill at
+`part-copy-after-bytes` leaves the old part row, checksum and time included, and one at
+`part-copy-after-commit` the new row with all three.

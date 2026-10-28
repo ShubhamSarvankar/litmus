@@ -33,7 +33,10 @@ PutObject stores one checksum with the object (UploadChecks.stored_checksum): th
 algorithm, or CRC64NVME when no checksum was claimed, which is what the S3 API reference
 says S3 adds to an object uploaded without one. A trailer counts as a claim. The value is
 the base64 of the digest computed here, not the string the request carried. A Content-MD5
-alone is not a checksum claim. UploadPart computes the same value and discards it, and
+alone is not a checksum claim. UploadPart stores the checksum of the upload's effective
+algorithm with the part (store_as): the algorithm named at CreateMultipartUpload, or
+CRC64NVME when it named none. A claim in another algorithm is refused for a named upload,
+before the body is read, and is verified and then not stored for an unnamed one.
 DeleteObjects (verify_body) stores nothing.
 """
 
@@ -61,6 +64,9 @@ VALUE_HEADER_PREFIX = "x-amz-checksum-"
 # x-amz-checksum-mode, -algorithm and -type share the prefix but carry no checksum value.
 _NOT_VALUE_HEADERS = frozenset({"mode", "algorithm", "type"})
 _MD5_SIZE = 16
+# The AWS algorithm names (S3 API reference, CreateMultipartUpload) that Litmus does not
+# compute.
+UNCOMPUTED_NAMES = frozenset({"SHA512", "MD5", "XXHASH64", "XXHASH3", "XXHASH128"})
 
 
 class Hasher(Protocol):
@@ -141,23 +147,35 @@ class UploadChecks:
         algorithm: Algorithm | None,
         expected: bytes | None,
         content_md5: bytes | None,
+        store_as: Algorithm | None = None,
     ) -> None:
         self._algorithm = algorithm
         self._expected = expected  # None: the value arrives later, in the trailer
         self._content_md5 = content_md5
         self._hasher = algorithm.new() if algorithm else None
-        # What is stored: the claimed algorithm, else CRC64NVME. It shares the claim's
-        # hasher when it is the claimed algorithm.
-        self._stored = algorithm or CRC64NVME
-        self._stored_hasher = self._hasher if algorithm else self._stored.new()
+        # What is stored: store_as when given, else the claimed algorithm, else CRC64NVME.
+        # It shares the claim's hasher when it is the claimed algorithm.
+        self._stored = store_as or algorithm or CRC64NVME
+        shared = algorithm is not None and algorithm.name == self._stored.name
+        self._stored_hasher = self._hasher if shared else self._stored.new()
         self._verified = False
 
     @classmethod
-    def from_headers(cls, headers: Headers, trailer: Algorithm | None = None) -> "UploadChecks":
+    def from_headers(
+        cls,
+        headers: Headers,
+        trailer: Algorithm | None = None,
+        store_as: Algorithm | None = None,
+        named: bool = False,
+    ) -> "UploadChecks":
         """Read and check the claims in the headers; raises InvalidRequest,
         InvalidDigest or BadDigest (the SDK header disagreeing with the checksum), and
         NotImplementedOperation for a checksum header of another algorithm.
-        trailer is the algorithm of the aws-chunked trailer, if the body has one."""
+        trailer is the algorithm of the aws-chunked trailer, if the body has one.
+        store_as is the algorithm to store, for an UploadPart. named says the upload
+        named it at CreateMultipartUpload: a claim in any other algorithm is then
+        InvalidRequest, decided here from the header or trailer name, after the claim
+        syntax checks and before any body is read."""
         if unsupported := unsupported_value_header(headers):
             # The request guard answers this first; kept so no caller can reach the
             # lookup below with an algorithm Litmus does not check.
@@ -184,7 +202,9 @@ class UploadChecks:
             content_md5 = decode_b64_digest(value, _MD5_SIZE)
             if content_md5 is None:
                 raise InvalidDigest(extra={"Header": "Content-MD5"})
-        return cls(algorithm, expected, content_md5)
+        if named and algorithm is not None and algorithm.name != store_as.name:
+            raise InvalidRequest(extra={"Header": algorithm.header})
+        return cls(algorithm, expected, content_md5, store_as)
 
     def feed(self, data: bytes) -> None:
         if self._hasher is not None:
@@ -205,6 +225,14 @@ class UploadChecks:
         if not self._verified:
             return None
         return self._stored, base64.b64encode(self._stored_hasher.digest()).decode("ascii")
+
+    def claimed_checksum(self) -> tuple[Algorithm, str] | None:
+        """The claim's algorithm and the base64 of its digest of the bytes fed, which
+        verify() found equal to what the request sent. None when nothing was claimed or
+        verify() has not succeeded."""
+        if not self._verified or self._algorithm is None:
+            return None
+        return self._algorithm, base64.b64encode(self._hasher.digest()).decode("ascii")
 
     def verify_body(self, body: bytes) -> None:
         """feed() and verify() for a request body held whole in memory. Nothing is stored

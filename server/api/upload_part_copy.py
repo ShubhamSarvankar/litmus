@@ -7,14 +7,18 @@ conditions, the size and the bytes belong to one row. The range is checked again
 row's size. The bytes are then written to a fresh part blob through the durable write
 sequence of UploadPart, with the length (and, for the whole of a single part source, the
 MD5) checked before they are made durable, and the part row replaces any earlier row for
-the part number in one commit.
+the part number in one commit. The copied bytes are hashed in the upload's effective
+algorithm (the one CreateMultipartUpload named, else CRC64NVME) and the digest and the commit
+time are stored with the part; CopyPartResult returns that time, and the checksum only when
+the upload named an algorithm (S3 API reference, CopyPartResult: "present if the multipart
+upload request was created with the <algorithm> checksum algorithm").
 """
 
+import base64
 import logging
 import os
 import re
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime
 
 from fastapi import Request
 from fastapi.responses import Response
@@ -22,6 +26,7 @@ from fastapi.responses import Response
 from server.api.conditions import CopySourceConditions
 from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
 from server.api.objects import _CHUNK, _open_current
+from server.checksums import CRC64NVME, Algorithm
 from server.crash_points import (
     PART_COPY_AFTER_BYTES,
     PART_COPY_AFTER_COMMIT,
@@ -66,11 +71,12 @@ def parse_copy_source_range(headers) -> tuple[int, int] | None:
     return int(match[1]), int(match[2])
 
 
-def _result_xml(etag: str) -> str:
+def _result_xml(part: PartMeta, named: bool) -> str:
     root = ET.Element("CopyPartResult")
-    ET.SubElement(root, "ETag").text = etag
-    # Parts carry no timestamp of their own: this is the time of the response.
-    ET.SubElement(root, "LastModified").text = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    ET.SubElement(root, "ETag").text = part.etag
+    ET.SubElement(root, "LastModified").text = part.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if named:
+        ET.SubElement(root, f"Checksum{part.checksum_algorithm}").text = part.checksum
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -87,10 +93,14 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
         part_number = int(params["partNumber"])
     except ValueError:
         raise InvalidPart() from None
-    if not metadata.upload_exists(upload_id):
+    upload = metadata.get_open_upload(upload_id)
+    if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
     if not (1 <= part_number <= 10000):
         raise InvalidPart(extra={"PartNumber": str(part_number)})
+
+    named = upload.checksum_algorithm is not None
+    effective = Algorithm.by_name(upload.checksum_algorithm) if named else CRC64NVME
 
     values = request.headers.getlist(COPY_SOURCE_HEADER)
     if len(values) != 1:
@@ -153,6 +163,7 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
             "part", bucket, key, upload_id=upload_id, part_number=part_number
         )
         crash_point(PART_COPY_AFTER_REGISTER)
+        hasher = effective.new()
         try:
             with storage.open_writer(
                 blob_id, mid_write_point=armed_point(PART_COPY_MID_WRITE), verify=verify
@@ -161,6 +172,7 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
                 remaining = length
                 while remaining and (chunk := f.read(min(_CHUNK, remaining))):
                     writer.write(chunk)
+                    hasher.update(chunk)
                     remaining -= len(chunk)
         except BaseException:
             discard_new_blob(storage, metadata, blob_id)
@@ -173,6 +185,8 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
         etag=writer.etag,
         size=writer.size,
         blob_id=blob_id,
+        checksum=base64.b64encode(hasher.digest()).decode("ascii"),
+        checksum_algorithm=effective.name,
     )
     try:
         replaced = metadata.record_part(upload_id, part)
@@ -186,7 +200,7 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
     if replaced:
         collect_garbage(storage, metadata, [replaced])
     return Response(
-        content=_result_xml(part.etag),
+        content=_result_xml(part, named),
         status_code=200,
         media_type="application/xml",
     )

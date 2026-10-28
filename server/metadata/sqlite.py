@@ -264,6 +264,8 @@ def _upload(row: sqlite3.Row) -> UploadMeta:
         content_language=row["content_language"],
         expires=row["expires"],
         user_metadata=json.loads(row["user_metadata"]),
+        checksum_algorithm=row["checksum_algorithm"],
+        checksum_type=row["checksum_type"],
     )
 
 
@@ -782,6 +784,8 @@ class SQLiteMetadataStore:
         content_language: str | None = None,
         expires: str | None = None,
         user_metadata: dict[str, str] | None = None,
+        checksum_algorithm: str | None = None,
+        checksum_type: str | None = None,
     ) -> None:
         with self._write() as conn:
             if not conn.execute("SELECT 1 FROM buckets WHERE name = ?", (bucket,)).fetchone():
@@ -790,8 +794,9 @@ class SQLiteMetadataStore:
                 """INSERT INTO multipart_uploads (upload_id, bucket, key, initiated, state,
                                                   content_type, cache_control,
                                                   content_disposition, content_encoding,
-                                                  content_language, expires, user_metadata)
-                   VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)""",
+                                                  content_language, expires, user_metadata,
+                                                  checksum_algorithm, checksum_type)
+                   VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     upload_id,
                     bucket,
@@ -804,6 +809,8 @@ class SQLiteMetadataStore:
                     content_language,
                     expires,
                     json.dumps(user_metadata or {}, ensure_ascii=False, sort_keys=True),
+                    checksum_algorithm,
+                    checksum_type,
                 ),
             )
 
@@ -811,9 +818,18 @@ class SQLiteMetadataStore:
         rows = self._read("SELECT * FROM multipart_uploads WHERE upload_id = ?", (upload_id,))
         return _upload(rows[0]) if rows else None
 
+    def get_open_upload(self, upload_id: str) -> UploadMeta | None:
+        rows = self._read(
+            "SELECT * FROM multipart_uploads WHERE upload_id = ? AND state = 'open'",
+            (upload_id,),
+        )
+        return _upload(rows[0]) if rows else None
+
     def record_part(self, upload_id: str, part: PartMeta) -> str | None:
         """The UploadPart commit (§6.6 U4). Returns the replaced part blob, now
-        garbage. Raises UploadNotOpen if the upload is not open."""
+        garbage. Raises UploadNotOpen if the upload is not open. A part whose
+        last_modified is None gets the time of this commit, taken under the lock and set
+        on the part, as put_object_meta does for an object."""
         if part.blob_id is None:
             raise ValueError("record_part needs the blob ID of the part's bytes")
         with self._write() as conn:
@@ -826,14 +842,29 @@ class SQLiteMetadataStore:
                 "SELECT blob_id FROM multipart_parts WHERE upload_id = ? AND part_number = ?",
                 (upload_id, part.part_number),
             ).fetchone()
+            if part.last_modified is None:
+                part.last_modified = datetime.now(UTC).replace(tzinfo=None)
             conn.execute(
-                """INSERT INTO multipart_parts (upload_id, part_number, blob_id, etag, size)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO multipart_parts (upload_id, part_number, blob_id, etag, size,
+                                                checksum, checksum_algorithm, last_modified)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(upload_id, part_number) DO UPDATE SET
-                       blob_id = excluded.blob_id,
-                       etag    = excluded.etag,
-                       size    = excluded.size""",
-                (upload_id, part.part_number, part.blob_id, part.etag, part.size),
+                       blob_id            = excluded.blob_id,
+                       etag               = excluded.etag,
+                       size               = excluded.size,
+                       checksum           = excluded.checksum,
+                       checksum_algorithm = excluded.checksum_algorithm,
+                       last_modified      = excluded.last_modified""",
+                (
+                    upload_id,
+                    part.part_number,
+                    part.blob_id,
+                    part.etag,
+                    part.size,
+                    part.checksum,
+                    part.checksum_algorithm,
+                    _dt_to_str(part.last_modified),
+                ),
             )
             self._make_live(conn, part.blob_id)
             if old is not None and old["blob_id"] is not None:
@@ -853,6 +884,9 @@ class SQLiteMetadataStore:
                 etag=r["etag"],
                 size=r["size"],
                 blob_id=r["blob_id"],
+                checksum=r["checksum"],
+                checksum_algorithm=r["checksum_algorithm"],
+                last_modified=_str_to_dt(r["last_modified"]) if r["last_modified"] else None,
             )
             for r in rows
         ]

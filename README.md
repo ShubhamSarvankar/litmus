@@ -49,7 +49,7 @@ parameters as follows.
 | GET | `/{bucket}/{key}?tagging` | GetObjectTagging, answered with an empty `TagSet`: Litmus stores no tags, so that is always true. This is not tagging support. `versionId=null` is accepted; any other query parameter is 501. |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
-| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
+| POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; `x-amz-checksum-algorithm` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) and `x-amz-checksum-type` are stored with the upload and echoed (SHA512, MD5 and the XXHash algorithms are 501; a disallowed pair is 400 InvalidRequest); a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; every listed part but the last must be at least `S3_MIN_PART_SIZE` bytes (400 EntityTooSmall); `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the `x-amz-checksum-*` headers and `x-amz-checksum-type` are 501, since Litmus cannot verify them yet. The per part `Checksum*` elements of the body are accepted and not verified. |
 | GET | `/health` | Health check |
 
@@ -84,8 +84,12 @@ claimed algorithm or CRC64NVME when none was claimed, and returns it as
 base64 of the digest Litmus computed. GetObject and HeadObject return it, with the same
 two headers, on a whole object 200 when the request sends `x-amz-checksum-mode: ENABLED`
 (case insensitive; any other value is 400 InvalidArgument); a ranged response, a 304, a 412
-and an object without a stored checksum carry none. UploadPart, CompleteMultipartUpload and
-CopyObject store none yet. See
+and an object without a stored checksum carry none. UploadPart and UploadPartCopy store a
+checksum with each part, in the algorithm the upload named or CRC64NVME, with the part's time;
+UploadPart returns only the header of the checksum the request claimed, and UploadPartCopy
+returns `Checksum<algorithm>` for an upload that named one and the stored time as
+`LastModified`. CompleteMultipartUpload and CopyObject store none yet, and Complete does not
+verify the part checksums. See
 [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
@@ -212,8 +216,9 @@ server/
                        are CopyObject and its x-amz-copy-source; upload_part_copy.py
                        is UploadPartCopy; request_guard.py
                        answers 501; aws_chunked.py decodes aws-chunked bodies
-                       checksum_headers.py names the checksum response headers
-  checksums.py         the checksums a PutObject or UploadPart claims, their check, and the one PutObject stores
+                       checksum_headers.py names the checksum response headers and parses
+                       CreateMultipartUpload's algorithm and type
+  checksums.py         the checksums a PutObject or UploadPart claims, their check, and the one PutObject or UploadPart stores
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit

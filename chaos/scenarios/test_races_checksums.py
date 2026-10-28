@@ -155,3 +155,89 @@ def test_an_overwrite_race_leaves_a_checksum_that_matches_the_winners_bytes(env,
 
     assert [r.status_code for r in responses] == [200] * 4
     _assert_winner_is_consistent(storage, metadata, responses, bodies)
+
+
+# --- parts ---
+
+PART_URL = "/{bucket}/mpu?partNumber=1&uploadId={upload}"
+V1 = b"version one. " * 5000
+V2 = b"version two! " * 6000
+
+
+def _create_upload(client, algorithm: str) -> str:
+    resp = client.post(f"/{BUCKET}/mpu?uploads", headers={"x-amz-checksum-algorithm": algorithm})
+    assert resp.status_code == 200
+    return resp.text.split("<UploadId>")[1].split("</UploadId>")[0]
+
+
+def test_concurrent_reuploads_of_one_part_number_leave_a_checksum_that_matches_the_blob(
+    env, monkeypatch
+):
+    clients, storage, metadata = env
+    upload = _create_upload(clients[0], "SHA256")
+    url = PART_URL.format(bucket=BUCKET, upload=upload)
+    bodies = [bytes([65 + i]) * (20_000 + i) for i in range(5)]
+    barrier = threading.Barrier(5, timeout=WAIT)
+    real = metadata.record_part
+
+    def record_part(*args, **kwargs):
+        barrier.wait()  # every request has written its bytes before any commits
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(metadata, "record_part", record_part)
+
+    responses = _run(
+        [
+            lambda c=c, b=b, i=i: c.put(
+                url, content=b, headers=_claim("SHA256", b) if i % 2 == 0 else {}
+            )
+            for i, (c, b) in enumerate(zip(clients[:5], bodies, strict=True))
+        ]
+    )
+    monkeypatch.undo()
+
+    assert [r.status_code for r in responses] == [200] * 5
+    (part,) = metadata.get_parts(upload)
+    with storage.open_blob(part.blob_id) as f:
+        stored = f.read()
+    assert stored in bodies
+    assert (part.checksum_algorithm, part.checksum) == ("SHA256", _b64("SHA256", stored))
+    assert part.last_modified is not None
+    assert [r.state for r in metadata.list_blob_records()] == ["live"]
+    assert storage.temp_entries() == []
+    assert run_consistency_sweep(metadata, storage).issues == []
+
+
+def test_a_source_overwritten_while_part_copy_reads_it_gives_a_checksum_of_the_bytes_copied(
+    env, monkeypatch
+):
+    (c, other, *_), storage, metadata = env
+    assert c.put(f"/{BUCKET}/src", content=V1).status_code == 200
+    upload = _create_upload(c, "CRC32")
+    real = storage.open_blob
+    fired = []
+
+    def open_blob(blob_id):
+        f = real(blob_id)  # the descriptor is held; now the source is replaced
+        if not fired:
+            fired.append(blob_id)
+            assert other.put(f"/{BUCKET}/src", content=V2).status_code == 200
+        return f
+
+    monkeypatch.setattr(storage, "open_blob", open_blob)
+    resp = c.put(
+        PART_URL.format(bucket=BUCKET, upload=upload),
+        headers={"x-amz-copy-source": f"{BUCKET}/src"},
+    )
+    monkeypatch.undo()
+
+    assert resp.status_code == 200
+    (part,) = metadata.get_parts(upload)
+    with storage.open_blob(part.blob_id) as f:
+        copied = f.read()
+    assert copied == V1 and c.get(f"/{BUCKET}/src").content == V2
+    assert (part.checksum_algorithm, part.checksum) == ("CRC32", _b64("CRC32", V1))
+    assert f"<ChecksumCRC32>{_b64('CRC32', V1)}</ChecksumCRC32>" in resp.text
+    assert [r.state for r in metadata.list_blob_records()] == ["live"] * 2
+    assert storage.temp_entries() == []
+    assert run_consistency_sweep(metadata, storage).issues == []

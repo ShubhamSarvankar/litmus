@@ -130,6 +130,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Schema version 3 | 330 | 508 | 195 | The schema becomes version 3 and a version 2 database is migrated in place at startup, after the blob directory lock and the store ID check (docs/design/storage-layout.md decision 28 and §20). The new columns are not read or written yet. No outcome changed, and none was expected to: the results file is identical to the previous one (195 passed, 128 failed, 7 skipped, of 330 selected, 508 deselected). |
 | PutObject stores its checksum | 330 | 508 | 195 | PutObject stores the checksum of the object (the claimed algorithm, else CRC64NVME) in the object row and returns `x-amz-checksum-<algorithm>` and `x-amz-checksum-type: FULL_OBJECT` (see "Checksums"). CompleteMultipartUpload and CopyObject leave the columns NULL. No outcome changed, and none was expected to: GetObject and HeadObject return no checksum yet, and the selected tests that read a checksum back or send `x-amz-checksum-algorithm` carry the `checksum` marker or need it on Get. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the storage. |
 | Checksum mode on GET and HEAD | 330 | 508 | 195 | GetObject and HeadObject return the stored checksum (`x-amz-checksum-<algorithm>` and `x-amz-checksum-type`) on a whole object 200 when the request sends `x-amz-checksum-mode: ENABLED` (see "Checksums"). No outcome changed, as forecast: the selected tests that send the mode or read a checksum back carry the `checksum` marker, and botocore's own validation of a whole object GET passes, since the stored value is the digest of the stored bytes. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). The count of passing tests that received a checksum header was not measured: the server log does not record response headers. Recorded at the commit that adds the mode. |
+| Multipart checksums on Create, UploadPart and UploadPartCopy | 330 | 508 | 195 | CreateMultipartUpload stores and echoes `x-amz-checksum-algorithm` and `x-amz-checksum-type`; UploadPart stores the checksum of the upload's effective algorithm with the part and echoes the claim's header; UploadPartCopy stores the checksum and time and returns `Checksum<algorithm>` for a named upload and the stored `LastModified` (decision 31; see "Checksums"). No outcome changed, as forecast: the 20 passing multipart tests create unnamed uploads and boto3 sends CRC32 on each UploadPart, so each is a claim in another algorithm on an unnamed upload, which is verified and answered with 200. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the multipart checksums. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -695,7 +696,7 @@ from the stored `Content-Encoding` (see "System headers" below).
   memory does not grow with the object. Plain bodies are not streamed: they are still
   read whole into memory before they are written, as before.
 
-**Checksums: verified on PutObject, UploadPart and DeleteObjects; stored and returned by PutObject only.** A PutObject
+**Checksums: verified on PutObject, UploadPart and DeleteObjects; stored by PutObject, UploadPart and UploadPartCopy, returned by PutObject, UploadPart and GetObject and HeadObject.** A PutObject
 or UploadPart body is checked against the checksums its request claims, before the blob is
 made durable, so a refused request leaves no object, part or file. Checked:
 
@@ -772,9 +773,10 @@ says nothing:
 - *An empty body* is checksummed like any other.
 - *Overwrites replace the checksum*, with NULL when the new object has none.
 
-UploadPart computes the same value and drops it. CompleteMultipartUpload and CopyObject
-write the three columns as NULL, so an object they write over a PutObject object has no
-checksum, and neither returns a checksum header. DeleteObjects stores nothing.
+UploadPart and UploadPartCopy store a checksum with the part (decision 31, below).
+CompleteMultipartUpload and CopyObject write the three columns as NULL, so an object they
+write over a PutObject object has no checksum, and neither returns a checksum header.
+DeleteObjects stores nothing.
 
 **GetObject and HeadObject (decision 30).** A request with `x-amz-checksum-mode: ENABLED`
 gets the stored checksum back on a whole object 200, as `x-amz-checksum-<algorithm>` in
@@ -814,18 +816,106 @@ PutObject stored them. botocore (1.36 and later) sets the mode on every GetObjec
 default and validates a whole object body against the header, so boto3 now raises
 `FlexibleChecksumError` when the stored checksum and the bytes differ.
 
+**CreateMultipartUpload, UploadPart and UploadPartCopy (decision 31).** An upload is
+*named* when CreateMultipartUpload carried a non-blank `x-amz-checksum-algorithm`. The
+effective algorithm E is the named one, or CRC64NVME when the upload named none. A *claim*
+is a checksum the UploadPart request sent, by `x-amz-checksum-<algorithm>` header or by
+aws-chunked trailer. The upload row stores the algorithm and type
+(`multipart_uploads.checksum_algorithm`, `checksum_type`), NULL in both for an unnamed
+upload; each part row stores E, the base64 of its digest of the part's bytes and the time
+of its commit (`multipart_parts.checksum`, `checksum_algorithm`, `last_modified`), in the
+transaction that records the part, so a crash leaves the old part with its own checksum
+and time or the new one with all three (docs/design/storage-layout.md decision 31 and §20).
+Sources, from the S3 API reference and the S3 User Guide page "Checking object integrity for
+data uploads in Amazon S3":
+
+- *CreateMultipartUpload.* The request headers are `x-amz-checksum-algorithm` (`CRC32 |
+  CRC32C | SHA1 | SHA256 | CRC64NVME | SHA512 | MD5 | XXHASH64 | XXHASH3 | XXHASH128`)
+  and `x-amz-checksum-type` (`COMPOSITE | FULL_OBJECT`), and the response carries both
+  headers. The user guide's table gives the allowed pairs for a multipart upload:
+  CRC64NVME with FULL_OBJECT; CRC32 and CRC32C with either; SHA1 and SHA256 with
+  COMPOSITE (the other five algorithms are composite only). A named upload answers with
+  both headers in canonical upper case; the type it echoes is the type it stored.
+- *UploadPart.* The reference for `x-amz-sdk-checksum-algorithm` says "This checksum
+  algorithm must be the same for all parts and it match the checksum value supplied in the
+  `CreateMultipartUpload` request", and each checksum response header "will only be present
+  if the checksum was provided in the request". The response therefore carries the claim's
+  header with its verified value, and only that.
+- *UploadPartCopy.* API_CopyPartResult: each `Checksum<algorithm>` element is "present if
+  the multipart upload request was created with" that algorithm, so CopyPartResult carries
+  `Checksum<E>` for a named upload and no checksum element for an unnamed one.
+
+What each request does, where the cases are Litmus's:
+
+- A named upload, a claim in E: verified, stored, echoed. 200.
+- A named upload, a claim in another algorithm: 400 InvalidRequest, decided from the
+  header or trailer name after the claim syntax checks (including the Content-MD5
+  decode) and before the body is read; nothing is registered or written.
+- A named upload, no claim: E is computed and stored; no checksum header is returned.
+- An unnamed upload, a CRC64NVME claim: verified, stored, echoed.
+- An unnamed upload, a claim in another computed algorithm (boto3 sends CRC32 by default):
+  the claim is verified, CRC64NVME is computed over the same bytes and stored, and only
+  the claim's header is echoed.
+- An unnamed upload, no claim: CRC64NVME is stored; no checksum header is returned.
+- UploadPartCopy hashes the copied bytes in E in the copy loop and stores the value, the
+  algorithm and the time; the source's own checksum is never used, so a source with none or
+  with another algorithm is copied like any other. `LastModified` in CopyPartResult is the
+  stored part time (UTC, whole seconds), no longer the time of the response.
+
+Choices, where the reference says nothing (each is Litmus's own; "not found" in the
+reference for every one):
+
+- *The default types.* With only an algorithm, CRC64NVME gets FULL_OBJECT and CRC32,
+  CRC32C, SHA1 and SHA256 get COMPOSITE. The reference names no default.
+- *Refusals.* A disallowed algorithm and type pair, and a type with no algorithm, are 400
+  InvalidRequest; a value that is not an AWS algorithm or type name is 400 InvalidArgument,
+  naming the header. The reference documents none of these answers. A repeated header
+  arrives joined with ", " and so is not a name. Every refusal creates no upload.
+- *Matching.* Algorithm and type are compared case insensitively after stripping, and
+  stored and returned in canonical upper case.
+- *Blank counts as absent, for these two headers only.* A blank or whitespace
+  `x-amz-checksum-algorithm` or `x-amz-checksum-type` on CreateMultipartUpload is absent,
+  in the request guard and in the parser, as a blank `x-amz-checksum-mode` is absent on GET
+  and HEAD. The claim headers keep their behavior: a blank `x-amz-checksum-<algorithm>`
+  value on UploadPart stays 400 InvalidDigest.
+- *The five uncomputed names are 501.* A non-blank `x-amz-checksum-algorithm` naming SHA512,
+  MD5, XXHASH64, XXHASH3 or XXHASH128, in any letter case, is 501 NotImplemented in the
+  request guard, beside the other 501 header refusals, before the bucket is looked up.
+- *Nothing is echoed for an unnamed upload.* The reference does not say what S3 returns
+  for an upload created without an algorithm, so Litmus echoes neither header, stores NULL,
+  and treats the upload as CRC64NVME for its parts.
+- *A checksum is computed for a part sent without one.* The reference says the response
+  headers are present only when a checksum was provided, but not whether S3 stores one
+  otherwise; Litmus stores E, as PutObject stores CRC64NVME for a request with none.
+- *A claim in another algorithm on a named upload is 400 InvalidRequest.* The reference
+  says only that the algorithm "must be the same for all parts"; the error is a choice. The
+  same claim on an unnamed upload is accepted, because there is no named algorithm to
+  differ from, and it is not stored.
+- *UploadPartCopy ignores request checksum headers.* `x-amz-checksum-<algorithm>` and
+  `x-amz-sdk-checksum-algorithm` stay ignored on UploadPartCopy because API_UploadPartCopy
+  defines no request checksum headers (not found on that page); the five uncomputed
+  algorithm names stay 501 in the request guard, as on every PUT with `partNumber` and
+  `uploadId`.
+- *The part time is the commit time*, taken under the write lock, for UploadPart and
+  UploadPartCopy alike; a re-upload replaces it. A part whose bytes Complete released
+  keeps no time that is read.
+
+Complete still accepts the per part `Checksum*` elements of its body unverified, and still
+answers 501 to `x-amz-checksum-*` and `x-amz-checksum-type`, until the next change.
+
 Not done:
 
-- UploadPart, CompleteMultipartUpload and CopyObject store and return no checksum, and
+- CompleteMultipartUpload and CopyObject store and return no checksum, and
   neither does an object written before schema version 3, whose columns are NULL. S3
-  stores the checksum for all of them and adds CRC64NVME when the client sends none.
-- Multipart checksums are not implemented: `x-amz-checksum-algorithm` and
-  `x-amz-checksum-type` on CreateMultipartUpload are ignored, the `Checksum*` elements of
-  the CompleteMultipartUpload body are accepted and not verified, and composite and full
-  object checksums are not computed. On Complete, `x-amz-checksum-*` and
-  `x-amz-checksum-type` are 501, and `x-amz-mp-object-size` is verified (see "Checksum
-  and size headers on CompleteMultipartUpload" below). The 501 for other algorithms
-  applies to PutObject, UploadPart and DeleteObjects.
+  stores the checksum for both and adds CRC64NVME when the client sends none.
+- Multipart checksums are half done: CreateMultipartUpload, UploadPart and UploadPartCopy
+  store and return them (decision 31 above), but the `Checksum*` elements of the
+  CompleteMultipartUpload body are accepted and not verified against the stored part
+  checksums, and composite and full object checksums are not computed. On Complete,
+  `x-amz-checksum-*` and `x-amz-checksum-type` are 501, and `x-amz-mp-object-size` is
+  verified (see "Checksum and size headers on CompleteMultipartUpload" below). The 501 for
+  other algorithms applies to PutObject, UploadPart, UploadPartCopy and DeleteObjects, and
+  to `x-amz-checksum-algorithm` on CreateMultipartUpload.
 - `x-amz-content-sha256` holding a hex digest is not compared with the body.
 - The algorithms S3's documentation now lists beyond these five (MD5, SHA512 and the
   XXHash family) are not computed.
@@ -1115,10 +1205,11 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
 - *The response.* 200 with a `CopyPartResult` body holding the ETag and LastModified. The
   ETag is the MD5 of the copied bytes, quoted, plain even when the source was uploaded in
   parts; the reference says only "Entity tag of the object" and does not give the rule.
-  *Litmus's choice:* `LastModified` is the time of the response, because a part has no
-  timestamp of its own; the reference says "Date and time at which the object was
-  uploaded". There is no `ETag` header (the reference's example has none) and no checksum
-  element or `x-amz-copy-source-version-id`.
+  `LastModified` is the part's stored time, the time of its commit in whole seconds (the
+  reference says "Date and time at which the object was uploaded"). For an upload that
+  named a checksum algorithm the body also carries `Checksum<algorithm>` of the copied
+  bytes, and for an unnamed upload no checksum element (decision 31 above). There is no
+  `ETag` header (the reference's example has none) and no `x-amz-copy-source-version-id`.
 - *Replacing a part.* A copy over a part number writes a new blob; the part recorded
   before stays recorded and intact until the replacing commit, as for UploadPart (the
   reference: a part uploaded again with the same number overwrites the previous one). A
@@ -1413,9 +1504,10 @@ Ignored, where a client can observe the difference:
 - `x-amz-object-ownership` on PutObject, CreateMultipartUpload and CopyObject, and the
   ACL and grant headers on UploadPart, UploadPartCopy and CompleteMultipartUpload, which
   do not define them (see "ACL and grant headers" for the operations that do).
-- `x-amz-checksum-algorithm` and
-  `x-amz-checksum-type` on CreateMultipartUpload; `x-amz-checksum-algorithm` on
-  CopyObject (see "Checksums", Not done). The checksum headers and `x-amz-mp-object-size`
+- `x-amz-checksum-algorithm` on CopyObject (see "Checksums", Not done), and every
+  `x-amz-checksum-<algorithm>` and `x-amz-sdk-checksum-algorithm` on UploadPartCopy (see
+  decision 31 under "Checksums"). `x-amz-checksum-algorithm` and `x-amz-checksum-type` on
+  CreateMultipartUpload are no longer ignored. The checksum headers and `x-amz-mp-object-size`
   on CompleteMultipartUpload are no longer ignored (see "Checksum and size headers on
   CompleteMultipartUpload").
 - The `Checksum*` elements inside `Part` in the CompleteMultipartUpload body are
@@ -1558,15 +1650,16 @@ Now:
 - A non-blank `x-amz-checksum-crc32`, `-crc32c`, `-crc64nvme`, `-sha1`, `-sha256`,
   `-sha512`, `-md5`, `-xxhash64`, `-xxhash3`, `-xxhash128` or `x-amz-checksum-type` is
   501 NotImplemented, in the request guard with the other 501 refusals, so it is decided
-  before the upload is looked up. Litmus stores no part checksums, so it cannot verify
-  the whole-object value or the type until it does. S3 API reference,
+  before the upload is looked up. Litmus now stores part checksums and the upload's
+  algorithm and type, but Complete does not use them yet, so it cannot verify the
+  whole-object value or the type until it does. S3 API reference,
   "CompleteMultipartUpload": the headers are data integrity checks, and a type that
   differs from the one given at CreateMultipartUpload is `BadDigest`. S3 User Guide,
   "Checking object integrity for data uploads": for CRC32, CRC32C, SHA1 and SHA256, when
   CreateMultipartUpload did not name the algorithm, a checksum header on Complete "is
   currently accepted but not validated or stored"; for MD5, SHA512 and the XXHash
   algorithms, a value on Complete without the algorithm at Create is `InvalidRequest`.
-  Litmus does not record the algorithm or type of an upload, so it cannot tell the
+  Complete does not read the algorithm or type of an upload yet, so it cannot tell the
   accepted case from the one that must be checked, and refuses every case. AWS
   documents no status for a checksum mismatch on Complete beyond the code `BadDigest`;
   how a whole-object value is validated for a composite upload is not found.
@@ -1576,11 +1669,13 @@ Now:
   upload request was created with" that algorithm; what S3 does when one does not match
   is not found. The default AWS CLI sends `x-amz-mp-object-size` and a
   `ChecksumCRC64NVME` per part on every multipart upload (captured with aws-cli 2.38.5),
-  so refusing them would break it. Verifying them needs stored part checksums, which come
-  later. boto3 1.42.89 sends neither `x-amz-mp-object-size` nor a `Checksum*` element in
-  its Complete body: s3transfer copies a part's checksum into the Complete body from the
-  UploadPart response (`s3transfer/upload.py`), and Litmus's UploadPart answers with
-  `ETag` only because it does not return the checksum it verified.
+  so refusing them would break it. Verifying them needs the stored part checksums, which
+  UploadPart now keeps; the verification is the next change, and until then Complete
+  still accepts these elements unverified. boto3 1.42.89 sent neither
+  `x-amz-mp-object-size` nor a `Checksum*` element in its Complete body when UploadPart
+  answered with `ETag` only: s3transfer copies a part's checksum into the Complete body
+  from the UploadPart response (`s3transfer/upload.py`), and UploadPart now returns the
+  claim's header.
 - Open for the checksum design: S3 API reference, "CompletedPart", says that with part
   checksums, non-consecutive part numbers are 400 `InvalidPartOrder`, and S3 User Guide,
   "Checking object integrity for data uploads", says the same case is an `HTTP 500

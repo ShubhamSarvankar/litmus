@@ -1,7 +1,7 @@
 import random
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -599,3 +599,76 @@ def test_page_reads_one_snapshot(store, monkeypatch):
     monkeypatch.setattr(store, "_snapshot", snapshot_with_writer)
     assert _page(store, delimiter="/") == ([], ["a/", "b/", "c/"], False, "c/")
     assert len(calls) >= 3
+
+
+# --- Part and upload checksums (docs/design/storage-layout.md §20) ---
+
+
+def test_record_part_stores_the_checksum_algorithm_and_time(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    when = datetime(2024, 3, 4, 5, 6, 7, 891011)
+    part = PartMeta(
+        "uid-1",
+        1,
+        '"e"',
+        10,
+        _part_blob(store, 1),
+        checksum="AAAAAA==",
+        checksum_algorithm="CRC32",
+        last_modified=when,
+    )
+    store.record_part("uid-1", part)
+    (got,) = store.get_parts("uid-1")
+    assert (got.checksum, got.checksum_algorithm, got.last_modified) == ("AAAAAA==", "CRC32", when)
+    # Replacing the part replaces all three.
+    again = PartMeta(
+        "uid-1", 1, '"f"', 11, _part_blob(store, 1), checksum="BBBBBB==", checksum_algorithm="SHA1"
+    )
+    store.record_part("uid-1", again)
+    (got,) = store.get_parts("uid-1")
+    assert (got.checksum, got.checksum_algorithm) == ("BBBBBB==", "SHA1")
+    assert got.last_modified == again.last_modified and got.last_modified != when
+
+
+def test_record_part_stamps_a_missing_time_on_the_part_it_was_given(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    part = PartMeta("uid-1", 1, '"e"', 10, _part_blob(store, 1))
+    assert part.last_modified is None
+    before = datetime.now(UTC).replace(tzinfo=None)
+    replaced = store.record_part("uid-1", part)
+    after = datetime.now(UTC).replace(tzinfo=None)
+    assert replaced is None
+    assert part.last_modified is not None and before <= part.last_modified <= after
+    (got,) = store.get_parts("uid-1")
+    assert got.last_modified == part.last_modified
+    assert (got.checksum, got.checksum_algorithm) == (None, None)
+
+
+def test_create_upload_stores_the_checksum_algorithm_and_type(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload(
+        "named", "b", "k", _NOW, checksum_algorithm="CRC32C", checksum_type="FULL_OBJECT"
+    )
+    store.create_upload("unnamed", "b", "k", _NOW)
+    named, unnamed = store.get_upload("named"), store.get_upload("unnamed")
+    assert (named.checksum_algorithm, named.checksum_type) == ("CRC32C", "FULL_OBJECT")
+    assert (unnamed.checksum_algorithm, unnamed.checksum_type) == (None, None)
+    assert store.get_open_upload("named") == named
+
+
+def test_get_open_upload_is_none_for_a_completed_upload(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    assert store.get_open_upload("uid-1").upload_id == "uid-1"
+    store.commit_completed_upload("uid-1", _obj(blob_id=_blob(store)))
+    assert store.get_open_upload("uid-1") is None
+    assert store.get_open_upload("no-such-uid") is None
+
+
+def test_get_open_upload_is_none_for_an_aborted_upload(store):
+    store.create_bucket("b", _NOW)
+    store.create_upload("uid-1", "b", "k", _NOW)
+    store.abort_upload("uid-1")
+    assert store.get_open_upload("uid-1") is None

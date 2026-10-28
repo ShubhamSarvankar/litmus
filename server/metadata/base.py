@@ -64,6 +64,11 @@ class PartMeta:
     size: int
     # NULL once Complete released the part's bytes (docs/design/storage-layout.md §5).
     blob_id: str | None = None
+    # The part's checksum in the upload's effective algorithm (base64) and the time its
+    # bytes were committed; record_part stamps last_modified when it is None.
+    checksum: str | None = None
+    checksum_algorithm: str | None = None
+    last_modified: datetime | None = None
 
 
 @dataclass
@@ -81,6 +86,9 @@ class UploadMeta:
     content_language: str | None = None
     expires: str | None = None
     user_metadata: dict[str, str] = field(default_factory=dict)
+    # The algorithm and type CreateMultipartUpload named; both None when it named none.
+    checksum_algorithm: str | None = None
+    checksum_type: str | None = None
 
 
 @dataclass
@@ -246,11 +254,18 @@ class MetadataStore(Protocol):
         content_language: str | None = None,
         expires: str | None = None,
         user_metadata: dict[str, str] | None = None,
+        checksum_algorithm: str | None = None,
+        checksum_type: str | None = None,
     ) -> None: ...
 
-    # Creates the open upload with the headers and metadata it will give the object.
+    # Creates the open upload with the headers and metadata it will give the object, and
+    # the checksum algorithm and type it named.
 
     def get_upload(self, upload_id: str) -> UploadMeta | None: ...
+
+    def get_open_upload(self, upload_id: str) -> UploadMeta | None: ...
+
+    # The upload in one read, or None unless it is open.
 
     def record_part(self, upload_id: str, part: PartMeta) -> str | None: ...
 
