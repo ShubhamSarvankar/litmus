@@ -132,6 +132,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Checksum mode on GET and HEAD | 330 | 508 | 195 | GetObject and HeadObject return the stored checksum (`x-amz-checksum-<algorithm>` and `x-amz-checksum-type`) on a whole object 200 when the request sends `x-amz-checksum-mode: ENABLED` (see "Checksums"). No outcome changed, as forecast: the selected tests that send the mode or read a checksum back carry the `checksum` marker, and botocore's own validation of a whole object GET passes, since the stored value is the digest of the stored bytes. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). The count of passing tests that received a checksum header was not measured: the server log does not record response headers. Recorded at the commit that adds the mode. |
 | Multipart checksums on Create, UploadPart and UploadPartCopy | 330 | 508 | 195 | CreateMultipartUpload stores and echoes `x-amz-checksum-algorithm` and `x-amz-checksum-type`; UploadPart stores the checksum of the upload's effective algorithm with the part and echoes the claim's header; UploadPartCopy stores the checksum and time and returns `Checksum<algorithm>` for a named upload and the stored `LastModified` (decision 31; see "Checksums"). No outcome changed, as forecast: the 20 passing multipart tests create unnamed uploads and boto3 sends CRC32 on each UploadPart, so each is a claim in another algorithm on an unnamed upload, which is verified and answered with 200. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the multipart checksums. |
 | Complete checksums | 330 | 508 | 195 | CompleteMultipartUpload verifies the Part `Checksum*` elements and the `x-amz-checksum-*` and `x-amz-checksum-type` headers against the stored part checksums and the upload's algorithm and type, stores the object's checksum (COMPOSITE with a "-N" suffix, FULL_OBJECT, or CRC64NVME FULL_OBJECT for an upload that named no algorithm) and returns `Checksum<ALG>` and `ChecksumType` (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). The 501 for the Complete checksum headers is gone. No outcome changed, and none was expected to: no selected test sends a Part checksum element or a Complete checksum header, all of them create unnamed uploads (so gaps stay allowed), and the 7 passing tests that read a multipart object whole (`test_multipart_copy_multiple_sizes`, `_small`, `_special_names`, `_without_range`, `test_multipart_upload_contents`, `test_multipart_upload_overwrite_existing_object` and `test_multipart_upload_resend_part`) now have botocore validate the combined CRC64NVME, and still pass. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the verification. |
+| CopyObject checksums | 330 | 508 | 195 | CopyObject hashes the bytes it copies and stores the checksum, algorithm and type FULL_OBJECT with the destination row, in the algorithm `x-amz-checksum-algorithm` names, else the source's, else CRC64NVME, and returns `ChecksumType` and `Checksum<algorithm>` in `CopyObjectResult` (see "Checksums", decision 33). SHA512, MD5 and the XXHash names are 501; an unknown name is 400 InvalidArgument. No outcome changed, as forecast: the 10 selected tests that copy with CopyObject or `client.copy` and read the copy back (`test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, `test_copy_object_ifmatch_good` and `_ifnonematch_failed`) now have a whole object GET that botocore validates against the copy's stored checksum, and still pass; the tests that expect an error, the UploadPartCopy tests and the versioned and second user tests are unchanged. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the checksum to CopyObject. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -318,8 +319,10 @@ Verified, with content checks and not only exit codes:
   bytes compared. The CLI sends each checksum as an aws-chunked trailer, which Litmus
   decodes and verifies.
 - Downloads: the CLI sets `x-amz-checksum-mode` on GET, so a whole object download of an
-  object written by PutObject is validated against its stored checksum. Objects written by
-  CompleteMultipartUpload and CopyObject have none yet, and a ranged download carries none.
+  object written by PutObject or CopyObject is validated against its stored checksum, an
+  object written by CompleteMultipartUpload has one too (a COMPOSITE value is not the
+  checksum of the body, and botocore does not compare it with the body), and a ranged
+  download carries none.
 - `s3 rm` of one key, `s3 rm --recursive`, `s3 rb` of a non-empty bucket failing with
   BucketNotEmpty, and `s3 rb --force`
 
@@ -776,9 +779,9 @@ says nothing:
 - *Overwrites replace the checksum*, with NULL when the new object has none.
 
 UploadPart and UploadPartCopy store a checksum with the part (decision 31, below), and
-CompleteMultipartUpload stores the object's (decision 32, below). CopyObject writes the three
-columns as NULL, so an object it writes over a PutObject object has no checksum, and it
-returns no checksum header. DeleteObjects stores nothing.
+CompleteMultipartUpload and CopyObject store the object's (decisions 32 and 33, below).
+CopyObject returns its checksum in the CopyObjectResult body, not in headers. DeleteObjects
+stores nothing.
 
 **GetObject and HeadObject (decision 30).** A request with `x-amz-checksum-mode: ENABLED`
 gets the stored checksum back on a whole object 200, as `x-amz-checksum-<algorithm>` in
@@ -806,8 +809,8 @@ the following, so each is Litmus's own choice:
   carries none.
 - *A 304 and a 412 carry none.* The 304 response is unchanged.
 - *A row without a checksum returns none*, with or without the mode. These are the objects
-  written by CopyObject, the objects written before schema version 3, and a multipart object
-  whose listed parts include one written before it. An object that a PutObject replaced has the new
+  written before schema version 3 (a CopyObject of one writes a checksum for the copy), and a
+  multipart object whose listed parts include one written before it. An object that a PutObject replaced has the new
   object's checksum.
 - *`partNumber` is still ignored* (see "Multipart details" and the GetObject `partNumber`
   row above). A GET or HEAD with `?partNumber=N` and the mode returns the whole object and
@@ -908,14 +911,77 @@ stores the object's checksum, algorithm and type with the completed state, in on
 transaction. The rules, the choices and what the documentation leaves unsaid are under
 "Checksum and size headers on CompleteMultipartUpload" below.
 
+**CopyObject (decision 33).** CopyObject hashes the bytes it copies, in the writer loop that
+writes the new blob, and stores the digest, the algorithm and the type FULL_OBJECT with the
+destination row, in the same commit as the rest of the row (`objects.checksum`,
+`checksum_algorithm`, `checksum_type`). An overwrite replaces all three. The destination's
+algorithm is, in this order: the non-blank `x-amz-checksum-algorithm` header, compared case
+insensitively and stored in upper case; else the source row's algorithm; else CRC64NVME (a
+source written before schema version 3 has none). `CopyObjectResult` carries `ETag`,
+`LastModified`, `ChecksumType` and `Checksum<ALG>`, in the order API_CopyObject gives, and
+GET and HEAD return the value with the mode as for any object. A name that is not one of the
+ten AWS names is 400 InvalidArgument naming the header, decided with the other header syntax
+errors (after the directives, before the REPLACE headers and the source lookup, so an
+unknown name beats NoSuchKey); SHA512, MD5, XXHASH64, XXHASH3 and XXHASH128 are 501 in the
+request guard, beside the other 501 header refusals. Sources: S3 API reference, CopyObject,
+`x-amz-checksum-algorithm` ("You can optionally specify a different checksum algorithm to
+use with the `x-amz-checksum-algorithm` header. Unrecognized or unsupported values will
+respond with the HTTP status code `400 Bad Request`") and the response syntax; S3 User
+Guide, "Copying, moving, and renaming objects" ("Whether you choose to use the same
+algorithm or a new one, Amazon S3 calculates a new checksum value after the object is
+copied. Amazon S3 doesn't directly copy the value of the checksum. All copied objects
+without checksums and specified destination checksum algorithms automatically gain a
+`CRC-64NVME` checksum algorithm"); S3 User Guide, "Checking object integrity for data
+uploads in Amazon S3" ("If you don't specify an algorithm, S3 uses the existing algorithm.
+If the source object doesn't have a specified checksum algorithm or checksum value, Amazon
+S3 uses the CRC-64/NVME algorithm to calculate the checksum value for the destination
+object", and "With a copy command, the checksum of the object is a direct checksum of the
+full object"). Choices:
+
+- *Recomputing, not copying the value.* API_CopyObject says "When you copy an object, if the
+  source object has a checksum, that checksum value will be copied to the new object by
+  default". The user guide says S3 "doesn't directly copy the value of the checksum" and
+  calculates a new one. Litmus follows the user guide: it always hashes the copied bytes. The
+  two agree whenever the source's value is the full object checksum of the same bytes, which
+  is every PutObject object, and differ only for a composite source.
+- *A composite source gets a direct full object value.* A source whose value ends in "-N"
+  is copied with its algorithm and a checksum of the whole copied bytes, with no suffix
+  ("the checksum of the object is a direct checksum of the full object"; "the checksum value
+  changes even though the data doesn't").
+- *The type is always FULL_OBJECT*, whatever the source's. The pages say the copy's value is
+  of the full object and name no type for it.
+- *Blank counts as absent.* A blank or whitespace `x-amz-checksum-algorithm` on CopyObject is
+  absent, in the request guard and in the parser, as on CreateMultipartUpload. The reference
+  says nothing about an empty value.
+- *The five uncomputed names are 501.* Litmus cannot compute them, and a copy that silently
+  used another algorithm would answer a request it did not honor. The reference says
+  unsupported values are 400; the 501 is Litmus's, the same as on CreateMultipartUpload.
+- *400 InvalidArgument for an unknown name.* The reference gives the status and no code.
+- *A copy onto itself that changes only the algorithm* is 400 InvalidRequest, as any copy
+  onto itself without `x-amz-metadata-directive: REPLACE`, and with REPLACE it is the
+  ordinary byte copy, recomputed in the named algorithm. S3's behavior for a self copy that
+  changes only the checksum algorithm is not found in API_CopyObject or in the user guide pages
+  "Copying, moving, and renaming objects" and "Checking object integrity for data uploads
+  in Amazon S3" (the error list page was not read for it); the user guide says a copy onto itself
+  is how metadata is changed, and names no checksum use of it. This is Litmus's choice.
+- *Request checksum value headers are ignored.* API_CopyObject defines neither
+  `x-amz-checksum-<algorithm>` nor `x-amz-sdk-checksum-algorithm` as a request header (not
+  found on that page), so, as on UploadPartCopy, a CRC32, CRC32C, CRC64NVME, SHA1 or SHA256
+  value header and an `x-amz-sdk-checksum-algorithm` of any value are neither verified nor
+  an error, and do not choose the algorithm; measured, a wrong value is a 200 and the copy
+  is stored in the source's algorithm. The five uncomputed value headers (`x-amz-checksum-sha512`,
+  `-md5` and the XXHash three) stay 501 in the request guard, as on every PUT without a
+  subresource.
+- *LastModified.* The commit time, as before.
+
 Not done:
 
-- CopyObject stores and returns no checksum, and neither does an object written before
-  schema version 3, whose columns are NULL. S3 stores the checksum for both and adds
-  CRC64NVME when the client sends none. A multipart object whose listed parts include one
-  written before schema version 3 has none either.
+- An object written before schema version 3 has no checksum (its columns are NULL), and S3
+  stores one and adds CRC64NVME when the client sends none. A multipart object whose listed
+  parts include one written before schema version 3 has none either. A CopyObject of either
+  computes a checksum for its copy (decision 33).
 - The 501 for other algorithms applies to PutObject, UploadPart, UploadPartCopy and
-  DeleteObjects, and to `x-amz-checksum-algorithm` on CreateMultipartUpload. On Complete,
+  DeleteObjects, and to `x-amz-checksum-algorithm` on CreateMultipartUpload and CopyObject. On Complete,
   MD5, SHA512 and the XXHash headers are 400 InvalidRequest, as the user guide says for an
   upload that did not name them.
 - `x-amz-content-sha256` holding a hex digest is not compared with the body.
@@ -1105,8 +1171,10 @@ rest on the ceph tests or on nothing documented.
   malformed source). A missing source bucket is 404 NoSuchBucket and a missing source key
   is 404 NoSuchKey (the codes of every other operation; the reference lists neither).
 - *Error order* (*Litmus's choice*): the destination bucket, the source syntax, the
-  directives, the request's headers under REPLACE, the source bucket, the source key, the
-  refusal of a copy onto itself, the source conditions, then the copy and the commit.
+  directives, the `x-amz-checksum-algorithm` name (400 InvalidArgument), the request's
+  headers under REPLACE, the source bucket, the source key, the refusal of a copy onto
+  itself, the source conditions, then the copy and the commit. The five uncomputed
+  algorithm names are 501 in the request guard, before all of these.
 - *Source conditions.* `x-amz-copy-source-if-match`, `-if-none-match`,
   `-if-modified-since` and `-if-unmodified-since` are decided on the source row whose blob
   is opened, with the evaluator and the RFC 9110 order of conditional GET. The reference
@@ -1152,8 +1220,9 @@ rest on the ceph tests or on nothing documented.
   source row's and, for a source not assembled from parts, its MD5 with the row's ETag;
   a mismatch is 500 and nothing is stored. A multipart source is checked by size only.
   A source whose file is missing with its row unchanged, or has another size, is 500.
-- *Not honored, as for PutObject:* the ACL and checksum headers of the request are
-  ignored (the expected bucket owner headers are evaluated, see "Bucket owner condition").
+- *Not honored, as for PutObject:* the ACL headers and the checksum value headers
+  (`x-amz-checksum-<algorithm>`, `x-amz-sdk-checksum-algorithm`) of the request are
+  ignored; `x-amz-checksum-algorithm` is read (see "Checksums", decision 33) (the expected bucket owner headers are evaluated, see "Bucket owner condition").
   The storage class, SSE, SSE-C (destination), website redirect and Object Lock headers are
   501 (see "Feature headers Litmus refuses"). The
   `x-amz-copy-source-server-side-encryption-customer-algorithm`, `-key` and `-key-MD5`
@@ -1506,9 +1575,8 @@ Ignored, where a client can observe the difference:
 - `x-amz-object-ownership` on PutObject, CreateMultipartUpload and CopyObject, and the
   ACL and grant headers on UploadPart, UploadPartCopy and CompleteMultipartUpload, which
   do not define them (see "ACL and grant headers" for the operations that do).
-- `x-amz-checksum-algorithm` on CopyObject (see "Checksums", Not done), and every
-  `x-amz-checksum-<algorithm>` and `x-amz-sdk-checksum-algorithm` on UploadPartCopy (see
-  decision 31 under "Checksums"). `x-amz-checksum-algorithm` and `x-amz-checksum-type` on
+- Every `x-amz-checksum-<algorithm>` and `x-amz-sdk-checksum-algorithm` on CopyObject (see
+  decision 33 under "Checksums") and on UploadPartCopy (see decision 31 under "Checksums"). `x-amz-checksum-algorithm` and `x-amz-checksum-type` on
   CreateMultipartUpload are no longer ignored. The checksum headers, the Part `Checksum*`
   elements and `x-amz-mp-object-size` on CompleteMultipartUpload are no longer ignored (see
   "Checksum and size headers on CompleteMultipartUpload"); an unnamed upload accepts some of

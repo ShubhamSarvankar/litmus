@@ -44,7 +44,7 @@ parameters as follows.
 | DELETE | `/{bucket}` | DeleteBucket. Refused while the bucket has objects; open multipart uploads are aborted. |
 | GET | `/{bucket}` | ListObjects (V1). With `list-type=2`: ListObjectsV2. With `versions`: ListObjectVersions. Keys are listed in UTF-8 byte order; `prefix` is an exact, case sensitive prefix. V1 and V2 also apply `delimiter` and `max-keys`; V1 pages with `marker` and `NextMarker` and shows the configured `Owner` in each `Contents`; V2 pages with `continuation-token` or `start-after`, reports `KeyCount`, and shows `Owner` with `fetch-owner=true`. ListObjectVersions applies `delimiter` and `max-keys`, pages with `key-marker` and `version-id-marker`, and lists each object once as version `null` with the configured `Owner`. All three accept `encoding-type=url`. |
 | POST | `/{bucket}?delete` | DeleteObjects, with a per key `ETag` condition. |
-| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags, and so are server-side encryption, `x-amz-website-redirect-location`, Object Lock and a `x-amz-storage-class` other than `STANDARD`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive` and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
+| PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags, and so are server-side encryption, `x-amz-website-redirect-location`, Object Lock and a `x-amz-storage-class` other than `STANDARD`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive`, `x-amz-checksum-algorithm` (the five computed algorithms; the other five AWS names are 501) and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | GET | `/{bucket}/{key}?tagging` | GetObjectTagging, answered with an empty `TagSet`: Litmus stores no tags, so that is always true. This is not tagging support. `versionId=null` is accepted; any other query parameter is 501. |
 | HEAD | `/{bucket}/{key}` | HeadObject |
@@ -89,7 +89,10 @@ checksum with each part, in the algorithm the upload named or CRC64NVME, with th
 UploadPart returns only the header of the checksum the request claimed, and UploadPartCopy
 returns `Checksum<algorithm>` for an upload that named one and the stored time as
 `LastModified`. CompleteMultipartUpload verifies the part checksums and stores the object's,
-combined from them (composite or full object); CopyObject stores none yet. See
+combined from them (composite or full object). CopyObject hashes the bytes it copies, in
+the algorithm `x-amz-checksum-algorithm` names, else the source's, else CRC64NVME, always as a
+FULL_OBJECT checksum, stores it, and returns it in `CopyObjectResult` as `ChecksumType` and
+`Checksum<algorithm>`. See
 [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
@@ -217,7 +220,7 @@ server/
                        is UploadPartCopy; request_guard.py
                        answers 501; aws_chunked.py decodes aws-chunked bodies
                        checksum_headers.py names the checksum response headers and parses
-                       CreateMultipartUpload's algorithm and type
+                       the algorithm and type of CreateMultipartUpload and CopyObject's algorithm
   checksums.py         the checksums a PutObject or UploadPart claims, their check, and the one PutObject or UploadPart stores
   crc64nvme.py         incremental CRC64NVME (awscrt) for the trailer checksum
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker

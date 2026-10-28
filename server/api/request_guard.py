@@ -309,6 +309,9 @@ def _check_copy_source(headers) -> None:
 def _check_copy_object(headers) -> None:
     """Refuse the CopyObject requests Litmus cannot honor."""
     _check_copy_source(headers)
+    # The copy would have to be checksummed in an algorithm Litmus does not compute; a
+    # blank value is absent and the other values are the handler's.
+    _refuse_value(headers, "x-amz-checksum-algorithm", lambda v: v.upper() not in UNCOMPUTED_NAMES)
     if headers.get(_TAGGING_DIRECTIVE) == "REPLACE" and any(
         v.strip() for v in headers.getlist(_TAGGING)
     ):

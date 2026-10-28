@@ -6,7 +6,7 @@ value is the base64 of the digest Litmus computed, not the request's string. The
 expected digests come from the reference implementations in test_upload_checksums.py
 (zlib, hashlib and two table CRCs), none of which uses awscrt or server/. Each case that
 stores checks the response headers and the row in the database. An object written by
-CopyObject has no checksum yet, and replaces the row's; one written by
+CopyObject takes the checksum of the copied bytes, and replaces the row's; one written by
 CompleteMultipartUpload takes the CRC64NVME combined from its parts, and replaces it too.
 """
 
@@ -51,11 +51,6 @@ def assert_stored(env: Env, r, algorithm: str, data: bytes, key: str = KEY) -> N
         algorithm.upper(),
         "FULL_OBJECT",
     )
-
-
-def assert_no_checksum(env: Env, key: str = KEY) -> None:
-    meta = row(env, key)
-    assert (meta.checksum, meta.checksum_algorithm, meta.checksum_type) == (None, None, None)
 
 
 def body_of(size: int) -> bytes:
@@ -150,7 +145,7 @@ async def test_complete_onto_a_put_object_stores_the_combined_crc64nvme(env):
     )
 
 
-async def test_copy_onto_a_put_object_leaves_the_columns_null(env):
+async def test_copy_onto_a_put_object_replaces_the_checksum_with_the_copys(env):
     assert_stored(env, await put(env, DATA, [claim("sha256")]), "sha256", DATA)
     assert_stored(env, await put(env, b"source", key="src"), "crc64nvme", b"source", key="src")
     r = await call(
@@ -161,9 +156,15 @@ async def test_copy_onto_a_put_object_leaves_the_columns_null(env):
         [],
     )
     assert r.status == 200, r.body
+    # The copy's checksum is in the CopyObjectResult body, not in headers.
     assert checksum_headers(r) == {}
     assert row(env).size == len(b"source")
-    assert_no_checksum(env)
+    meta = row(env)
+    assert (meta.checksum, meta.checksum_algorithm, meta.checksum_type) == (
+        b64(digest("crc64nvme", b"source")),
+        "CRC64NVME",
+        "FULL_OBJECT",
+    )
 
 
 # --- the claims around it ---

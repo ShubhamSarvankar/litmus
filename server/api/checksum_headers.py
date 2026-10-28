@@ -1,7 +1,8 @@
 """The checksum headers of a response (S3 API reference, PutObject, response syntax), the
 x-amz-checksum-mode request header of GetObject and HeadObject, and the
-x-amz-checksum-algorithm and x-amz-checksum-type headers of CreateMultipartUpload, and the
-checksum headers of CompleteMultipartUpload."""
+x-amz-checksum-algorithm and x-amz-checksum-type headers of CreateMultipartUpload, the
+x-amz-checksum-algorithm header of CopyObject, and the checksum headers of
+CompleteMultipartUpload."""
 
 from server.checksums import ALGORITHMS, UNCOMPUTED_NAMES, VALUE_HEADER_PREFIX, Algorithm
 from server.errors.s3errors import InvalidArgument, InvalidRequest, NotImplementedOperation
@@ -98,6 +99,26 @@ def create_checksum(headers) -> tuple[str, str] | None:
     if type_ not in _ALLOWED_TYPES[algorithm]:
         raise InvalidRequest(extra={"Header": CREATE_TYPE_HEADER})
     return algorithm, type_
+
+
+def copy_algorithm(headers) -> Algorithm | None:
+    """The algorithm a CopyObject names with x-amz-checksum-algorithm (S3 API reference,
+    CopyObject: "You can optionally specify a different checksum algorithm to use with the
+    x-amz-checksum-algorithm header. Unrecognized or unsupported values will respond with
+    the HTTP status code 400 Bad Request"), or None when it names none. Matched case
+    insensitively after stripping; blank counts as absent. A value that is not an AWS
+    algorithm name is 400 InvalidArgument, naming the header; the reference gives no error
+    code, so that code is a choice. The five AWS names Litmus does not compute are 501, and
+    the request guard answers them first."""
+    value = _create_value(headers, CREATE_ALGORITHM_HEADER)
+    if value is None:
+        return None
+    algorithm = Algorithm.by_name(value)
+    if algorithm is None:
+        raise InvalidArgument(
+            extra={"ArgumentName": CREATE_ALGORITHM_HEADER, "ArgumentValue": value}
+        )
+    return algorithm
 
 
 # The checksum value headers of CompleteMultipartUpload (S3 API reference,

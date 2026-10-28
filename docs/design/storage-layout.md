@@ -1346,7 +1346,8 @@ still fails.
 ### §11. CopyObject and UploadPartCopy (R13)
 
 Status: CopyObject (sequence in §6.10) and UploadPartCopy (sequence in §6.6A) are
-implemented as below. A PUT with `x-amz-copy-source` on any other query is 501.
+implemented as below. A PUT with `x-amz-copy-source` on any other query is 501. The
+checksum a CopyObject stores and returns is decision 33 and §20.
 
 **Decided (decision 8): copy the bytes into a new ID.** CopyObject is PutObject whose
 source is another object's blob:
@@ -2300,13 +2301,49 @@ Recorded with the Complete checksums:
     (§6.7 C2 to C5) is unchanged, and so is `commit_completed_upload`. Details and the order
     of the errors: §20.
 
+33. **CopyObject stores and returns a checksum.** The copy hashes the bytes the existing
+    writer loop copies and commits the digest, the algorithm and the type FULL_OBJECT in the
+    same transaction as the rest of the destination row, so an overwrite replaces all three
+    and a kill leaves either the old row with its own columns or the new row with all
+    three. The algorithm is the non-blank `x-amz-checksum-algorithm` header (any letter
+    case, stored in upper case), else the source row's `checksum_algorithm`, else CRC64NVME.
+    `CopyObjectResult` returns `ETag`, `LastModified`, `ChecksumType` and `Checksum<ALG>`, in
+    the order of the response syntax. A name that is not one of the ten AWS names is 400
+    InvalidArgument, decided after the directives and before the REPLACE headers and the
+    source lookup; SHA512, MD5, XXHASH64, XXHASH3 and XXHASH128 are 501 in the request
+    guard. Sources: S3 API reference, "CopyObject" (`x-amz-checksum-algorithm`: "Unrecognized
+    or unsupported values will respond with the HTTP status code `400 Bad Request`"; the
+    response syntax); S3 User Guide, "Copying, moving, and renaming objects" ("Amazon S3
+    calculates a new checksum value after the object is copied. Amazon S3 doesn't directly
+    copy the value of the checksum"); S3 User Guide, "Checking object integrity for data
+    uploads in Amazon S3" ("With a copy command, the checksum of the object is a direct
+    checksum of the full object"; without a named algorithm "S3 uses the existing
+    algorithm", and CRC-64/NVME when the source has none). Choices: the copy recomputes, as
+    the user guide says, where the API reference says the source's "checksum value will be
+    copied to the new object by default"; a composite source (a value ending in "-N") gets
+    a direct full object value in its own algorithm; the type is always FULL_OBJECT; a blank
+    header is absent; the five uncomputed names are 501 and an unknown name is 400
+    InvalidArgument, for which the reference gives a status and no code; a copy onto
+    itself that changes only the algorithm, without `x-amz-metadata-directive: REPLACE`,
+    stays 400 InvalidRequest (the pages read say nothing about it: not found), and with
+    REPLACE recomputes in the named algorithm; `x-amz-checksum-<algorithm>` and
+    `x-amz-sdk-checksum-algorithm` stay ignored, since the reference does not define them
+    on CopyObject. This supersedes these sentences: of decision 29, "CompleteMultipartUpload
+    and CopyObject write NULL in all three columns, replacing a previous object's." (for
+    CopyObject; its Complete half is decision 32's; the rest of decision 29 stands, including
+    that `x-amz-checksum-algorithm` stays ignored on PutObject); of §11, "the checksum
+    headers of the request are ignored" under "Not honored, as for PutObject" (`x-amz-checksum-algorithm`
+    is now read on CopyObject); and of §20, the sentences saying that CopyObject writes NULL
+    in the `objects` columns, which are updated in place. The write
+    sequence (§6.10) and the crash points are unchanged. Details: §20.
+
 
 ### §20. Checksums and schema version 3
 
 Schema version 3 adds the columns that later commits use to store checksums with
 objects, uploads and parts. This section covers the migration and the columns. After
-decision 32 every column is used. PutObject and CompleteMultipartUpload write the `objects`
-columns, CopyObject writes NULL in them, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
+decision 33 every column is used. PutObject, CompleteMultipartUpload and CopyObject write the
+`objects` columns, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
 so the store's data API is used only after `migrate()`. CreateMultipartUpload writes the two
 `multipart_uploads` columns and UploadPart and UploadPartCopy write the three
 `multipart_parts` columns; `_upload` and `get_parts` read them. CompleteMultipartUpload
@@ -2400,8 +2437,8 @@ succeeded. `_put_object` puts them, with `FULL_OBJECT`, in the `ObjectMeta` that
 `put_object_meta` commits, after the crash point `put-after-bytes` and before
 `put-after-commit`; a kill before the commit leaves the old row, checksum included. The
 response headers are named by `server/api/checksum_headers.py`. CopyObject
-builds its `ObjectMeta` without the three fields, so its rows hold NULL;
-CompleteMultipartUpload sets them (decision 32).
+sets them from the bytes it copies (decision 33), and so does CompleteMultipartUpload
+(decision 32).
 `UploadPart` stores the checksum of its upload's effective algorithm with the part (decision
 31); the DeleteObjects body check
 (`verify_body`) computes only the claimed checksum and stores nothing.
@@ -2456,3 +2493,19 @@ whole seconds, instead of the time of the response, and carries `Checksum<E>` on
 upload is named. The source row's own checksum is not used and need not exist. A kill at
 `part-copy-after-bytes` leaves the old part row, checksum and time included, and one at
 `part-copy-after-commit` the new row with all three.
+
+**CopyObject (decision 33).** `copy_object` parses `x-amz-checksum-algorithm` once with
+`copy_algorithm` (`server/api/checksum_headers.py`), after the two directives and before the
+REPLACE headers and the source lookup, so a name that is not an AWS algorithm is 400
+InvalidArgument even for a missing source; the request guard has already answered 501 to the
+five uncomputed names (`_check_copy_object`). Once the source row is open the algorithm is
+the named one, else `src.checksum_algorithm`, else CRC64NVME, and the hasher is fed each chunk
+of the existing copy loop beside `writer.write`. The digest, the algorithm and `FULL_OBJECT`
+go in the `ObjectMeta` that `put_object_meta` commits, after `copy-after-bytes` and before
+`copy-after-commit`: a kill at the first leaves no new row, or, for an overwrite, the old row
+with its own three columns, and a kill at the second leaves the new row with all three. The
+source row's value is never copied, so a composite source gets a direct value, a source with
+NULL columns (schema version 2) gets CRC64NVME, and a source overwritten while the copy reads
+it gives the digest of the bytes copied, which agrees with the ETag and the body. The result
+document is built from the committed `ObjectMeta`, so `LastModified` and the checksum are the
+stored ones.

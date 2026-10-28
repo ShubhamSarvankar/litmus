@@ -7,8 +7,17 @@ the bytes all belong to one row. The bytes are then written to a new blob throug
 durable write sequence, with the source's size and, for a single part source, its MD5
 checked before they are made durable, and the destination row is committed like
 PutObject's (§6.2 P4), with the destination's If-Match and If-None-Match.
+
+The copied bytes are hashed in the writer loop and the digest is stored with the
+destination, always as a full object checksum, in the algorithm the request names with
+x-amz-checksum-algorithm, else the source row's, else CRC64NVME (S3 User Guide, "Copying,
+moving, and renaming objects": "Amazon S3 calculates a new checksum value after the object
+is copied. Amazon S3 doesn't directly copy the value of the checksum"; "Checking object
+integrity for data uploads in Amazon S3": "With a copy command, the checksum of the object
+is a direct checksum of the full object"). CopyObjectResult returns it.
 """
 
+import base64
 import logging
 import os
 import xml.etree.ElementTree as ET
@@ -17,9 +26,11 @@ from fastapi import Request
 from fastapi.responses import Response
 
 from server.api.acl_headers import check_object_write
+from server.api.checksum_headers import FULL_OBJECT, copy_algorithm
 from server.api.conditions import CopySourceConditions, write_precondition
 from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
 from server.api.objects import _CHUNK, _open_current, request_object_headers
+from server.checksums import CRC64NVME, Algorithm
 from server.crash_points import (
     COPY_AFTER_BYTES,
     COPY_AFTER_COMMIT,
@@ -72,10 +83,13 @@ def _stored_headers(source: ObjectMeta) -> dict:
     }
 
 
-def _result_xml(etag: str, last_modified) -> str:
+def _result_xml(meta: ObjectMeta) -> str:
+    # The element order of API_CopyObject's response syntax.
     root = ET.Element("CopyObjectResult")
-    ET.SubElement(root, "ETag").text = etag
-    ET.SubElement(root, "LastModified").text = last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    ET.SubElement(root, "ETag").text = meta.etag
+    ET.SubElement(root, "LastModified").text = meta.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    ET.SubElement(root, "ChecksumType").text = meta.checksum_type
+    ET.SubElement(root, f"Checksum{meta.checksum_algorithm}").text = meta.checksum
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -94,6 +108,7 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
     source = parse_copy_source(values[0])
     directive = _directive(request.headers, _METADATA_DIRECTIVE)
     _directive(request.headers, _TAGGING_DIRECTIVE)
+    named = copy_algorithm(request.headers)
     # Under REPLACE the destination's headers are the request's, refused before any blob
     # is registered; under COPY the request's are ignored.
     replaced_headers = request_object_headers(request.headers) if directive == _REPLACE else None
@@ -115,6 +130,13 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
         # A condition that failed on its own: evaluate_read_conditions answers "not
         # modified" for If-None-Match and If-Modified-Since, which a copy reports as 412.
         raise PreconditionFailed()
+
+    if named is not None:
+        algorithm = named
+    elif src.checksum_algorithm is not None:
+        algorithm = Algorithm.by_name(src.checksum_algorithm)
+    else:
+        algorithm = CRC64NVME
 
     with f:
         if os.fstat(f.fileno()).st_size != src.size:
@@ -139,12 +161,14 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
 
         blob_id = metadata.register_blob("object", bucket, key)
         crash_point(COPY_AFTER_REGISTER)
+        hasher = algorithm.new()
         try:
             with storage.open_writer(
                 blob_id, mid_write_point=armed_point(COPY_MID_WRITE), verify=verify
             ) as writer:
                 while chunk := f.read(_CHUNK):
                     writer.write(chunk)
+                    hasher.update(chunk)
         except BaseException:
             discard_new_blob(storage, metadata, blob_id)
             raise
@@ -157,6 +181,9 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
         etag=writer.etag,
         last_modified=None,  # stamped inside the commit (§9)
         blob_id=blob_id,
+        checksum=base64.b64encode(hasher.digest()).decode("ascii"),
+        checksum_algorithm=algorithm.name,
+        checksum_type=FULL_OBJECT,
         **(replaced_headers if replaced_headers is not None else _stored_headers(src)),
     )
     precondition = write_precondition(request.headers, key)
@@ -172,7 +199,7 @@ async def copy_object(bucket: str, key: str, request: Request) -> Response:
     if replaced:
         collect_garbage(storage, metadata, [replaced], after_unlink_point=COPY_AFTER_GC_UNLINK)
     return Response(
-        content=_result_xml(meta.etag, meta.last_modified),
+        content=_result_xml(meta),
         status_code=200,
         media_type="application/xml",
     )
