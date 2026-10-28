@@ -50,7 +50,7 @@ parameters as follows.
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; `x-amz-checksum-algorithm` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) and `x-amz-checksum-type` are stored with the upload and echoed (SHA512, MD5 and the XXHash algorithms are 501; a disallowed pair is 400 InvalidRequest); a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
-| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; every listed part but the last must be at least `S3_MIN_PART_SIZE` bytes (400 EntityTooSmall); `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the `x-amz-checksum-*` headers and `x-amz-checksum-type` are 501, since Litmus cannot verify them yet. The per part `Checksum*` elements of the body are accepted and not verified. |
+| POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload, with `If-Match` and `If-None-Match`; every listed part but the last must be at least `S3_MIN_PART_SIZE` bytes (400 EntityTooSmall); `x-amz-mp-object-size` is checked against the total size of the listed parts (400 InvalidRequest on a mismatch, 400 InvalidArgument when malformed), and the Part `Checksum*` elements, the `x-amz-checksum-*` headers and `x-amz-checksum-type` are verified against the stored part checksums and the upload's algorithm and type (400 BadDigest, InvalidRequest or InvalidArgument; a COMPOSITE upload needs part numbers 1 to N, else 400 InvalidPartOrder); the object's checksum is stored and returned as `Checksum<ALG>` and `ChecksumType` (COMPOSITE with a "-N" suffix, or FULL_OBJECT; CRC64NVME FULL_OBJECT for an upload that named no algorithm). |
 | GET | `/health` | Health check |
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
@@ -88,15 +88,15 @@ and an object without a stored checksum carry none. UploadPart and UploadPartCop
 checksum with each part, in the algorithm the upload named or CRC64NVME, with the part's time;
 UploadPart returns only the header of the checksum the request claimed, and UploadPartCopy
 returns `Checksum<algorithm>` for an upload that named one and the stored time as
-`LastModified`. CompleteMultipartUpload and CopyObject store none yet, and Complete does not
-verify the part checksums. See
+`LastModified`. CompleteMultipartUpload verifies the part checksums and stores the object's,
+combined from them (composite or full object); CopyObject stores none yet. See
 [`docs/compatibility.md`](docs/compatibility.md).
 
 An unmodified AWS CLI v2 (checked with 2.38.5) works against Litmus over `http://` with
 its default settings: `mb`, `ls`, `cp` (including multipart uploads and s3 to s3 copies,
 among them a 40 MiB copy in parts), `sync`, `rm`, `rb` and `s3api put-object`,
-`get-object` and `head-object`, and `cp --checksum-algorithm` with CRC32, CRC32C, SHA1 and
-SHA256. `scripts/aws_cli_smoke.sh` runs these checks, in 10 steps. Only `http://` was tested,
+`get-object` and `head-object` (also with `--checksum-mode ENABLED`), and `cp
+--checksum-algorithm` with CRC32, CRC32C, SHA1 and SHA256. `scripts/aws_cli_smoke.sh` runs these checks, in 11 steps. Only `http://` was tested,
 and credentials are not checked. Before the CLI copies an object above 8 MiB in parts
 (UploadPartCopy) it reads the source's tags with GetObjectTagging, which Litmus answers
 with an empty tag set, since it stores none.
@@ -223,7 +223,7 @@ server/
   storage/blobs.py     blob files: IDs, temp files, fsync, rename, lock, store marker
   storage/lifecycle.py removing new blobs after a failed write, and replaced blobs after a commit
   metadata/sqlite.py   schema (version 3, migrated in place from 2), blob registry and transactions
-  multipart/           CompleteMultipartUpload and the composite ETag
+  multipart/           CompleteMultipartUpload, the composite ETag and the object checksum
   errors/s3errors.py   S3 error responses
   request_ids.py       x-amz-request-id and x-amz-id-2 on every response
 chaos/

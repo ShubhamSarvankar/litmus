@@ -1,9 +1,11 @@
 """The checksum headers of a response (S3 API reference, PutObject, response syntax), the
 x-amz-checksum-mode request header of GetObject and HeadObject, and the
-x-amz-checksum-algorithm and x-amz-checksum-type headers of CreateMultipartUpload."""
+x-amz-checksum-algorithm and x-amz-checksum-type headers of CreateMultipartUpload, and the
+checksum headers of CompleteMultipartUpload."""
 
-from server.checksums import ALGORITHMS, UNCOMPUTED_NAMES, Algorithm
+from server.checksums import ALGORITHMS, UNCOMPUTED_NAMES, VALUE_HEADER_PREFIX, Algorithm
 from server.errors.s3errors import InvalidArgument, InvalidRequest, NotImplementedOperation
+from server.multipart.checksums import CompleteClaims
 
 CHECKSUM_MODE_HEADER = "x-amz-checksum-mode"
 CREATE_ALGORITHM_HEADER = "x-amz-checksum-algorithm"
@@ -96,3 +98,49 @@ def create_checksum(headers) -> tuple[str, str] | None:
     if type_ not in _ALLOWED_TYPES[algorithm]:
         raise InvalidRequest(extra={"Header": CREATE_TYPE_HEADER})
     return algorithm, type_
+
+
+# The checksum value headers of CompleteMultipartUpload (S3 API reference,
+# "CompleteMultipartUpload"): the five computed algorithms and the five Litmus does not
+# compute.
+_COMPLETE_VALUE_ALGORITHMS = (
+    *(a.name for a in ALGORITHMS.values()),
+    *sorted(UNCOMPUTED_NAMES),
+)
+
+
+def complete_claims(headers, named: str | None) -> CompleteClaims:
+    """The checksum headers of a CompleteMultipartUpload, checked for shape; blank counts
+    as absent. named is the algorithm the upload named, or None.
+
+    400 InvalidRequest for more than one value header, for a value header in an algorithm
+    other than a named upload's, and for MD5, SHA512 or an XXHash on an unnamed upload (S3
+    User Guide, "Checking object integrity for data uploads": without the algorithm named
+    at CreateMultipartUpload the request "will fail with an InvalidRequest error"). The
+    reference documents neither the several headers nor another algorithm on a named
+    upload: those are choices. 400 InvalidArgument for a type that is neither COMPOSITE nor
+    FULL_OBJECT, in any letter case; whether it equals the upload's is decided later,
+    with the values, by verify_claims."""
+    given = [
+        (name, value)
+        for name in _COMPLETE_VALUE_ALGORITHMS
+        if (value := _create_value(headers, VALUE_HEADER_PREFIX + name.lower())) is not None
+    ]
+    if len(given) > 1:
+        raise InvalidRequest(extra={"Header": VALUE_HEADER_PREFIX + given[1][0].lower()})
+    if given:
+        name = given[0][0]
+        if (named is not None and name != named) or (named is None and name in UNCOMPUTED_NAMES):
+            raise InvalidRequest(extra={"Header": VALUE_HEADER_PREFIX + name.lower()})
+    type_ = _create_value(headers, CREATE_TYPE_HEADER)
+    if type_ is not None:
+        given_type, type_ = type_, type_.upper()
+        if type_ not in (COMPOSITE, FULL_OBJECT):
+            raise InvalidArgument(
+                extra={"ArgumentName": CREATE_TYPE_HEADER, "ArgumentValue": given_type}
+            )
+    return CompleteClaims(
+        algorithm=given[0][0] if given else None,
+        value=given[0][1] if given else None,
+        type=type_,
+    )

@@ -1,13 +1,19 @@
-"""CompleteMultipartUpload request headers: x-amz-mp-object-size is verified, the checksum
-headers Litmus cannot verify are refused (docs/design/storage-layout.md §26).
+"""CompleteMultipartUpload request headers: x-amz-mp-object-size is verified, and the
+checksum headers are decided against an upload that named no algorithm (decisions 26 and
+32 of docs/design/storage-layout.md).
 
 x-amz-mp-object-size must be a plain non-negative decimal integer (a malformed value is
 400 InvalidArgument, a choice: the S3 API reference documents only the mismatch) and
 equal the total of the stored sizes of exactly the listed parts (400 InvalidRequest, S3
 API reference, "CompleteMultipartUpload"). Both are decided before a blob is registered,
-so a refusal leaves the upload open with all its parts. The checksum headers and
-x-amz-checksum-type are refused with 501 by the request guard; the per part Checksum*
-elements of the body stay accepted and unverified.
+so a refusal leaves the upload open with all its parts.
+
+The uploads here name no algorithm, so x-amz-checksum-crc32, -crc32c, -sha1, -sha256 and
+x-amz-checksum-type are accepted and not validated, x-amz-checksum-crc64nvme is validated
+against the combined CRC64NVME Litmus stores (400 BadDigest on a mismatch), and
+x-amz-checksum-sha512, -md5 and the three XXHash headers are 400 InvalidRequest (S3 User
+Guide, "Checking object integrity for data uploads"). A wrong ChecksumCRC64NVME element of a
+Part is 400 BadDigest. The uploads that name an algorithm are in test_complete_checksums.py.
 """
 
 import hashlib
@@ -329,23 +335,58 @@ def _value(header: str) -> str:
     return "COMPOSITE" if header.endswith("type") else "AAAAAAAAAAA="
 
 
-@pytest.mark.parametrize("header", CHECKSUM_HEADERS)
-def test_a_checksum_header_is_not_implemented_and_leaves_the_upload_open(env, header):
+UNNAMED_ACCEPTED = [
+    "x-amz-checksum-crc32",
+    "x-amz-checksum-crc32c",
+    "x-amz-checksum-sha1",
+    "x-amz-checksum-sha256",
+    "x-amz-checksum-type",
+]
+UNNAMED_INVALID_REQUEST = [
+    "x-amz-checksum-sha512",
+    "x-amz-checksum-md5",
+    "x-amz-checksum-xxhash64",
+    "x-amz-checksum-xxhash3",
+    "x-amz-checksum-xxhash128",
+]
+
+
+@pytest.mark.parametrize("header", UNNAMED_ACCEPTED)
+def test_an_unvalidated_checksum_header_on_an_unnamed_upload_completes(env, header):
+    client, storage, metadata = env
+    uid, etags = _upload(client)
+    resp = _complete(client, uid, etags, {header: _value(header)})
+    assert resp.status_code == 200
+    assert client.get(f"/{BUCKET}/{KEY}").content == b"".join(PARTS)
+    assert not metadata.list_incomplete_uploads()
+
+
+def test_a_wrong_crc64nvme_header_on_an_unnamed_upload_is_bad_digest_and_leaves_it_open(env):
+    client, storage, metadata = env
+    uid, etags = _upload(client)
+    before = _state(storage, metadata, uid)
+    resp = _complete(client, uid, etags, {"x-amz-checksum-crc64nvme": "AAAAAAAAAAA="})
+    assert_refused_and_open(env, uid, etags, before, resp, 400, "BadDigest")
+    assert _complete(client, uid, etags).status_code == 200
+
+
+@pytest.mark.parametrize("header", UNNAMED_INVALID_REQUEST)
+def test_an_md5_sha512_or_xxhash_header_on_an_unnamed_upload_is_invalid_request(env, header):
     client, storage, metadata = env
     uid, etags = _upload(client)
     before = _state(storage, metadata, uid)
     resp = _complete(client, uid, etags, {header: _value(header)})
-    assert_refused_and_open(env, uid, etags, before, resp, 501, "NotImplemented")
+    assert_refused_and_open(env, uid, etags, before, resp, 400, "InvalidRequest")
     assert _complete(client, uid, etags).status_code == 200
 
 
 @pytest.mark.parametrize("header", CHECKSUM_HEADERS)
-def test_a_checksum_header_is_refused_before_the_upload_is_looked_up(env, header):
+def test_a_checksum_header_on_a_missing_upload_is_no_such_upload(env, header):
     client, _, _ = env
     resp = client.post(
         f"/{BUCKET}/{KEY}?uploadId=missing", content=b"<x/>", headers={header: _value(header)}
     )
-    assert (resp.status_code, _code(resp)) == (501, "NotImplemented")
+    assert (resp.status_code, _code(resp)) == (404, "NoSuchUpload")
 
 
 @pytest.mark.parametrize("header", CHECKSUM_HEADERS)
@@ -356,21 +397,22 @@ def test_a_blank_checksum_header_counts_as_absent(env, header, blank):
     assert _complete(client, uid, etags, {header: blank}).status_code == 200
 
 
-def test_the_checksum_header_is_refused_whatever_the_case_of_its_name(env):
+def test_the_checksum_header_is_accepted_whatever_the_case_of_its_name(env):
     client, storage, metadata = env
     uid, etags = _upload(client)
     resp = _complete(client, uid, etags, {"X-Amz-Checksum-SHA256": "AAAA"})
-    assert (resp.status_code, _code(resp)) == (501, "NotImplemented")
+    assert resp.status_code == 200
 
 
 # --- the per part checksum elements of the body ---
 
 
-def test_part_checksum_elements_in_the_body_are_accepted_unverified(env):
+def test_a_wrong_crc64nvme_part_element_on_an_unnamed_upload_is_bad_digest(env):
     client, storage, metadata = env
     uid, etags = _upload(client)
     # The shape the AWS CLI sends: an XML declaration, unquoted ETags, one checksum
-    # element per part. The values are not any part's checksum; they are not checked.
+    # element per part. The values are not any part's checksum: the CRC64NVME one is
+    # compared with the stored part checksum and refused.
     items = "".join(
         f"<Part><ETag>{e.strip(chr(34))}</ETag><PartNumber>{n}</PartNumber>"
         f"<ChecksumCRC64NVME>bV69mNWvFC0=</ChecksumCRC64NVME>"
@@ -385,8 +427,9 @@ def test_part_checksum_elements_in_the_body_are_accepted_unverified(env):
     resp = client.post(
         f"/{BUCKET}/{KEY}?uploadId={uid}", content=body, headers={SIZE_HEADER: str(TOTAL)}
     )
-    assert resp.status_code == 200
-    assert client.get(f"/{BUCKET}/{KEY}").content == b"".join(PARTS)
+    assert (resp.status_code, _code(resp)) == (400, "BadDigest")
+    assert_upload_open(metadata, uid, etags)
+    assert client.get(f"/{BUCKET}/{KEY}").status_code == 404
 
 
 # --- boto3 ---

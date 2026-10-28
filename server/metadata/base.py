@@ -29,8 +29,9 @@ class ObjectMeta:
     expires: str | None = None
     # x-amz-meta-* of the PUT: lower case name, without the prefix, to text.
     user_metadata: dict[str, str] = field(default_factory=dict)
-    # The stored checksum: base64 of the digest, the algorithm name as the schema spells
-    # it (CRC64NVME) and FULL_OBJECT; None for an object written by Complete or CopyObject.
+    # The stored checksum: base64 of the digest (a COMPOSITE one with its "-N" suffix), the
+    # algorithm name as the schema spells it (CRC64NVME) and the type; None for an object
+    # written by CopyObject, or by a Complete that lists a part stored without a checksum.
     checksum: str | None = None
     checksum_algorithm: str | None = None
     checksum_type: str | None = None

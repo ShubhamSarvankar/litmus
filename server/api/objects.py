@@ -266,8 +266,8 @@ async def _put_object(bucket: str, key: str, request: Request) -> Response:
 
 def _checksum_headers(meta: ObjectMeta) -> dict[str, str]:
     """The checksum headers of a whole object response to a request with the mode
-    enabled: none for a row without a checksum (CompleteMultipartUpload and CopyObject
-    objects, and objects written before schema version 3)."""
+    enabled: none for a row without a checksum (CopyObject objects, objects written before
+    schema version 3, and a multipart object that lists a part written before it)."""
     if meta.checksum is None:
         return {}
     algorithm = Algorithm.by_name(meta.checksum_algorithm)

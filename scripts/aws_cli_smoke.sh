@@ -2,8 +2,8 @@
 # aws_cli_smoke.sh
 #
 # Runs an unmodified AWS CLI v2 against a scratch Litmus server over http and checks
-# the results of mb, ls, cp (including s3 to s3), sync, s3api head-object / get-object,
-# rm and rb. The CLI runs with its default client behavior: no checksum or s3 config
+# the results of mb, ls, cp (including s3 to s3), sync, s3api head-object / get-object
+# (also with --checksum-mode ENABLED, 11 steps in all), rm and rb. The CLI runs with its default client behavior: no checksum or s3 config
 # overrides are set. Litmus has no authentication, so the credentials are dummies in a
 # temp credentials file; ~/.aws is never read.
 #
@@ -301,6 +301,63 @@ step_cp_checksum_algorithms() {
     return 0
 }
 
+step_checksum_mode() {
+    # A whole object get-object and a head-object with --checksum-mode ENABLED return the
+    # stored checksum and its type. The CLI validates a whole CRC64NVME object against the
+    # checksum it was sent, so a mismatch fails get-object itself; that is the independent
+    # check. For the two CRC64NVME objects the value is also compared with an awscrt
+    # CRC64NVME of the source file, which is the library the server uses, so that
+    # comparison is not independent. small.bin (one PutObject) and checksum-SHA256-large.bin
+    # (3 parts, COMPOSITE) come from earlier steps; default20.bin is uploaded here, with
+    # no checksum option, in 3 parts of the CLI's 8 MiB chunk size.
+    [ -f "$DATA/checksum20.bin" ] || die "checksum20.bin was not made by an earlier step"
+    head -c $((20 * 1024 * 1024)) /dev/urandom > "$DATA/default20.bin"
+    aws s3 cp "$DATA/default20.bin" "s3://$BUCKET/default20.bin" > "$WORK/out" 2>&1 \
+        || { cat "$WORK/out"; die "upload of the default 20 MiB file failed"; }
+
+    local py=(python3)
+    if command -v uv > /dev/null; then py=(uv run --project "$REPO_ROOT" python); fi
+    local crc64_of_file='
+import base64, sys
+from awscrt import checksums
+crc = 0
+with open(sys.argv[1], "rb") as f:
+    while chunk := f.read(1 << 20):
+        crc = checksums.crc64nvme(chunk, crc)
+print(base64.b64encode(crc.to_bytes(8, "big")).decode())
+'
+
+    # key | source | ChecksumType | response field | shape of the value | compare with awscrt
+    local rows=(
+        "small.bin|$DATA/small.bin|FULL_OBJECT|ChecksumCRC64NVME|^[A-Za-z0-9+/]{11}=\$|yes"
+        "default20.bin|$DATA/default20.bin|FULL_OBJECT|ChecksumCRC64NVME|^[A-Za-z0-9+/]{11}=\$|yes"
+        "checksum-SHA256-large.bin|$DATA/checksum20.bin|COMPOSITE|ChecksumSHA256|^[A-Za-z0-9+/]{43}=-3\$|no"
+    )
+    local row key src type field shape compare got_type got_value head_type head_value want
+    for row in "${rows[@]}"; do
+        IFS='|' read -r key src type field shape compare <<< "$row"
+        got="$(aws s3api get-object --bucket "$BUCKET" --key "$key" --checksum-mode ENABLED \
+            --query "[ChecksumType, $field]" --output text "$WORK/mode.down" 2> "$WORK/err")" \
+            || { cat "$WORK/err"; die "get-object --checksum-mode ENABLED of $key failed"; }
+        cmp -s "$src" "$WORK/mode.down" || die "the bytes of $key differ from the source's"
+        IFS=$'\t' read -r got_type got_value <<< "$got"
+        [ "$got_type" = "$type" ] || die "$key: get-object ChecksumType is '$got_type', expected $type"
+        [[ "$got_value" =~ $shape ]] || die "$key: get-object $field has an unexpected shape: $got_value"
+
+        got="$(aws s3api head-object --bucket "$BUCKET" --key "$key" --checksum-mode ENABLED \
+            --query "[ChecksumType, $field]" --output text)" || die "head-object --checksum-mode ENABLED of $key failed"
+        IFS=$'\t' read -r head_type head_value <<< "$got"
+        [ "$head_type" = "$type" ] || die "$key: head-object ChecksumType is '$head_type', expected $type"
+        [ "$head_value" = "$got_value" ] || die "$key: head-object $field $head_value, get-object $got_value"
+
+        if [ "$compare" = yes ]; then
+            want="$("${py[@]}" -c "$crc64_of_file" "$src")"
+            [ "$got_value" = "$want" ] || die "$key: $field $got_value, awscrt CRC64NVME of the source $want"
+        fi
+    done
+    return 0
+}
+
 step_rm_rb() {
     aws s3 rm "s3://$BUCKET/small.bin" > /dev/null || die "rm failed"
     if aws s3api head-object --bucket "$BUCKET" --key small.bin > /dev/null 2>&1; then
@@ -331,6 +388,7 @@ run_step step_s3api_head_range
 run_step step_copy_object
 run_step step_copy_large
 run_step step_cp_checksum_algorithms
+run_step step_checksum_mode
 run_step step_rm_rb
 
 echo "All steps passed (aws-cli $AWS_VERSION)."

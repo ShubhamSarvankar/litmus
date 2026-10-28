@@ -8,7 +8,7 @@ from fastapi.responses import Response
 
 from server.api.acl_headers import check_object_write
 from server.api.aws_chunked import is_framed, preflight, write_framed_body
-from server.api.checksum_headers import create_checksum, response_header
+from server.api.checksum_headers import complete_claims, create_checksum, response_header
 from server.api.conditions import write_precondition
 from server.api.request_xml import parse_request_xml
 from server.checksums import CRC64NVME, Algorithm, UploadChecks
@@ -30,6 +30,7 @@ from server.errors.s3errors import (
     NoSuchUpload,
 )
 from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
+from server.multipart.checksums import PART_ELEMENTS, ObjectChecksum
 from server.multipart.state_machine import complete_multipart_upload
 from server.storage.lifecycle import collect_garbage, discard_new_blob
 
@@ -44,11 +45,16 @@ def _initiate_xml(bucket: str, key: str, upload_id: str) -> str:
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
-def _complete_xml(bucket: str, key: str, etag: str) -> str:
+def _complete_xml(bucket: str, key: str, etag: str, checksum: ObjectChecksum | None) -> str:
     root = ET.Element("CompleteMultipartUploadResult")
     ET.SubElement(root, "Bucket").text = bucket
     ET.SubElement(root, "Key").text = key
     ET.SubElement(root, "ETag").text = etag
+    # S3 API reference, "CompleteMultipartUpload": Checksum<ALG> follows ETag, and
+    # ChecksumType comes last.
+    if checksum is not None:
+        ET.SubElement(root, f"Checksum{checksum.algorithm}").text = checksum.value
+        ET.SubElement(root, "ChecksumType").text = checksum.type
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 
 
@@ -100,8 +106,22 @@ def _expected_object_size(headers) -> int | None:
     return 10**_MAX_DIGITS if len(digits) > _MAX_DIGITS else int(digits or "0")
 
 
+def _part_checksums(element: ET.Element) -> dict[str, str]:
+    """The non-blank Checksum* elements of a Part, by algorithm name, with the S3
+    namespace or without. A blank element counts as absent."""
+    found = {}
+    for name in PART_ELEMENTS:
+        text = element.findtext(f"{{{_S3_NS}}}Checksum{name}") or element.findtext(
+            f"Checksum{name}"
+        )
+        if text is not None and text.strip():
+            found[name] = text.strip()
+    return found
+
+
 def _parse_complete_body(body: bytes) -> list[dict]:
-    """The Part elements of a CompleteMultipartUpload document, in document order.
+    """The Part elements of a CompleteMultipartUpload document, in document order, each
+    with its PartNumber, ETag and Checksums (the non-blank Checksum* elements).
 
     MalformedXML (400) for every body that is not one: empty, not UTF-8, not XML, a
     root other than CompleteMultipartUpload, no Part, or a Part without a PartNumber
@@ -113,7 +133,11 @@ def _parse_complete_body(body: bytes) -> list[dict]:
     if root.tag not in ("CompleteMultipartUpload", f"{{{_S3_NS}}}CompleteMultipartUpload"):
         raise MalformedXML()
     parts = [
-        {"PartNumber": _part_number(_child_text(el, "PartNumber")), "ETag": _child_text(el, "ETag")}
+        {
+            "PartNumber": _part_number(_child_text(el, "PartNumber")),
+            "ETag": _child_text(el, "ETag"),
+            "Checksums": _part_checksums(el),
+        }
         for el in root
         if el.tag in ("Part", f"{{{_S3_NS}}}Part")
     ]
@@ -319,18 +343,22 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
-    if not metadata.upload_exists(upload_id):
+    upload = metadata.get_open_upload(upload_id)
+    if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
     expected_size = _expected_object_size(request.headers)
+    claims = complete_claims(request.headers, upload.checksum_algorithm)
     body = await request.body()
     requested_parts = _parse_complete_body(body)
 
-    composite_etag = complete_multipart_upload(
+    completed = complete_multipart_upload(
         bucket=bucket,
         key=key,
         upload_id=upload_id,
         requested_parts=requested_parts,
+        upload=upload,
+        claims=claims,
         storage=storage,
         metadata=metadata,
         # Decided in the commit, after every other Complete error (§10); no early check.
@@ -339,7 +367,7 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
         min_part_size=request.app.state.min_part_size,
     )
     return Response(
-        content=_complete_xml(bucket, key, composite_etag),
+        content=_complete_xml(bucket, key, completed.etag, completed.checksum),
         status_code=200,
         media_type="application/xml",
     )

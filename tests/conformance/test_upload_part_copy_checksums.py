@@ -9,6 +9,7 @@ Checksum<E> only when the upload named an algorithm (API_CopyPartResult: each el
 digests come from the independent implementations of test_upload_checksums.py.
 """
 
+import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -125,9 +126,8 @@ def test_last_modified_does_not_move_when_the_part_is_read_again(env):
     assert _elements(resp)["LastModified"] == again.last_modified.strftime(TIME_FORMAT)
 
 
-def test_a_source_with_no_stored_checksum_is_hashed_over_the_copied_bytes(env):
+def test_a_source_with_no_stored_checksum_is_hashed_over_the_copied_bytes(env, tmp_path):
     client, storage, metadata = env
-    # An object that CompleteMultipartUpload wrote has NULL checksum columns.
     source = ET.fromstring(client.post(f"/{SRC_BUCKET}/mp.bin?uploads").text).findtext("UploadId")
     put = client.put(f"/{SRC_BUCKET}/mp.bin?partNumber=1&uploadId={source}", content=BODY)
     done = client.post(
@@ -136,7 +136,24 @@ def test_a_source_with_no_stored_checksum_is_hashed_over_the_copied_bytes(env):
         f"<ETag>{put.headers['etag']}</ETag></Part></CompleteMultipartUpload>",
     )
     assert done.status_code == 200
-    assert metadata.get_object_meta(SRC_BUCKET, "mp.bin").checksum is None
+    # Complete stores a checksum now. The NULL columns stand for an object migrated from
+    # schema version 2, the only way an object without a checksum arises.
+    db = sqlite3.connect(tmp_path / "meta.db")
+    try:
+        with db:
+            db.execute(
+                "UPDATE objects SET checksum = NULL, checksum_algorithm = NULL, "
+                "checksum_type = NULL WHERE bucket = ? AND key = 'mp.bin'",
+                (SRC_BUCKET,),
+            )
+    finally:
+        db.close()
+    source_meta = metadata.get_object_meta(SRC_BUCKET, "mp.bin")
+    assert (source_meta.checksum, source_meta.checksum_algorithm, source_meta.checksum_type) == (
+        None,
+        None,
+        None,
+    )
     upload = _create(client, "crc32c")
 
     resp = _copy(client, upload, src=f"{SRC_BUCKET}/mp.bin", byte_range="bytes=10-209")

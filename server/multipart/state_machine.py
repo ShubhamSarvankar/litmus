@@ -1,5 +1,7 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 
+from server.checksums import CRC64NVME, Algorithm
 from server.crash_points import (
     COMPLETE_AFTER_ASSEMBLE,
     COMPLETE_AFTER_COMMIT,
@@ -17,7 +19,17 @@ from server.errors.s3errors import (
     InvalidRequest,
     NoSuchUpload,
 )
-from server.metadata.base import ObjectMeta, PartsChanged
+from server.metadata.base import ObjectMeta, PartsChanged, UploadMeta
+from server.multipart.checksums import (
+    COMPOSITE,
+    FULL_OBJECT,
+    CompleteClaims,
+    ObjectChecksum,
+    PartRef,
+    object_checksum,
+    verify_claims,
+    verify_part_elements,
+)
 from server.multipart.etag import composite_etag
 from server.storage.blobs import MissingPartBlob
 from server.storage.lifecycle import collect_garbage, discard_new_blob
@@ -43,22 +55,35 @@ def _raise_for_missing_part(metadata, upload_id: str, blob_id: str) -> None:
     raise InvalidPart()
 
 
+@dataclass(frozen=True)
+class CompletedUpload:
+    """What a Complete answers: the composite ETag, and the object's checksum, None when
+    a listed part stored none."""
+
+    etag: str
+    checksum: ObjectChecksum | None
+
+
 def complete_multipart_upload(
     bucket: str,
     key: str,
     upload_id: str,
-    requested_parts: list[dict],  # [{"PartNumber": int, "ETag": str}, ...]
+    # [{"PartNumber": int, "ETag": str, "Checksums": {algorithm name: value}}, ...]
+    requested_parts: list[dict],
+    upload: UploadMeta,
+    claims: CompleteClaims,
     storage,
     metadata,
     precondition: Callable[[str | None], None] | None = None,
     expected_size: int | None = None,
     min_part_size: int = 0,
-) -> str:
-    """CompleteMultipartUpload (docs/design/storage-layout.md §6.7).
+) -> CompletedUpload:
+    """CompleteMultipartUpload (docs/design/storage-layout.md §6.7, §20).
 
     Validates parts, assembles them into a fresh blob, then commits the object row
     and the upload completion in a single SQLite transaction, then unlinks the part
-    blobs and any replaced object blob. Returns the composite ETag.
+    blobs and any replaced object blob. Returns the composite ETag and the object's
+    checksum. upload is the open upload the handler read, claims its checksum headers.
 
     precondition (the If-Match and If-None-Match check, §10) runs inside the commit
     transaction against the object row it replaces. If it raises, the transaction rolls
@@ -67,10 +92,13 @@ def complete_multipart_upload(
 
     Raises InvalidPartOrder unless the part numbers are strictly ascending (a repeat is
     out of order too), then InvalidPart if any listed part is outside 1 to 10000,
-    missing or has a mismatched ETag, then EntityTooSmall if a listed part other than the
-    last listed one is stored smaller than min_part_size bytes, then InvalidRequest if
-    expected_size (the x-amz-mp-object-size header) is not the total of the stored sizes
-    of exactly the listed parts. All of it is decided before a blob is registered.
+    missing or has a mismatched ETag, then InvalidPartOrder again if the upload is
+    COMPOSITE and the listed numbers are not exactly 1 to N, then EntityTooSmall if a
+    listed part other than the last listed one is stored smaller than min_part_size
+    bytes, then the Part checksum elements (InvalidRequest, BadDigest), then
+    InvalidRequest if expected_size (the x-amz-mp-object-size header) is not the total of
+    the stored sizes of exactly the listed parts, then BadDigest for the type header and
+    the checksum header. All of it is decided before a blob is registered.
     """
     previous = None
     for req in requested_parts:
@@ -91,20 +119,38 @@ def complete_multipart_upload(
         ):
             raise InvalidPart(extra={"PartNumber": str(num)})
 
+    # S3 API reference, "CompletedPart": with part checksums the numbers start at 1 and
+    # are consecutive, else 400 InvalidPartOrder. Only COMPOSITE uploads need it.
+    if upload.checksum_type == COMPOSITE and [r["PartNumber"] for r in requested_parts] != list(
+        range(1, len(requested_parts) + 1)
+    ):
+        raise InvalidPartOrder()
+
     for req in requested_parts[:-1]:
         if recorded[req["PartNumber"]].size < min_part_size:
             raise EntityTooSmall()
+
+    named = upload.checksum_algorithm
+    listed = [recorded[r["PartNumber"]] for r in requested_parts]
+    verify_part_elements(requested_parts, [p.checksum for p in listed], named)
 
     if expected_size is not None and expected_size != sum(
         recorded[r["PartNumber"]].size for r in requested_parts
     ):
         raise InvalidRequest(extra={"Header": "x-amz-mp-object-size"})
 
+    # An unnamed upload stores CRC64NVME, whole object, like PutObject.
+    algorithm = Algorithm.by_name(named) if named else CRC64NVME
+    type_ = upload.checksum_type if named else FULL_OBJECT
+    value = object_checksum(algorithm, type_, [PartRef(p.checksum, p.size) for p in listed])
+    verify_claims(claims, upload.checksum_type, named is not None, value)
+    checksum = ObjectChecksum(algorithm.name, value, type_) if value is not None else None
+
     part_blob_ids = {r["PartNumber"]: recorded[r["PartNumber"]].blob_id for r in requested_parts}
     etag = composite_etag([r["ETag"] for r in requested_parts])
 
-    upload = metadata.get_upload(upload_id)
-    if upload is None or upload.state != "open":
+    current = metadata.get_upload(upload_id)
+    if current is None or current.state != "open":
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
     # C2, C3: register a fresh blob and assemble the parts into it.
@@ -134,16 +180,19 @@ def complete_multipart_upload(
         etag=etag,
         # S3 User Guide, "System-defined object metadata": for a multipart upload, the
         # object's date is the date the upload was initiated.
-        last_modified=upload.initiated,
-        content_type=upload.content_type,
-        cache_control=upload.cache_control,
-        content_disposition=upload.content_disposition,
-        content_encoding=upload.content_encoding,
-        content_language=upload.content_language,
-        expires=upload.expires,
-        user_metadata=upload.user_metadata,
+        last_modified=current.initiated,
+        content_type=current.content_type,
+        cache_control=current.cache_control,
+        content_disposition=current.content_disposition,
+        content_encoding=current.content_encoding,
+        content_language=current.content_language,
+        expires=current.expires,
+        user_metadata=current.user_metadata,
         blob_id=blob_id,
         upload_id=upload_id,
+        checksum=checksum.value if checksum else None,
+        checksum_algorithm=checksum.algorithm if checksum else None,
+        checksum_type=checksum.type if checksum else None,
     )
     try:
         committed = metadata.commit_completed_upload(
@@ -169,4 +218,4 @@ def complete_multipart_upload(
 
     # C5: unlink the part blobs and the replaced object blob.
     collect_garbage(storage, metadata, released, after_unlink_point=COMPLETE_AFTER_GC_UNLINK)
-    return etag
+    return CompletedUpload(etag, checksum)

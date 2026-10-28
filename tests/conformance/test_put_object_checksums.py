@@ -6,7 +6,8 @@ value is the base64 of the digest Litmus computed, not the request's string. The
 expected digests come from the reference implementations in test_upload_checksums.py
 (zlib, hashlib and two table CRCs), none of which uses awscrt or server/. Each case that
 stores checks the response headers and the row in the database. An object written by
-CompleteMultipartUpload or CopyObject has no checksum yet, and replaces the row's.
+CopyObject has no checksum yet, and replaces the row's; one written by
+CompleteMultipartUpload takes the CRC64NVME combined from its parts, and replaces it too.
 """
 
 import random
@@ -122,7 +123,7 @@ async def test_an_overwrite_replaces_the_checksum(env):
     assert_stored(env, second, "crc32", second_data)
 
 
-async def test_complete_onto_a_put_object_leaves_the_columns_null(env):
+async def test_complete_onto_a_put_object_stores_the_combined_crc64nvme(env):
     assert_stored(env, await put(env, DATA, [claim("sha256")]), "sha256", DATA)
     part_headers, chunks = request("plain", DATA, [])
     part = await env.send("part", part_headers, chunks)
@@ -141,7 +142,12 @@ async def test_complete_onto_a_put_object_leaves_the_columns_null(env):
     assert r.status == 200, r.body
     assert ET.fromstring(r.body).findtext("{*}ETag")
     assert row(env).upload_id == env.upload_id
-    assert_no_checksum(env)
+    meta = row(env)
+    assert (meta.checksum, meta.checksum_algorithm, meta.checksum_type) == (
+        b64(digest("crc64nvme", DATA)),
+        "CRC64NVME",
+        "FULL_OBJECT",
+    )
 
 
 async def test_copy_onto_a_put_object_leaves_the_columns_null(env):

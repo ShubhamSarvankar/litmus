@@ -186,27 +186,6 @@ _UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
 # which decides the header with its directive (_check_copy_object); UploadPart and
 # UploadPartCopy take no such header.
 
-# CompleteMultipartUpload checksum headers (S3 API reference, "CompleteMultipartUpload"):
-# a checksum of the whole object, per algorithm, and x-amz-checksum-type, which must
-# equal the type given at CreateMultipartUpload. Litmus now stores the algorithm and type
-# of an upload and a checksum with each part, but Complete does not verify any of them
-# yet; ignoring one would complete an upload the client asked to have checked. A non-blank
-# value is refused, unparsed, with 501. The per part Checksum* elements of the request
-# body stay accepted and unverified.
-_COMPLETE_CHECKSUM_HEADERS = (
-    "x-amz-checksum-crc32",
-    "x-amz-checksum-crc32c",
-    "x-amz-checksum-crc64nvme",
-    "x-amz-checksum-sha1",
-    "x-amz-checksum-sha256",
-    "x-amz-checksum-sha512",
-    "x-amz-checksum-md5",
-    "x-amz-checksum-xxhash64",
-    "x-amz-checksum-xxhash3",
-    "x-amz-checksum-xxhash128",
-    "x-amz-checksum-type",
-)
-
 # Features Litmus does not have, asked for by request header. It stores plaintext, has no
 # Object Lock, no website hosting and one storage class, so honoring none of these would
 # succeed without doing what the client asked; each is refused, unparsed, with 501. A
@@ -468,8 +447,6 @@ def _check(method: str, path: str, query, headers) -> None:
         _check_object_feature_headers(method, query_keys - _IGNORED, headers)
         if method == "POST" and (query_keys - _IGNORED) == {"uploads"}:
             _check_create_checksum_algorithm(headers)
-        if method == "POST" and (query_keys - _IGNORED) == {"uploadId"}:  # Complete
-            _refuse_present(headers, _COMPLETE_CHECKSUM_HEADERS)
         if method == "DELETE":
             conditional = (
                 CONDITIONAL_DELETE_HEADERS

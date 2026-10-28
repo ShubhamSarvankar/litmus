@@ -798,6 +798,7 @@ C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part com
        of exactly the listed parts (decision 26).
     6. The condition (C4.c): there is no early conditional check (§10), so a refused
        Complete costs a full assembly.
+    The checksum checks and the full order are in §20 (decision 32).
 
 C2. `id = REGISTER('object', bucket, key, upload_id)` **[C]**. `⚡complete-after-register`
 
@@ -2248,17 +2249,106 @@ Recorded with schema version 3:
     none. CompleteMultipartUpload is not changed: it still accepts the per part
     `Checksum*` elements unverified. Details: §20.
 
+Recorded with the Complete checksums:
+
+32. **CompleteMultipartUpload verifies and stores checksums.** It reads the open upload with
+    `get_open_upload`, checks the Part `Checksum*` elements and the checksum headers against
+    the stored part checksums and the upload's algorithm and type, and commits the object's
+    checksum, algorithm and type in the transaction that marks the upload completed. An
+    upload is named when Create sent a non-blank algorithm; E is the named algorithm, else
+    CRC64NVME. COMPOSITE: the digest, in the upload's algorithm, of the concatenated raw
+    part digests in listed order, base64 encoded, plus "-N" for the N listed parts; that
+    wire form is what is stored and returned. FULL_OBJECT: the CRC folded over the stored
+    part values and sizes with awscrt's combine functions. An unnamed upload's object gets
+    CRC64NVME FULL_OBJECT, parallel to PutObject, and the response says so. An upload that
+    lists a part stored without a checksum (a part of schema version 2) gets no object
+    checksum and no checksum response element. Sources: S3 API reference,
+    "CompleteMultipartUpload" (the headers; a type that differs from the one at Create is
+    `BadDigest`; the response carries `Checksum<ALG>` after `ETag` and `ChecksumType` last)
+    and "CompletedPart" (the ten `Checksum*` names; with a checksum on each part, part
+    numbers start at 1 and are consecutive, else 400 `InvalidPartOrder`); S3 User Guide,
+    "Checking object integrity for data uploads" (COMPOSITE and FULL_OBJECT; without the
+    algorithm at Create, MD5, SHA512 and XXHash on Complete are `InvalidRequest` and the
+    other four are accepted and not validated). The "-N" suffix and the composite formula
+    are not found in the documentation; they rest on the ceph/s3-tests vectors. Rules, where
+    the reference says nothing: for a named upload a Part element in the upload's algorithm
+    must equal the stored part value, or 400 BadDigest, and one in another algorithm is 400
+    InvalidRequest, decided across all Parts before any value is compared; an unnamed upload
+    compares only `ChecksumCRC64NVME`, the checksum it stores, accepts a part without a stored
+    checksum, and accepts the other elements unverified. A header in the upload's algorithm
+    is compared with the object checksum in wire form (BadDigest on a difference or a
+    malformed value); a header in another algorithm, or more than one value header, is
+    InvalidRequest; `x-amz-checksum-type` that is neither COMPOSITE nor FULL_OBJECT, in any
+    letter case, is InvalidArgument, and a valid one that differs from the upload's is
+    BadDigest. An unnamed upload validates `x-amz-checksum-crc64nvme` (it names the checksum
+    Litmus stores), accepts crc32, crc32c, sha1 and sha256 unvalidated, refuses MD5, SHA512
+    and the XXHash headers with InvalidRequest, and ignores a valid type. Only COMPOSITE
+    uploads require the listed part numbers to be exactly 1 to N (400 InvalidPartOrder, as
+    "CompletedPart" says, not the user guide's 500); the page does not mention FULL_OBJECT,
+    so CRC32 and CRC32C FULL_OBJECT uploads and unnamed uploads still allow gaps. Blank
+    headers and elements are absent. This supersedes these sentences of decision 26:
+    "Separately, a non-blank `x-amz-checksum-crc32`, ... on Complete is 501 NotImplemented in
+    the request guard, with the other 501 refusals: Litmus stores no part checksums and does
+    not record an upload's algorithm or type, so it cannot verify them."; "AWS accepts some
+    of them unvalidated when CreateMultipartUpload named no algorithm ..., a case Litmus
+    cannot tell apart for that reason."; "The per part `Checksum*` elements in the body stay
+    accepted and unverified: ..."; and "That design must also settle the conflict between
+    "CompletedPart" (400 InvalidPartOrder) and "Checking object integrity for data uploads"
+    (500) ...". It also supersedes the last sentence of decision 31, "CompleteMultipartUpload
+    is not changed: it still accepts the per part `Checksum*` elements unverified." The
+    request guard no longer answers 501 to any Complete checksum header. The write sequence
+    (§6.7 C2 to C5) is unchanged, and so is `commit_completed_upload`. Details and the order
+    of the errors: §20.
+
 
 ### §20. Checksums and schema version 3
 
 Schema version 3 adds the columns that later commits use to store checksums with
 objects, uploads and parts. This section covers the migration and the columns. After
-decision 31 every column is used. PutObject writes the `objects` columns, CompleteMultipartUpload
-and CopyObject write NULL in them, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
+decision 32 every column is used. PutObject and CompleteMultipartUpload write the `objects`
+columns, CopyObject writes NULL in them, GetObject and HeadObject return them, and every read of an object row (`_object`) reads them,
 so the store's data API is used only after `migrate()`. CreateMultipartUpload writes the two
 `multipart_uploads` columns and UploadPart and UploadPartCopy write the three
 `multipart_parts` columns; `_upload` and `get_parts` read them. CompleteMultipartUpload
-neither reads nor verifies them yet.
+reads them and verifies against them (decision 32).
+
+**CompleteMultipartUpload (decision 32).** `_complete` reads the open upload with
+`get_open_upload` where it read `upload_exists`, parses the checksum headers with
+`complete_claims` (`server/api/checksum_headers.py`), and passes the upload, the claims and
+the parsed Parts (each with its non-blank `Checksum*` elements) to
+`complete_multipart_upload`. The computation and the checks are in
+`server/multipart/checksums.py`: `object_checksum` builds the COMPOSITE or FULL_OBJECT value
+from the listed parts' stored checksums and sizes, and returns None when any of them is NULL;
+`verify_part_elements` and `verify_claims` decide the elements and the headers. The checksum,
+algorithm and type go in the `ObjectMeta` that `commit_completed_upload` writes in the same
+transaction as the completed state, after `complete-after-assemble` and before
+`complete-after-commit`: a kill before the commit leaves the upload open with every part
+checksum as it was, a kill after leaves the object row with its checksum beside the completed
+upload and the listed part rows with their checksums and a NULL `blob_id`. The error order,
+steps 1 to 14 all decided from the part rows and the request before a blob is registered, is:
+
+1. the request guard's 501s (none is a Complete checksum header any more);
+2. NoSuchUpload;
+3. InvalidArgument for the syntax of `x-amz-mp-object-size`;
+4. the shape of the checksum headers: InvalidRequest (several value headers, another
+   algorithm on a named upload, MD5, SHA512 or an XXHash on an unnamed one), then
+   InvalidArgument (type text);
+5. MalformedXML;
+6. InvalidPartOrder, the numbers not strictly ascending;
+7. InvalidPart;
+8. InvalidPartOrder, a COMPOSITE upload whose numbers are not exactly 1 to N;
+9. EntityTooSmall;
+10. InvalidRequest, a Part element in another algorithm (named uploads), over all Parts;
+11. BadDigest, the first Part element in E that differs;
+12. InvalidRequest, `x-amz-mp-object-size` does not match;
+13. BadDigest, the type header (named uploads);
+14. BadDigest, the checksum header value;
+15. the assembly: NoSuchUpload if the upload is gone, InvalidPart from `PartsChanged`;
+16. the commit's conditions, If-Match and If-None-Match.
+
+A part uploaded again between the checksum read and the commit is InvalidPart (step 15) and
+the upload stays open with the new part's own checksum. `commit_completed_upload` is not
+changed.
 
 **The columns.** Each is added after the table's version 2 columns. The algorithm
 columns accept `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` and `SHA256` or NULL; the type
@@ -2309,8 +2399,9 @@ returns the algorithm and the base64 of the digest only after the verify callbac
 succeeded. `_put_object` puts them, with `FULL_OBJECT`, in the `ObjectMeta` that
 `put_object_meta` commits, after the crash point `put-after-bytes` and before
 `put-after-commit`; a kill before the commit leaves the old row, checksum included. The
-response headers are named by `server/api/checksum_headers.py`. CompleteMultipartUpload
-and CopyObject build their `ObjectMeta` without the three fields, so their rows hold NULL.
+response headers are named by `server/api/checksum_headers.py`. CopyObject
+builds its `ObjectMeta` without the three fields, so its rows hold NULL;
+CompleteMultipartUpload sets them (decision 32).
 `UploadPart` stores the checksum of its upload's effective algorithm with the part (decision
 31); the DeleteObjects body check
 (`verify_body`) computes only the claimed checksum and stores nothing.
