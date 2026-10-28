@@ -134,6 +134,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Complete checksums | 330 | 508 | 195 | CompleteMultipartUpload verifies the Part `Checksum*` elements and the `x-amz-checksum-*` and `x-amz-checksum-type` headers against the stored part checksums and the upload's algorithm and type, stores the object's checksum (COMPOSITE with a "-N" suffix, FULL_OBJECT, or CRC64NVME FULL_OBJECT for an upload that named no algorithm) and returns `Checksum<ALG>` and `ChecksumType` (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). The 501 for the Complete checksum headers is gone. No outcome changed, and none was expected to: no selected test sends a Part checksum element or a Complete checksum header, all of them create unnamed uploads (so gaps stay allowed), and the 7 passing tests that read a multipart object whole (`test_multipart_copy_multiple_sizes`, `_small`, `_special_names`, `_without_range`, `test_multipart_upload_contents`, `test_multipart_upload_overwrite_existing_object` and `test_multipart_upload_resend_part`) now have botocore validate the combined CRC64NVME, and still pass. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the verification. |
 | CopyObject checksums | 330 | 508 | 195 | CopyObject hashes the bytes it copies and stores the checksum, algorithm and type FULL_OBJECT with the destination row, in the algorithm `x-amz-checksum-algorithm` names, else the source's, else CRC64NVME, and returns `ChecksumType` and `Checksum<algorithm>` in `CopyObjectResult` (see "Checksums", decision 33). SHA512, MD5 and the XXHash names are 501; an unknown name is 400 InvalidArgument. No outcome changed, as forecast: the 10 selected tests that copy with CopyObject or `client.copy` and read the copy back (`test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, `test_copy_object_ifmatch_good` and `_ifnonematch_failed`) now have a whole object GET that botocore validates against the copy's stored checksum, and still pass; the tests that expect an error, the UploadPartCopy tests and the versioned and second user tests are unchanged. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the checksum to CopyObject. |
 | Upload bucket and key | 330 | 508 | 195 | UploadPart, UploadPartCopy, CompleteMultipartUpload and AbortMultipartUpload check that the upload belongs to the request's bucket and key (decision 34; see "An upload belongs to one bucket and key" under Known gaps): a missing bucket is 404 NoSuchBucket, another bucket or key is 404 NoSuchUpload. Complete through a missing bucket, which was 500 InternalError, is now NoSuchBucket (fixed). No outcome changed, as forecast: the failing multipart tests fail for other reasons (the re-complete NoSuchUpload, InvalidPartOrder for a repeated part, `PartsCount`, 501 for versioning and ListMultipartUploads), and the passing ones use the upload's own bucket and key. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the check. |
+| Retried Complete decided (decision 35) | 330 | 508 | 195 | A Complete on a completed upload is 404 NoSuchUpload by decision 35, no longer a gap: j3 is closed as conformant and its strict xfail is an ordinary test. `test_multipart_upload` and `test_multipart_upload_small`, which send an extra Complete, move from that gap to the ceph tests that fail on purpose (checked once in a scratch copy with the extra Complete removed: both pass, not counted). No outcome changed, as forecast: no production code changed, so the results file is not regenerated and the figures stay 195 passed, 128 failed, 7 skipped. Recorded at the commit that makes the decision. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -267,7 +268,7 @@ output; "501" means Litmus answers 501 NotImplemented for that request.
 | ListObjects (V1) | 41 | 39 | 2 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys` (default, cap, 0, InvalidArgument), `marker`, `NextMarker`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1); one test calls GetObjectAcl, which is 501 (1). |
 | ListObjectsV2 | 39 | 38 | 1 | 0 | `prefix`, `delimiter` and common prefixes, `max-keys`, `continuation-token`, `start-after`, `KeyCount`, `fetch-owner`, truncation, `encoding-type=url`. Fail: `allow-unordered`, an RGW extension, is not implemented (1). |
 | DeleteObjects | 4 | 4 | 0 | 0 | Bulk delete, and the limit of 1000 Objects (400 MalformedXML for more). The per key `ETag` tests are under Conditional delete. |
-| Multipart upload | 14 | 11 | 3 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, an empty Complete body (400 MalformedXML), overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); a Complete that lists a part number twice (`test_multipart_resend_first_finishes_last`, with two different ETags for part 1) is refused, now with InvalidPartOrder, where the test expects success (1). See "The Complete body" under Known gaps. The minimum part size is enforced (see "The minimum part size"), so `test_multipart_upload_size_too_small` passes. |
+| Multipart upload | 14 | 11 | 3 | 0 | Create, upload part, complete, abort, wrong ETag and missing part errors, an empty Complete body (400 MalformedXML), overwriting an existing object, and the Content-Type, system headers and user metadata given to CreateMultipartUpload reaching the object (see "Multipart upload headers" under Known gaps). Fail: re-completing a completed upload gets NoSuchUpload, where S3 answers 200 with the same ETag (2); a Complete that lists a part number twice (`test_multipart_resend_first_finishes_last`, with two different ETags for part 1) is refused, now with InvalidPartOrder, where the test expects success (1). See "The Complete body" under Known gaps. The minimum part size is enforced (see "The minimum part size"), so `test_multipart_upload_size_too_small` passes. These 2 fail on purpose: decision 35 and "Two ceph tests send a second Complete" under Known gaps. |
 | GetObject `partNumber` | 3 | 0 | 3 | 0 | Fail: `partNumber` is ignored and the whole object is returned. |
 | ListMultipartUploads | 2 | 0 | 2 | 0 | Fail: 501 (one test fails earlier on PutBucketAcl, also 501). |
 | GetObjectAttributes | 5 | 0 | 5 | 0 | Fail: 501 (one test fails earlier on PutBucketVersioning, also 501). |
@@ -1060,7 +1061,8 @@ whatever the headers say, and only a request that passes them can be 412 or 404.
 - `x-amz-if-match-initiated-time` is not a Complete header and is ignored there, as it
   was. AWS defines it only on AbortMultipartUpload, where it is still 501.
 - A retried Complete after a kill that follows the commit is NoSuchUpload, as without a
-  condition (the gap above, unchanged).
+  condition (the gap above, unchanged). That gap was j3, which decision 35 closes, so this
+  answer is conformant.
 - EntityTooSmall did not exist at this step (it is enforced now, see "The minimum part
   size" below). InvalidPartOrder
   and MalformedXML for a Complete body were added after this step (see the same section).
@@ -1609,9 +1611,19 @@ deleted is NoSuchBucket, not NoSuchUpload; the deleted bucket's uploads are stil
 (decision 7). Complete through a missing bucket used to be 500 InternalError (the object
 row violated the bucket foreign key) and is now NoSuchBucket.
 
-**Re-completing an upload.** After a Complete that committed, a retried Complete for
-the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The
-retry changes nothing in Litmus. A strict xfail test records the S3 behavior.
+**Two ceph tests send a second Complete (decision 35).** `test_multipart_upload` and
+`test_multipart_upload_small` complete an upload and then send the same Complete again
+(the comment in both reads "check extra client.complete_multipart_upload"), and expect it
+to succeed. Litmus answers that second Complete with 404 NoSuchUpload, so both fail on
+purpose. S3 API reference, "Error responses" lists NoSuchUpload (404 Not Found) as "The
+specified multipart upload does not exist. The upload ID might be invalid, or the multipart
+upload might have been aborted or completed."; "CompleteMultipartUpload" lists the same
+error and documents no replay of the first answer. Litmus follows the documented answer and
+has not observed what S3 itself returns. The earlier claim that S3 answers a retry with 200
+and the same ETag rested only on these two tests and is withdrawn; no replay is
+implemented, and the retry changes nothing. Checked once, not counted: in a scratch copy
+of the s3-tests checkout with the extra Complete removed from each test, both pass against
+Litmus (2 passed), so nothing else in them fails. The gap j3 is closed as conformant.
 
 **Objects under the empty key.** Before `/{bucket}/` became the bucket, `PUT /{bucket}/`
 stored an object under the key `""`. No S3 client sends such a key (the API model gives the

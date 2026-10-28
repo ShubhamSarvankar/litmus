@@ -6,7 +6,7 @@ The condition is decided in the commit, so a kill at complete-after-assemble (th
 assembled bytes are durable, the commit has not run) leaves the old object and the open
 upload whatever the condition would have said, and a kill at complete-after-commit leaves
 the new object, after which the same Complete, retried, is NoSuchUpload (the upload is
-closed; re-completing it is the known gap j3 in test_crash_points.py, unchanged here).
+closed; re-completing it is NoSuchUpload by decision 35, unchanged here).
 """
 
 import hashlib
@@ -180,9 +180,8 @@ def test_complete_killed_after_commit_with_if_match_shows_the_new_object(tmp_pat
     with _restarted(tmp_path) as client2:
         got = client2.get(URL)
         assert got.content == NEW and got.headers["etag"] == NEW_ETAG
-        # (c) The client's retry of the same request is what a retried Complete gets
-        # today, whatever its condition: the upload is closed, so NoSuchUpload (S3 would
-        # answer 200 and the same ETag: gap j3, test_gap_retried_complete_returns_same_etag).
+        # (c) The client's retry of the same request is what a retried Complete gets,
+        # whatever its condition: the upload is closed, so NoSuchUpload (decision 35).
         # Nothing changes.
         before = (_store(tmp_path).list_objects(BUCKET), _store(tmp_path).get_parts(upload_id))
         retry = _complete(client2, upload_id, etags, {"If-Match": old_etag})

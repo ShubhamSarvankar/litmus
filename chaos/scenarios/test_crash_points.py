@@ -394,8 +394,9 @@ def test_complete_killed_after_commit_before_part_cleanup(tmp_path: Path):
         assert not any(p.exists() for p in leftovers)
         assert _registry(tmp_path, "garbage") == []
 
-        # (d) A retried Complete changes nothing. S3 answers it with 200 and the same
-        # ETag; see test_gap_retried_complete_returns_same_etag (j3).
+        # (d) A retried Complete changes nothing. It is NoSuchUpload, the documented
+        # answer for a completed upload (decision 35); see
+        # test_retried_complete_after_a_killed_commit_is_no_such_upload.
         before = _snapshot(tmp_path, upload_id)
         _complete(client2, upload_id, etags)
         assert _snapshot(tmp_path, upload_id) == before
@@ -1231,23 +1232,19 @@ def test_complete_killed_after_gc_unlink(tmp_path: Path):
     with _restarted(tmp_path) as client2:
         # (c)
         _assert_object(client2, body, etag)
-        # (d) A retried Complete changes nothing. S3 answers it with 200 and the same
-        # ETag; see test_gap_retried_complete_returns_same_etag (j3).
+        # (d) A retried Complete changes nothing. It is NoSuchUpload, the documented
+        # answer for a completed upload (decision 35); see
+        # test_retried_complete_after_a_killed_commit_is_no_such_upload.
         before = _snapshot(tmp_path, upload_id)
         _complete(client2, upload_id, etags)
         assert _snapshot(tmp_path, upload_id) == before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="gap (j3): re-completing a completed multipart upload is not implemented; "
-    "S3 answers a retried CompleteMultipartUpload with 200 and the same ETag",
-)
 @pytest.mark.parametrize("point", [COMPLETE_AFTER_COMMIT, COMPLETE_AFTER_GC_UNLINK])
-def test_gap_retried_complete_returns_same_etag(tmp_path: Path, point: str):
-    """The client's natural retry after a Complete that committed but never answered.
-    Setup problems use pytest.fail, so they are real failures, not absorbed xfails."""
+def test_retried_complete_after_a_killed_commit_is_no_such_upload(tmp_path: Path, point: str):
+    """The client's natural retry after a Complete that committed but never answered:
+    the upload is completed, so NoSuchUpload (decision 35), and the object stays.
+    Setup problems use pytest.fail, so they are real failures."""
     server, client = _start(tmp_path, crash_point=point)
     try:
         upload_id, parts, etags = _prepare_upload(client)
@@ -1255,14 +1252,17 @@ def test_gap_retried_complete_returns_same_etag(tmp_path: Path, point: str):
     except AssertionError as e:
         pytest.fail(f"setup: Complete did not die at {point}: {e}")
     client.close()
-    etag = _multipart_etag(parts)
+    body, etag = b"".join(parts), _multipart_etag(parts)
 
     with _restarted(tmp_path) as client2:
         if client2.get(f"/{BUCKET}/{KEY}").headers.get("etag") != etag:
             pytest.fail("setup: the object was not committed before the kill")
+        before = _snapshot(tmp_path, upload_id)
         resp = _complete(client2, upload_id, etags)
-        assert resp.status_code == 200
-        assert ET.fromstring(resp.text).findtext("ETag") == etag
+        assert resp.status_code == 404
+        assert ET.fromstring(resp.text).findtext("Code") == "NoSuchUpload"
+        _assert_object(client2, body, etag)
+        assert _snapshot(tmp_path, upload_id) == before
 
 
 def _part_cleanup_issues(recorded, upload_id: str) -> list:

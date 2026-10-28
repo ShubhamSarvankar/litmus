@@ -148,7 +148,7 @@ rename, fsync of the parent directory, then the SQLite commit).
     abort. Decide what Complete keeps. Part sizes and ETags of completed objects are
     needed for GetObject/HeadObject `partNumber` (j8), GetObjectAttributes `ObjectParts`
     (j7) and re-completing a completed upload, which S3 accepts (j3); the schema should
-    allow these.
+    allow these. Decision 35 supersedes the j3 claim: a retried Complete is NoSuchUpload.
 
 22. **(noted) Plan the schema migration once.** User metadata (`x-amz-meta-*`,
     category d) and stored system headers (Cache-Control, Expires, Content-Encoding,
@@ -484,7 +484,7 @@ Notes:
   This is what GetObject/HeadObject `partNumber` (j8), GetObjectAttributes
   `ObjectParts` (j7) and re-completing a completed upload (j3) need. Those rows live
   exactly as long as the object version: the transaction that overwrites or deletes
-  the object deletes them.
+  the object deletes them. Decision 35 supersedes the j3 reference: a retried Complete is NoSuchUpload.
 - **Columns for R22.** User metadata and the stored system headers are folded into this
   one schema change, so category d and j1 need no second migration. User metadata is
   one JSON column (S3 caps it at 2 KB, so a side table buys nothing). Decision 13.
@@ -1184,7 +1184,7 @@ Other races, each decided by commit order:
 | UploadPart vs UploadPart, same part number | both 200; the later commit's part is recorded; the other blob is `garbage` |
 | UploadPart vs Complete | if Complete commits first, the part's commit sees `completed` and gets NoSuchUpload; if the part commits during assembly, Complete's check C4.b (or a missing file in C3) gives InvalidPart |
 | UploadPart vs Abort | if Abort commits first, the part gets NoSuchUpload and releases its blob |
-| Complete vs Complete, same upload | the second sees `completed` and gets NoSuchUpload (re-completing, j3, is separate work that the retained rows allow) |
+| Complete vs Complete, same upload | the second sees `completed` and gets NoSuchUpload (re-completing, j3, is separate work that the retained rows allow) (decision 35: it stays NoSuchUpload) |
 | Complete vs Abort | the first commit wins; the other gets NoSuchUpload |
 | PUT or CreateMultipartUpload vs DeleteBucket | if the bucket delete commits first, the other's commit fails on the foreign key: NoSuchBucket |
 
@@ -1883,7 +1883,7 @@ CopyObject (§11).
 `test_multipart_upload` need Content-Type and user metadata carried from
 CreateMultipartUpload to the object (the schema has the columns; the handlers are
 category d / j1 work), and `test_multipart_upload` also re-completes a completed upload
-(j3). Of the 6 non-versioned conditional delete tests, `test_delete_object_if_match` is
+(j3). Decision 35 supersedes that: the second Complete is NoSuchUpload and both ceph tests fail on purpose. Of the 6 non-versioned conditional delete tests, `test_delete_object_if_match` is
 evaluated (§10) but fails on purpose: it expects 204 for `If-Match` on a missing key and
 Litmus answers 404. `test_delete_object_if_match_last_modified_time` and `_size` (501) and
 their `test_delete_objects_*` counterparts stay failing on purpose (directory buckets only);
@@ -2368,6 +2368,34 @@ Recorded with the Complete checksums:
     lists NoSuchBucket (404). Choices: NoSuchUpload, not NoSuchBucket or NoSuchKey, for a
     mismatch, since it is the one documented error for an upload that does not match.
     No write sequence changes, so no crash point is added. Details: §6.6, §6.7, §20.
+35. **A retried Complete on a completed upload is NoSuchUpload (closes j3).** A
+    CompleteMultipartUpload for an upload that an earlier Complete finished is 404
+    NoSuchUpload, and the retry changes nothing: the object keeps its bytes and ETag, and no
+    upload, part or blob row and no file is added. Sources: S3 API reference, "Error
+    responses" (`API_Error`) lists NoSuchUpload (404 Not Found) as "The specified multipart
+    upload does not exist. The upload ID might be invalid, or the multipart upload might have
+    been aborted or completed."; "CompleteMultipartUpload" lists the same NoSuchUpload (404
+    Not Found) among its special errors and documents no replay of the first answer. Neither
+    page documents a 200 for a repeated Complete. Litmus follows
+    the documented answer and has not observed what S3 itself returns; the earlier claim
+    that S3 answers a retry with 200 and the same ETag rested only on two ceph tests
+    (`test_multipart_upload` and `test_multipart_upload_small`, each of which sends one
+    extra Complete) and is withdrawn. No replay is implemented. j3 is
+    closed as conformant: the strict xfail `test_gap_retried_complete_returns_same_etag`
+    became the ordinary test `test_retried_complete_after_a_killed_commit_is_no_such_upload`,
+    and `tests/conformance/test_complete_retry.py` pins the plain retry. No numbered decision
+    recorded the 200 expectation or a rule for removing the j3 marker, so this decision
+    supersedes these sentences outside the numbered decisions, each by name: in "Noted along
+    the way", item 21, "re-completing a completed upload, which S3 accepts (j3)"; in §5,
+    "re-completing a completed upload (j3) need"; in §9, the row "Complete vs Complete, same
+    upload", "re-completing, j3, is separate work that the retained rows allow"; and in §17,
+    "`test_multipart_upload` also re-completes a completed upload (j3)", whose claim that
+    Litmus should accept the second Complete is withdrawn: the two ceph tests fail on
+    purpose (compatibility.md, "Two ceph tests send a second Complete"). The retained rows
+    stay as §5 describes them. No write sequence changes, so no crash point is added.
+    Decision 10's conditions apply only to the two strict xfail tests named in item 7 of
+    "Noted along the way", so they do not apply to the j3 test, which never XPASSed and whose
+    assertions this decision rewrites.
 
 
 ### §20. Checksums and schema version 3
