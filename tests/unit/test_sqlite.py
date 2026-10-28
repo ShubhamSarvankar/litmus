@@ -326,18 +326,22 @@ def test_snapshot_reads_one_committed_state(store):
 def test_create_and_upload_exists(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    assert store.upload_exists("uid-1") is True
+    assert store.upload_exists("uid-1", bucket="b", key="k") is True
 
 
 def test_upload_exists_false(store):
-    assert store.upload_exists("no-such-uid") is False
+    assert store.upload_exists("no-such-uid", bucket="b", key="k") is False
 
 
 def test_record_and_get_parts(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"etag1"', 100, _part_blob(store, 1)))
-    store.record_part("uid-1", PartMeta("uid-1", 2, '"etag2"', 200, _part_blob(store, 2)))
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 1, '"etag1"', 100, _part_blob(store, 1), bucket="b", key="k")
+    )
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 2, '"etag2"', 200, _part_blob(store, 2), bucket="b", key="k")
+    )
     parts = store.get_parts("uid-1")
     assert len(parts) == 2
     assert parts[0].part_number == 1
@@ -347,8 +351,12 @@ def test_record_and_get_parts(store):
 def test_record_part_overwrite(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"old-etag"', 100, _part_blob(store, 1)))
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"new-etag"', 200, _part_blob(store, 1)))
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 1, '"old-etag"', 100, _part_blob(store, 1), bucket="b", key="k")
+    )
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 1, '"new-etag"', 200, _part_blob(store, 1), bucket="b", key="k")
+    )
     parts = store.get_parts("uid-1")
     assert len(parts) == 1
     assert parts[0].etag == '"new-etag"'
@@ -359,7 +367,7 @@ def test_complete_upload_removes_from_incomplete(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
     store.commit_completed_upload("uid-1", _obj(blob_id=_blob(store)))
-    assert store.upload_exists("uid-1") is False
+    assert store.upload_exists("uid-1", bucket="b", key="k") is False
     incomplete = store.list_incomplete_uploads()
     assert all(u.upload_id != "uid-1" for u in incomplete)
 
@@ -367,9 +375,11 @@ def test_complete_upload_removes_from_incomplete(store):
 def test_abort_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"e"', 50, _part_blob(store, 1)))
-    store.abort_upload("uid-1")
-    assert store.upload_exists("uid-1") is False
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 1, '"e"', 50, _part_blob(store, 1), bucket="b", key="k")
+    )
+    store.abort_upload("uid-1", bucket="b", key="k")
+    assert store.upload_exists("uid-1", bucket="b", key="k") is False
     assert store.get_parts("uid-1") == []
 
 
@@ -379,7 +389,7 @@ def test_commit_completed_upload_commits_object_and_closes_upload(store):
     blob_id = _blob(store)
     assert store.commit_completed_upload("uid-1", _obj(etag='"abc-2"', blob_id=blob_id)) is True
     assert store.get_object_meta("b", "k").etag == '"abc-2"'
-    assert store.upload_exists("uid-1") is False
+    assert store.upload_exists("uid-1", bucket="b", key="k") is False
 
 
 def test_commit_completed_upload_rolls_back_both_on_failure(store):
@@ -390,7 +400,7 @@ def test_commit_completed_upload_rolls_back_both_on_failure(store):
     store.create_upload("uid-1", "b", "k", _NOW)
     with pytest.raises(sqlite3.IntegrityError):
         store.commit_completed_upload("uid-1", _obj(blob_id="0" * 32))
-    assert store.upload_exists("uid-1") is True
+    assert store.upload_exists("uid-1", bucket="b", key="k") is True
     assert store.get_object_meta("b", "k") is None
 
 
@@ -428,9 +438,15 @@ def test_list_incomplete_uploads_excludes_completed(store):
 def test_get_parts_ordered_by_part_number(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.record_part("uid-1", PartMeta("uid-1", 3, '"e3"', 10, _part_blob(store, 3)))
-    store.record_part("uid-1", PartMeta("uid-1", 1, '"e1"', 10, _part_blob(store, 1)))
-    store.record_part("uid-1", PartMeta("uid-1", 2, '"e2"', 10, _part_blob(store, 2)))
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 3, '"e3"', 10, _part_blob(store, 3), bucket="b", key="k")
+    )
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 1, '"e1"', 10, _part_blob(store, 1), bucket="b", key="k")
+    )
+    store.record_part(
+        "uid-1", PartMeta("uid-1", 2, '"e2"', 10, _part_blob(store, 2), bucket="b", key="k")
+    )
     parts = store.get_parts("uid-1")
     assert [p.part_number for p in parts] == [1, 2, 3]
 
@@ -617,13 +633,23 @@ def test_record_part_stores_the_checksum_algorithm_and_time(store):
         checksum="AAAAAA==",
         checksum_algorithm="CRC32",
         last_modified=when,
+        bucket="b",
+        key="k",
     )
     store.record_part("uid-1", part)
     (got,) = store.get_parts("uid-1")
     assert (got.checksum, got.checksum_algorithm, got.last_modified) == ("AAAAAA==", "CRC32", when)
     # Replacing the part replaces all three.
     again = PartMeta(
-        "uid-1", 1, '"f"', 11, _part_blob(store, 1), checksum="BBBBBB==", checksum_algorithm="SHA1"
+        "uid-1",
+        1,
+        '"f"',
+        11,
+        _part_blob(store, 1),
+        checksum="BBBBBB==",
+        checksum_algorithm="SHA1",
+        bucket="b",
+        key="k",
     )
     store.record_part("uid-1", again)
     (got,) = store.get_parts("uid-1")
@@ -634,7 +660,7 @@ def test_record_part_stores_the_checksum_algorithm_and_time(store):
 def test_record_part_stamps_a_missing_time_on_the_part_it_was_given(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    part = PartMeta("uid-1", 1, '"e"', 10, _part_blob(store, 1))
+    part = PartMeta("uid-1", 1, '"e"', 10, _part_blob(store, 1), bucket="b", key="k")
     assert part.last_modified is None
     before = datetime.now(UTC).replace(tzinfo=None)
     replaced = store.record_part("uid-1", part)
@@ -652,23 +678,26 @@ def test_create_upload_stores_the_checksum_algorithm_and_type(store):
         "named", "b", "k", _NOW, checksum_algorithm="CRC32C", checksum_type="FULL_OBJECT"
     )
     store.create_upload("unnamed", "b", "k", _NOW)
-    named, unnamed = store.get_upload("named"), store.get_upload("unnamed")
+    named, unnamed = (
+        store.get_upload("named", bucket="b", key="k"),
+        store.get_upload("unnamed", bucket="b", key="k"),
+    )
     assert (named.checksum_algorithm, named.checksum_type) == ("CRC32C", "FULL_OBJECT")
     assert (unnamed.checksum_algorithm, unnamed.checksum_type) == (None, None)
-    assert store.get_open_upload("named") == named
+    assert store.get_open_upload("named", bucket="b", key="k") == named
 
 
 def test_get_open_upload_is_none_for_a_completed_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    assert store.get_open_upload("uid-1").upload_id == "uid-1"
+    assert store.get_open_upload("uid-1", bucket="b", key="k").upload_id == "uid-1"
     store.commit_completed_upload("uid-1", _obj(blob_id=_blob(store)))
-    assert store.get_open_upload("uid-1") is None
-    assert store.get_open_upload("no-such-uid") is None
+    assert store.get_open_upload("uid-1", bucket="b", key="k") is None
+    assert store.get_open_upload("no-such-uid", bucket="b", key="k") is None
 
 
 def test_get_open_upload_is_none_for_an_aborted_upload(store):
     store.create_bucket("b", _NOW)
     store.create_upload("uid-1", "b", "k", _NOW)
-    store.abort_upload("uid-1")
-    assert store.get_open_upload("uid-1") is None
+    store.abort_upload("uid-1", bucket="b", key="k")
+    assert store.get_open_upload("uid-1", bucket="b", key="k") is None

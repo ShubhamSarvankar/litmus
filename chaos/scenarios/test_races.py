@@ -540,7 +540,7 @@ def test_complete_refused_when_a_part_changed_during_assembly(env, monkeypatch):
     got = reader.get(f"/{BUCKET}/{KEY}")
     assert got.content == OLD and got.headers["etag"] == _md5(OLD)
     # The upload stays open with the new part 1; the assembled blob is gone.
-    assert metadata.upload_exists(upload_id)
+    assert metadata.upload_exists(upload_id, bucket=BUCKET, key=KEY)
     parts = metadata.get_parts(upload_id)
     assert [p.etag for p in parts] == [_md5(b"changed" * 1000), etags[1]]
     (assembled_id,) = assembled

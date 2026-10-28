@@ -687,6 +687,8 @@ after it, an open upload with no parts.
 U1. Read-only checks: the upload is open and belongs to this bucket and key (else
     NoSuchUpload); the part number is between 1 and 10000. Decision 17: the bucket and
     key check stays in the design but comes with the multipart work, not step (a).
+    Decision 34 implements it: a missing bucket is NoSuchBucket before U1, and an upload
+    of another bucket or key is NoSuchUpload.
 
 U2. `id = REGISTER('part', bucket, key, upload_id, part_number)` **[C]**.
     `⚡part-after-register`
@@ -780,7 +782,8 @@ A replaced part has no unlink point of its own, as for UploadPart (U5).
 #### §6.7 CompleteMultipartUpload
 
 C1. Read-only: the upload exists (else NoSuchUpload; the bucket and key part comes
-    with the multipart work, decision 17). Then the `x-amz-mp-object-size` syntax
+    with the multipart work, decision 17). Decision 34 adds NoSuchBucket before this
+    check and makes it find only the upload of this bucket and key. Then the `x-amz-mp-object-size` syntax
     (InvalidArgument, decision 26), then parse and validate the body, and nothing is
     registered until all of it has passed. The errors come in this order:
     1. MalformedXML: the body is empty, not UTF-8, not well-formed XML, its root is
@@ -1948,7 +1951,7 @@ written. Each is marked **Resolved** (with the decision that settled it) or **Op
    Complete and Abort look up the upload by ID only. The check that the upload belongs
    to the request's bucket and key (§6.6, §6.7) stays in the design and is implemented
    with the multipart work, not in step (a). Whether it matches S3 is still to be
-   confirmed then.
+   confirmed then. Decision 34 implements the check and records what was found.
 10. **Open. R23 and keys that are not valid UTF-8.** Keys are stored as SQLite TEXT,
     today and in this design. Whether a percent-encoded key with invalid UTF-8 can
     reach the handlers, and what S3 does with it, is not covered by any requirement.
@@ -2025,7 +2028,7 @@ Recorded during step (a):
     and `schema_version` to be empty (§7 step 6a). The refusal tests (§16) allow a `LOCK`
     file to appear; every other file must be unchanged.
 17. **Upload bucket/key check.** Kept in the design (§6.6, §6.7), implemented with the
-    multipart work, not in step (a).
+    multipart work, not in step (a). Implemented by decision 34.
 18. **README.** The README's crash and publication-barrier sections are part of your
     doc rewrite after steps (a) and (b) (decision 15).
 
@@ -2337,6 +2340,35 @@ Recorded with the Complete checksums:
     in the `objects` columns, which are updated in place. The write
     sequence (§6.10) and the crash points are unchanged. Details: §20.
 
+34. **An upload belongs to one bucket and key.** UploadPart, UploadPartCopy,
+    CompleteMultipartUpload and AbortMultipartUpload find the upload by its ID, its bucket
+    and its key together, compared exactly as stored (SQLite BINARY collation, so a key that
+    differs only in case is another key; the key is decoded as an object key is). This
+    fulfills decision 17 ("Kept in the design (§6.6, §6.7), implemented with the multipart
+    work") and open item 9. The rule is one: the store lookups `get_upload`, `get_open_upload`,
+    `upload_exists` and `abort_upload` require the bucket and key, `record_part` scopes by
+    the bucket and key its `PartMeta` carries, and `commit_completed_upload` scopes its
+    compare-and-set by the bucket and key of the `ObjectMeta`, so the check inside the
+    BEGIN IMMEDIATE commit is scoped too. A bucket that does not exist is 404 NoSuchBucket;
+    otherwise an upload that is not the upload of this bucket and key is 404 NoSuchUpload,
+    the same answer as for an unknown ID. Both are decided before any body byte is read
+    and before a blob is registered, so a refused request changes nothing and the upload
+    stays usable through its own bucket and key. For UploadPartCopy they concern the
+    destination; the source is handled as before. New order: UploadPart, UploadPart's
+    partNumber integer check, then NoSuchBucket, then NoSuchUpload, then the part number
+    range; Complete, NoSuchBucket immediately before step 2 of §20, which becomes the
+    scoped NoSuchUpload; Abort, NoSuchBucket then NoSuchUpload; UploadPartCopy keeps its
+    destination NoSuchBucket first. A request through a deleted bucket is therefore
+    NoSuchBucket, where decision 7's abort of the bucket's uploads used to show as
+    NoSuchUpload. It also fixes Complete through a missing bucket, which was 500
+    InternalError (the object insert violated the bucket foreign key). Sources: S3 API
+    reference, "UploadPart", "UploadPartCopy", "CompleteMultipartUpload" and
+    "AbortMultipartUpload" say nothing about a request whose bucket or key differs from
+    the upload's (not found); each documents NoSuchUpload (404), and "Error responses"
+    lists NoSuchBucket (404). Choices: NoSuchUpload, not NoSuchBucket or NoSuchKey, for a
+    mismatch, since it is the one documented error for an upload that does not match.
+    No write sequence changes, so no crash point is added. Details: §6.6, §6.7, §20.
+
 
 ### §20. Checksums and schema version 3
 
@@ -2382,6 +2414,10 @@ steps 1 to 14 all decided from the part rows and the request before a blob is re
 14. BadDigest, the checksum header value;
 15. the assembly: NoSuchUpload if the upload is gone, InvalidPart from `PartsChanged`;
 16. the commit's conditions, If-Match and If-None-Match.
+
+Decision 34 puts NoSuchBucket immediately before step 2, scopes step 2 and the re-read in
+step 15 to the request's bucket and key, and scopes the commit's compare-and-set the same
+way.
 
 A part uploaded again between the checksum read and the commit is InvalidPart (step 15) and
 the upload stays open with the new part's own checksum. `commit_completed_upload` is not

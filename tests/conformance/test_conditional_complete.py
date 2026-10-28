@@ -75,7 +75,7 @@ def _state(storage, metadata, uid: str) -> tuple:
         metadata.list_blob_records(),
         storage.temp_entries(),
         sorted(storage.scan()),
-        metadata.get_upload(uid),
+        metadata.get_upload(uid, bucket=BUCKET, key=KEY),
         metadata.get_parts(uid),
         metadata.list_incomplete_uploads(),
     )
@@ -90,7 +90,7 @@ def assert_store_clean(storage, metadata, live: int) -> None:
 
 
 def assert_upload_open(metadata, uid: str, etags: list[str]) -> None:
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     assert [u.upload_id for u in metadata.list_incomplete_uploads()] == [uid]
     parts = metadata.get_parts(uid)
     assert [(p.part_number, p.etag) for p in parts] == list(enumerate(etags, start=1))
@@ -170,7 +170,7 @@ def test_conditional_complete(env, headers, exists, status, code):
     if exists:
         assert client.put(f"/{BUCKET}/{KEY}", content=OLD).status_code == 200
     uid, etags = _upload(client)
-    initiated = metadata.get_upload(uid).initiated
+    initiated = metadata.get_upload(uid, bucket=BUCKET, key=KEY).initiated
     before = _state(storage, metadata, uid)
     row_before = metadata.get_object_meta(BUCKET, KEY)
     head_before = client.head(f"/{BUCKET}/{KEY}") if exists else None
@@ -199,7 +199,7 @@ def test_conditional_complete(env, headers, exists, status, code):
         assert again.status_code == 200
         assert ET.fromstring(again.text).findtext("ETag") == NEW_ETAG
         assert client.get(f"/{BUCKET}/{KEY}").content == b"".join(PARTS)
-        assert not metadata.upload_exists(uid)
+        assert not metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
         assert_store_clean(storage, metadata, live=1)
     else:
         assert ET.fromstring(resp.text).findtext("ETag") == NEW_ETAG
@@ -207,7 +207,7 @@ def test_conditional_complete(env, headers, exists, status, code):
         assert got.content == b"".join(PARTS) and got.headers["etag"] == NEW_ETAG
         # Last-Modified stays the time the upload was initiated, not the commit's.
         assert metadata.get_object_meta(BUCKET, KEY).last_modified == initiated
-        assert not metadata.upload_exists(uid)
+        assert not metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
         assert_store_clean(storage, metadata, live=1)
 
 

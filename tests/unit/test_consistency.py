@@ -74,12 +74,14 @@ def _part_path(deps, upload_id: str, part_number: int):
 
 def _seed_part(deps, upload_id: str, part_number: int, body: bytes):
     storage, metadata = deps
-    upload = metadata.get_upload(upload_id)
+    upload = metadata.get_upload(upload_id, bucket="b", key="k")
     blob_id = metadata.register_blob(
         "part", upload.bucket, upload.key, upload_id=upload_id, part_number=part_number
     )
     etag, size = storage.write_blob(blob_id, io.BytesIO(body))
-    metadata.record_part(upload_id, PartMeta(upload_id, part_number, etag, size, blob_id))
+    metadata.record_part(
+        upload_id, PartMeta(upload_id, part_number, etag, size, blob_id, bucket="b", key="k")
+    )
 
 
 # --- clean state ---
@@ -184,7 +186,9 @@ def test_sweep_completed_uploads_not_checked(deps):
     metadata.create_bucket("b", _NOW)
     metadata.create_upload("uid-done", "b", "k", _NOW)
     part_blob = metadata.register_blob("part", "b", "k", upload_id="uid-done", part_number=1)
-    metadata.record_part("uid-done", PartMeta("uid-done", 1, '"etag"', 5, part_blob))
+    metadata.record_part(
+        "uid-done", PartMeta("uid-done", 1, '"etag"', 5, part_blob, bucket="b", key="k")
+    )
     object_blob = metadata.register_blob("object", "b", "k", upload_id="uid-done")
     etag, size = storage.write_blob(object_blob, io.BytesIO(b"assembled"))
     metadata.commit_completed_upload(

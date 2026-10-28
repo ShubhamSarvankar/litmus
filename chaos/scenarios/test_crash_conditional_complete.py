@@ -122,7 +122,7 @@ def test_complete_killed_after_assemble_with_a_failing_condition_leaves_the_old_
     # assembled bytes wait under one pending registry row.
     store = _store(tmp_path)
     assert store.get_object_meta(BUCKET, KEY) == old
-    assert store.upload_exists(upload_id)
+    assert store.upload_exists(upload_id, bucket=BUCKET, key=KEY)
     assert store.get_parts(upload_id) == parts_before
     pending = [r for r in store.list_blob_records() if r.state == "pending"]
     assert len(pending) == 1
@@ -143,7 +143,7 @@ def test_complete_killed_after_assemble_with_a_failing_condition_leaves_the_old_
         refused = _complete(client2, upload_id, etags, condition)
         assert refused.status_code == 412
         assert client2.get(URL).content == OLD
-        assert _store(tmp_path).upload_exists(upload_id)
+        assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
         assert _complete(client2, upload_id, etags, {"If-Match": old_etag}).status_code == 200
         got = client2.get(URL)
         assert got.content == NEW and got.headers["etag"] == NEW_ETAG
@@ -162,7 +162,7 @@ def test_complete_killed_after_commit_with_if_match_shows_the_new_object(tmp_pat
     store = _store(tmp_path)
     row = store.get_object_meta(BUCKET, KEY)
     assert row.blob_id != old.blob_id and (row.size, row.etag) == (len(NEW), NEW_ETAG)
-    assert not store.upload_exists(upload_id)
+    assert not store.upload_exists(upload_id, bucket=BUCKET, key=KEY)
 
     # (b) Only cleanup is left: the old object's blob and the three part blobs.
     report = _sweep(tmp_path)

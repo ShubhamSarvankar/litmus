@@ -106,7 +106,7 @@ def state(storage, metadata, uid: str) -> tuple:
         metadata.list_blob_records(),
         storage.temp_entries(),
         sorted(storage.scan()),
-        metadata.get_upload(uid),
+        metadata.get_upload(uid, bucket=BUCKET, key=KEY),
         metadata.get_parts(uid),
     )
 
@@ -115,7 +115,7 @@ def assert_refused(env, uid: str, etags: list[str], resp, expected: str, before:
     client, storage, metadata = env
     assert (resp.status_code, code(resp)) == (400, expected)
     assert state(storage, metadata, uid) == before
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     assert [(p.part_number, p.etag) for p in metadata.get_parts(uid)] == numbered(etags)
     assert all(p.blob_id is not None for p in metadata.get_parts(uid))
     assert client.get(f"/{BUCKET}/{KEY}").status_code == 404

@@ -160,7 +160,7 @@ def test_create_multipart_upload_with_an_empty_or_blank_tag_header_creates_the_u
     resp = client.post(f"/{BUCKET}/{KEY}?uploads", headers={"x-amz-tagging": value})
     assert resp.status_code == 200
     upload_id = ET.fromstring(resp.text).findtext("UploadId")
-    assert metadata.upload_exists(upload_id)
+    assert metadata.upload_exists(upload_id, bucket=BUCKET, key=KEY)
 
 
 # --- operations the check must not catch ---

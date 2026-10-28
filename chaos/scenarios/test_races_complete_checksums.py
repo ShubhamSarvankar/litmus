@@ -111,7 +111,7 @@ def test_a_part_uploaded_again_after_the_checksum_was_read_is_invalid_part(env, 
     assert (resp.status_code, ET.fromstring(resp.text).findtext("Code")) == (400, "InvalidPart")
     assert metadata.get_object_meta(BUCKET, KEY) is None
     # The upload stays open; part 1 is the new one, with its own checksum.
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     parts = metadata.get_parts(uid)
     assert [p.checksum for p in parts] == [_crc64(changed), _crc64(PARTS[1])]
     # Listing the new ETag completes it, and the checksum is that of the new bytes.
@@ -174,7 +174,7 @@ def test_a_full_disk_during_the_assembly_leaves_the_upload_open_with_its_checksu
         refused = _complete(client, uid, etags)
         assert refused.status_code in (400, 500, 503)
 
-        assert metadata.upload_exists(uid)
+        assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
         assert metadata.get_object_meta(BUCKET, KEY) is None
         parts = metadata.get_parts(uid)
         assert [(p.checksum, p.checksum_algorithm) for p in parts] == [

@@ -250,6 +250,13 @@ def _object(row: sqlite3.Row) -> ObjectMeta:
     )
 
 
+def _scope(bucket: str, key: str) -> tuple[str, tuple[str, str]]:
+    """The SQL and parameters that confine a multipart_uploads lookup to the upload of one
+    bucket and key (decision 34). The columns are compared exactly as stored, so keys are
+    case sensitive."""
+    return " AND bucket = ? AND key = ?", (bucket, key)
+
+
 def _upload(row: sqlite3.Row) -> UploadMeta:
     return UploadMeta(
         upload_id=row["upload_id"],
@@ -814,27 +821,34 @@ class SQLiteMetadataStore:
                 ),
             )
 
-    def get_upload(self, upload_id: str) -> UploadMeta | None:
-        rows = self._read("SELECT * FROM multipart_uploads WHERE upload_id = ?", (upload_id,))
+    def get_upload(self, upload_id: str, *, bucket: str, key: str) -> UploadMeta | None:
+        scope, args = _scope(bucket, key)
+        rows = self._read(
+            f"SELECT * FROM multipart_uploads WHERE upload_id = ?{scope}", (upload_id, *args)
+        )
         return _upload(rows[0]) if rows else None
 
-    def get_open_upload(self, upload_id: str) -> UploadMeta | None:
+    def get_open_upload(self, upload_id: str, *, bucket: str, key: str) -> UploadMeta | None:
+        scope, args = _scope(bucket, key)
         rows = self._read(
-            "SELECT * FROM multipart_uploads WHERE upload_id = ? AND state = 'open'",
-            (upload_id,),
+            f"SELECT * FROM multipart_uploads WHERE upload_id = ?{scope} AND state = 'open'",
+            (upload_id, *args),
         )
         return _upload(rows[0]) if rows else None
 
     def record_part(self, upload_id: str, part: PartMeta) -> str | None:
         """The UploadPart commit (§6.6 U4). Returns the replaced part blob, now
-        garbage. Raises UploadNotOpen if the upload is not open. A part whose
+        garbage. Raises UploadNotOpen if the upload is not open, or is not the upload of
+        part's bucket and key. A part whose
         last_modified is None gets the time of this commit, taken under the lock and set
         on the part, as put_object_meta does for an object."""
         if part.blob_id is None:
             raise ValueError("record_part needs the blob ID of the part's bytes")
+        scope, args = _scope(part.bucket, part.key)
         with self._write() as conn:
             row = conn.execute(
-                "SELECT state FROM multipart_uploads WHERE upload_id = ?", (upload_id,)
+                f"SELECT state FROM multipart_uploads WHERE upload_id = ?{scope}",
+                (upload_id, *args),
             ).fetchone()
             if row is None or row["state"] != "open":
                 raise UploadNotOpen(upload_id)
@@ -874,7 +888,9 @@ class SQLiteMetadataStore:
 
     def get_parts(self, upload_id: str) -> list[PartMeta]:
         rows = self._read(
-            "SELECT * FROM multipart_parts WHERE upload_id = ? ORDER BY part_number",
+            """SELECT p.*, u.bucket AS bucket, u.key AS key
+               FROM multipart_parts p JOIN multipart_uploads u ON u.upload_id = p.upload_id
+               WHERE p.upload_id = ? ORDER BY p.part_number""",
             (upload_id,),
         )
         return [
@@ -887,6 +903,8 @@ class SQLiteMetadataStore:
                 checksum=r["checksum"],
                 checksum_algorithm=r["checksum_algorithm"],
                 last_modified=_str_to_dt(r["last_modified"]) if r["last_modified"] else None,
+                bucket=r["bucket"],
+                key=r["key"],
             )
             for r in rows
         ]
@@ -903,7 +921,8 @@ class SQLiteMetadataStore:
         its object row in one transaction, so a crash or error leaves either both or
         neither.
 
-        Returns False, changing nothing, if the upload is not open. Raises
+        Returns False, changing nothing, if the upload is not open or is not the upload of
+        meta's bucket and key (decision 34). Raises
         PartsChanged if a part in part_blob_ids no longer names that blob. Blobs this
         makes garbage (the replaced object blob and every part blob) are appended to
         released.
@@ -919,8 +938,8 @@ class SQLiteMetadataStore:
             # is undone by the rollback if a later statement fails.
             cur = conn.execute(
                 "UPDATE multipart_uploads SET state = 'completed' "
-                "WHERE upload_id = ? AND state = 'open'",
-                (upload_id,),
+                "WHERE upload_id = ? AND bucket = ? AND key = ? AND state = 'open'",
+                (upload_id, meta.bucket, meta.key),
             )
             if cur.rowcount != 1:
                 return False
@@ -976,12 +995,15 @@ class SQLiteMetadataStore:
         conn.execute("DELETE FROM multipart_uploads WHERE upload_id = ?", (upload_id,))
         return garbage
 
-    def abort_upload(self, upload_id: str) -> list[str] | None:
+    def abort_upload(self, upload_id: str, *, bucket: str, key: str) -> list[str] | None:
         """The Abort commit (§6.8 A2). Returns the part blobs that became garbage,
-        or None, changing nothing, if the upload is not open."""
+        or None, changing nothing, if the upload is not open, or is not the upload of
+        bucket and key."""
+        scope, args = _scope(bucket, key)
         with self._write() as conn:
             row = conn.execute(
-                "SELECT state FROM multipart_uploads WHERE upload_id = ?", (upload_id,)
+                f"SELECT state FROM multipart_uploads WHERE upload_id = ?{scope}",
+                (upload_id, *args),
             ).fetchone()
             if row is None or row["state"] != "open":
                 return None
@@ -991,11 +1013,12 @@ class SQLiteMetadataStore:
         rows = self._read("SELECT * FROM multipart_uploads WHERE state = 'open'")
         return [_upload(r) for r in rows]
 
-    def upload_exists(self, upload_id: str) -> bool:
+    def upload_exists(self, upload_id: str, *, bucket: str, key: str) -> bool:
+        scope, args = _scope(bucket, key)
         return bool(
             self._read(
-                "SELECT 1 FROM multipart_uploads WHERE upload_id = ? AND state = 'open'",
-                (upload_id,),
+                f"SELECT 1 FROM multipart_uploads WHERE upload_id = ?{scope} AND state = 'open'",
+                (upload_id, *args),
             )
         )
 

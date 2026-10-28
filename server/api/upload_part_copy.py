@@ -93,7 +93,7 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
         part_number = int(params["partNumber"])
     except ValueError:
         raise InvalidPart() from None
-    upload = metadata.get_open_upload(upload_id)
+    upload = metadata.get_open_upload(upload_id, bucket=bucket, key=key)
     if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
     if not (1 <= part_number <= 10000):
@@ -187,6 +187,8 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
         blob_id=blob_id,
         checksum=base64.b64encode(hasher.digest()).decode("ascii"),
         checksum_algorithm=effective.name,
+        bucket=bucket,
+        key=key,
     )
     try:
         replaced = metadata.record_part(upload_id, part)

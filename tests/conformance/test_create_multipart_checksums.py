@@ -92,7 +92,7 @@ def test_a_named_upload_echoes_both_headers_and_stores_them(env, algorithm, form
 
     assert resp.status_code == 200
     assert _checksum_headers(resp) == {ALGORITHM: algorithm, TYPE: expected}
-    upload = metadata.get_upload(_upload_id(resp))
+    upload = metadata.get_upload(_upload_id(resp), bucket=BUCKET, key=KEY)
     assert (upload.checksum_algorithm, upload.checksum_type) == (algorithm, expected)
     assert upload.state == "open"
 
@@ -102,7 +102,7 @@ def test_an_upload_that_names_nothing_stores_null_and_echoes_nothing(env):
     resp = client.post(URL, headers={ALGORITHM: "  ", TYPE: " "})
     assert resp.status_code == 200
     assert _checksum_headers(resp) == {}
-    upload = metadata.get_upload(_upload_id(resp))
+    upload = metadata.get_upload(_upload_id(resp), bucket=BUCKET, key=KEY)
     assert (upload.checksum_algorithm, upload.checksum_type) == (None, None)
 
 

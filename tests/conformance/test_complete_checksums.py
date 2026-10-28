@@ -197,7 +197,7 @@ def state(env, up: Up) -> tuple:
         metadata.list_blob_records(),
         storage.temp_entries(),
         sorted(storage.scan()),
-        metadata.get_upload(up.uid),
+        metadata.get_upload(up.uid, bucket=BUCKET, key=KEY),
         metadata.get_parts(up.uid),
     )
 
@@ -208,7 +208,7 @@ def assert_refused(env, up: Up, before: tuple, resp, status: int, error: str) ->
     client, storage, metadata, _ = env
     assert (resp.status_code, code(resp)) == (status, error), resp.text
     assert state(env, up) == before
-    assert metadata.upload_exists(up.uid)
+    assert metadata.upload_exists(up.uid, bucket=BUCKET, key=KEY)
     parts = metadata.get_parts(up.uid)
     assert [p.part_number for p in parts] == up.numbers
     assert all(p.blob_id is not None for p in parts)
@@ -852,7 +852,7 @@ def test_order_14_16_a_wrong_checksum_value_before_a_failing_condition(env):
     resp = complete(env, up, headers={H + "crc32": wrong("crc32"), "If-None-Match": "*"})
     assert (resp.status_code, code(resp)) == (400, BAD)
     assert ET.fromstring(resp.text).findtext("Header") == H + "crc32"
-    assert env[2].upload_exists(up.uid)
+    assert env[2].upload_exists(up.uid, bucket=BUCKET, key=KEY)
     assert client.get(f"/{BUCKET}/{KEY}").content == b"old"
 
 

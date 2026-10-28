@@ -125,7 +125,7 @@ def test_a_kill_before_the_commit_leaves_the_upload_open_with_its_part_checksums
     upload, etags = _crashed(tmp_path, point)
     store = _store(tmp_path)
 
-    assert store.upload_exists(upload)
+    assert store.upload_exists(upload, bucket=BUCKET, key=KEY)
     assert store.get_object_meta(BUCKET, KEY) is None
     parts = store.get_parts(upload)
     assert [(p.checksum, p.checksum_algorithm) for p in parts] == [
@@ -168,8 +168,8 @@ def test_a_kill_after_the_commit_leaves_the_object_checksum_with_the_completed_s
         "FULL_OBJECT",
     )
     assert meta.size == len(WHOLE)
-    assert not store.upload_exists(upload)
-    assert store.get_upload(upload).state == "completed"
+    assert not store.upload_exists(upload, bucket=BUCKET, key=KEY)
+    assert store.get_upload(upload, bucket=BUCKET, key=KEY).state == "completed"
     parts = store.get_parts(upload)
     assert [(p.checksum, p.checksum_algorithm, p.blob_id) for p in parts] == [
         (value, "CRC64NVME", None) for value in PART_CRC64
@@ -202,7 +202,7 @@ def test_a_composite_upload_killed_after_the_commit_keeps_the_suffixed_checksum(
         "SHA256",
         "COMPOSITE",
     )
-    assert store.get_upload(upload).state == "completed"
+    assert store.get_upload(upload, bucket=BUCKET, key=KEY).state == "completed"
     assert [(p.checksum, p.blob_id) for p in store.get_parts(upload)] == [
         (value, None) for value in PART_SHA256
     ]

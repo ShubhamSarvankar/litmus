@@ -267,7 +267,10 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     except ValueError:
         raise InvalidPart()
 
-    upload = metadata.get_open_upload(upload_id)
+    if not metadata.bucket_exists(bucket):
+        raise NoSuchBucket(extra={"BucketName": bucket})
+    # Decision 34: an upload of another bucket or key is an unknown upload.
+    upload = metadata.get_open_upload(upload_id, bucket=bucket, key=key)
     if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
@@ -319,6 +322,8 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
         blob_id=blob_id,
         checksum=stored_checksum,
         checksum_algorithm=stored_algorithm.name,
+        bucket=bucket,
+        key=key,
     )
     try:
         replaced = metadata.record_part(upload_id, part)
@@ -343,7 +348,9 @@ async def _complete(bucket: str, key: str, upload_id: str, request: Request) -> 
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
-    upload = metadata.get_open_upload(upload_id)
+    if not metadata.bucket_exists(bucket):
+        raise NoSuchBucket(extra={"BucketName": bucket})
+    upload = metadata.get_open_upload(upload_id, bucket=bucket, key=key)
     if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
@@ -377,13 +384,15 @@ async def _abort(bucket: str, key: str, upload_id: str, request: Request) -> Res
     metadata = request.app.state.metadata
     storage = request.app.state.storage
 
-    if not metadata.upload_exists(upload_id):
+    if not metadata.bucket_exists(bucket):
+        raise NoSuchBucket(extra={"BucketName": bucket})
+    if not metadata.upload_exists(upload_id, bucket=bucket, key=key):
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
     # docs/design/storage-layout.md §6.8: the rows go in one commit, the part blobs
     # after it.
     crash_point(ABORT_BEFORE_COMMIT)
-    garbage = metadata.abort_upload(upload_id)
+    garbage = metadata.abort_upload(upload_id, bucket=bucket, key=key)
     if garbage is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
     crash_point(ABORT_AFTER_COMMIT)

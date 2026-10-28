@@ -237,7 +237,7 @@ def test_abort_multipart_upload_still_refuses_if_match(env):
     )
     resp = env.client.delete(f"/{BUCKET}/mp?uploadId={uid}", headers={"if-match": "*"})
     assert resp.status_code == 501 and _code(resp) == "NotImplemented"
-    assert env.metadata.upload_exists(uid)
+    assert env.metadata.upload_exists(uid, bucket=BUCKET, key="mp")
 
 
 @pytest.mark.parametrize(

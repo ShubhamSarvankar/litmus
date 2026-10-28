@@ -90,7 +90,7 @@ def _state(storage, metadata, uid: str) -> tuple:
         metadata.list_blob_records(),
         storage.temp_entries(),
         sorted(storage.scan()),
-        metadata.get_upload(uid),
+        metadata.get_upload(uid, bucket=BUCKET, key=KEY),
         metadata.get_parts(uid),
         metadata.list_incomplete_uploads(),
     )
@@ -105,7 +105,7 @@ def assert_store_clean(storage, metadata, live: int) -> None:
 
 
 def assert_upload_open(metadata, uid: str, etags: list[str]) -> None:
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     assert [u.upload_id for u in metadata.list_incomplete_uploads()] == [uid]
     parts = metadata.get_parts(uid)
     assert [(p.part_number, p.etag) for p in parts] == list(enumerate(etags, start=1))
@@ -236,7 +236,7 @@ def test_the_size_counts_only_the_parts_listed(env):
     # The total of all three uploaded parts is not the size of the two listed.
     resp = client.post(url, content=body, headers={SIZE_HEADER: str(TOTAL)})
     assert (resp.status_code, _code(resp)) == (400, "InvalidRequest")
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     resp = client.post(url, content=body, headers={SIZE_HEADER: str(two)})
     assert resp.status_code == 200
     assert client.get(f"/{BUCKET}/{KEY}").content == PARTS[0] + PARTS[2]

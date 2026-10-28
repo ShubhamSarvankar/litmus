@@ -326,7 +326,7 @@ def test_complete_killed_after_assemble_before_metadata(tmp_path: Path):
 
         # Upload still open, every part recorded and on disk.
         store = _store(tmp_path)
-        assert store.upload_exists(upload_id)
+        assert store.upload_exists(upload_id, bucket=BUCKET, key=KEY)
         recorded = store.get_parts(upload_id)
         assert [p.part_number for p in recorded] == [1, 2, 3]
         assert {p.blob_id for p in recorded} == _blob_files(tmp_path)
@@ -338,7 +338,7 @@ def test_complete_killed_after_assemble_before_metadata(tmp_path: Path):
         got = client2.get(f"/{BUCKET}/{KEY}")
         assert got.content == body
         assert got.headers["etag"] == etag
-        assert not _store(tmp_path).upload_exists(upload_id)
+        assert not _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
         # The part blobs were unlinked after the commit; only the object's blob is left.
         assert _blob_files(tmp_path) == {_store(tmp_path).get_object_meta(BUCKET, KEY).blob_id}
         assert _registry(tmp_path, kind="part") == []
@@ -388,7 +388,7 @@ def test_complete_killed_after_commit_before_part_cleanup(tmp_path: Path):
 
         # Upload closed; the assembled blob is the only blob file left: the
         # restart's sweep removed the part files the kill left behind.
-        assert not store.upload_exists(upload_id)
+        assert not store.upload_exists(upload_id, bucket=BUCKET, key=KEY)
         assert all(u.upload_id != upload_id for u in store.list_incomplete_uploads())
         assert _blob_files(tmp_path) == {meta.blob_id}
         assert not any(p.exists() for p in leftovers)
@@ -415,7 +415,7 @@ def test_no_open_upload_once_object_committed(tmp_path: Path):
 
     store = _store(tmp_path)
     assert store.get_object_meta(BUCKET, KEY) is not None
-    assert not store.upload_exists(upload_id), (
+    assert not store.upload_exists(upload_id, bucket=BUCKET, key=KEY), (
         "object is committed but its multipart upload is still open"
     )
 
@@ -458,7 +458,7 @@ def test_gap_sweep_reports_part_files_of_completed_upload(tmp_path: Path):
         pytest.fail(f"setup: server did not die at the crash point: {e}")
     client.close()
     store = _store(tmp_path)
-    if store.upload_exists(upload_id):
+    if store.upload_exists(upload_id, bucket=BUCKET, key=KEY):
         pytest.fail("setup: upload still open, so its parts are not leftovers")
     if not _garbage_part_files(tmp_path, upload_id):
         pytest.fail("setup: no part files on disk, so nothing is left over")
@@ -518,7 +518,7 @@ def _snapshot(tmp_path: Path, upload_id: str | None = None):
         buckets,
         [store.list_objects(b.name) for b in buckets],
         store.list_incomplete_uploads(),
-        store.get_upload(upload_id) if upload_id else None,
+        store.get_upload(upload_id, bucket=BUCKET, key=KEY) if upload_id else None,
         store.get_parts(upload_id) if upload_id else None,
         store.list_blob_records(),
         {blob_id: _blob_bytes(tmp_path, blob_id) for blob_id in _blob_files(tmp_path)},
@@ -859,7 +859,7 @@ def _part_retry(
         resp = _complete(client2, upload_id, [_md5(body)])
         assert resp.status_code == 400
         assert ET.fromstring(resp.text).findtext("Code") == "InvalidPart"
-        assert _store(tmp_path).upload_exists(upload_id)
+        assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
         # (d)
         retry = _put(client2, url, body, framed, claimed)
         assert retry.status_code == 200
@@ -880,7 +880,7 @@ def test_upload_part_killed_after_register(tmp_path: Path, framed):
         1,
     )
     assert _store(tmp_path).get_parts(upload_id) == []
-    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
     assert _blob_files(tmp_path) == set() and _temp_files(tmp_path) == []
 
     # (b)
@@ -1014,7 +1014,7 @@ def _complete_retry(tmp_path: Path, upload_id: str, parts: list[bytes], etags: l
     with _restarted(tmp_path) as client2:
         # (c)
         assert client2.get(f"/{BUCKET}/{KEY}").status_code == 404
-        assert _store(tmp_path).upload_exists(upload_id)
+        assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
         # (d)
         resp = _complete(client2, upload_id, etags)
         assert resp.status_code == 200
@@ -1036,7 +1036,7 @@ def test_complete_killed_after_register(tmp_path: Path):
     assert (row.kind, row.key, row.upload_id) == ("object", KEY, upload_id)
     assert _blob_files(tmp_path) == part_blobs
     assert _temp_files(tmp_path) == []
-    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
 
     # (b)
     report = _sweep(tmp_path)
@@ -1061,7 +1061,7 @@ def test_complete_killed_mid_assemble(tmp_path: Path):
     assert _temp_files(tmp_path) == [temp]
     assert temp.read_bytes() == parts[0]
     assert _blob_files(tmp_path) == part_blobs
-    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
 
     # (b)
     report = _sweep(tmp_path)
@@ -1094,7 +1094,7 @@ def test_complete_over_existing_killed_after_assemble_keeps_old_object(tmp_path:
     assert _blob_bytes(tmp_path, old.blob_id) == OLD
     (pending,) = _registry(tmp_path, "pending")
     assert _blob_bytes(tmp_path, pending.blob_id) == b"".join(parts)
-    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
 
     # (b)
     report = _sweep(tmp_path)
@@ -1127,7 +1127,7 @@ def test_abort_killed_before_commit_keeps_upload(tmp_path: Path):
     client.close()
 
     # (a)
-    assert _store(tmp_path).upload_exists(upload_id)
+    assert _store(tmp_path).upload_exists(upload_id, bucket=BUCKET, key=KEY)
     assert _store_parts(tmp_path, upload_id) == recorded
     for part, data in zip(recorded, parts, strict=True):
         assert _blob_bytes(tmp_path, part.blob_id) == data
@@ -1205,7 +1205,7 @@ def test_complete_killed_after_gc_unlink(tmp_path: Path):
     meta = store.get_object_meta(BUCKET, KEY)
     assert (meta.etag, meta.size, meta.upload_id) == (etag, len(body), upload_id)
     assert _blob_bytes(tmp_path, meta.blob_id) == body
-    assert not store.upload_exists(upload_id)
+    assert not store.upload_exists(upload_id, bucket=BUCKET, key=KEY)
     assert [(p.part_number, p.etag, p.size, p.blob_id) for p in store.get_parts(upload_id)] == [
         (p.part_number, p.etag, p.size, None) for p in recorded
     ]
@@ -1284,7 +1284,7 @@ def test_abort_killed_after_commit(tmp_path: Path):
     # (a) The upload and its part rows are gone in one commit; the part blobs are
     # garbage with their files present.
     store = _store(tmp_path)
-    assert store.get_upload(upload_id) is None
+    assert store.get_upload(upload_id, bucket=BUCKET, key=KEY) is None
     assert store.get_parts(upload_id) == []
     part_blobs = {p.blob_id for p in recorded}
     assert {r.blob_id for r in _registry(tmp_path, "garbage")} == part_blobs
@@ -1321,7 +1321,7 @@ def test_delete_bucket_killed_after_commit(tmp_path: Path):
     # garbage with their files present.
     store = _store(tmp_path)
     assert not store.bucket_exists(BUCKET)
-    assert store.get_upload(upload_id) is None
+    assert store.get_upload(upload_id, bucket=BUCKET, key=KEY) is None
     assert store.get_parts(upload_id) == []
     part_blobs = {p.blob_id for p in recorded}
     assert {r.blob_id for r in _registry(tmp_path, "garbage")} == part_blobs
@@ -1339,7 +1339,7 @@ def test_delete_bucket_killed_after_commit(tmp_path: Path):
         assert f"<Name>{BUCKET}</Name>" not in client2.get("/").text
         part = client2.put(f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}", content=b"x")
         assert part.status_code == 404
-        assert ET.fromstring(part.text).findtext("Code") == "NoSuchUpload"
+        assert ET.fromstring(part.text).findtext("Code") == "NoSuchBucket"
         # (d) The retried DeleteBucket finds it gone, as on S3: 404 NoSuchBucket, and
         # nothing changes.
         before = _snapshot(tmp_path, upload_id)
@@ -1347,6 +1347,12 @@ def test_delete_bucket_killed_after_commit(tmp_path: Path):
         assert retry.status_code == 404
         assert ET.fromstring(retry.text).findtext("Code") == "NoSuchBucket"
         assert _snapshot(tmp_path, upload_id) == before
+        # (e) NoSuchBucket alone does not show the upload went with the bucket: with the
+        # bucket back, the same part PUT must find no upload.
+        assert client2.put(f"/{BUCKET}").status_code == 200
+        again = client2.put(f"/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}", content=b"x")
+        assert again.status_code == 404
+        assert ET.fromstring(again.text).findtext("Code") == "NoSuchUpload"
 
 
 # First start (§7 step 6)

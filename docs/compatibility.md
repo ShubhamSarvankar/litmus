@@ -133,6 +133,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Multipart checksums on Create, UploadPart and UploadPartCopy | 330 | 508 | 195 | CreateMultipartUpload stores and echoes `x-amz-checksum-algorithm` and `x-amz-checksum-type`; UploadPart stores the checksum of the upload's effective algorithm with the part and echoes the claim's header; UploadPartCopy stores the checksum and time and returns `Checksum<algorithm>` for a named upload and the stored `LastModified` (decision 31; see "Checksums"). No outcome changed, as forecast: the 20 passing multipart tests create unnamed uploads and boto3 sends CRC32 on each UploadPart, so each is a claim in another algorithm on an unnamed upload, which is verified and answered with 200. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the multipart checksums. |
 | Complete checksums | 330 | 508 | 195 | CompleteMultipartUpload verifies the Part `Checksum*` elements and the `x-amz-checksum-*` and `x-amz-checksum-type` headers against the stored part checksums and the upload's algorithm and type, stores the object's checksum (COMPOSITE with a "-N" suffix, FULL_OBJECT, or CRC64NVME FULL_OBJECT for an upload that named no algorithm) and returns `Checksum<ALG>` and `ChecksumType` (see "Checksum and size headers on CompleteMultipartUpload" under Known gaps). The 501 for the Complete checksum headers is gone. No outcome changed, and none was expected to: no selected test sends a Part checksum element or a Complete checksum header, all of them create unnamed uploads (so gaps stay allowed), and the 7 passing tests that read a multipart object whole (`test_multipart_copy_multiple_sizes`, `_small`, `_special_names`, `_without_range`, `test_multipart_upload_contents`, `test_multipart_upload_overwrite_existing_object` and `test_multipart_upload_resend_part`) now have botocore validate the combined CRC64NVME, and still pass. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the verification. |
 | CopyObject checksums | 330 | 508 | 195 | CopyObject hashes the bytes it copies and stores the checksum, algorithm and type FULL_OBJECT with the destination row, in the algorithm `x-amz-checksum-algorithm` names, else the source's, else CRC64NVME, and returns `ChecksumType` and `Checksum<algorithm>` in `CopyObjectResult` (see "Checksums", decision 33). SHA512, MD5 and the XXHash names are 501; an unknown name is 400 InvalidArgument. No outcome changed, as forecast: the 10 selected tests that copy with CopyObject or `client.copy` and read the copy back (`test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, `test_copy_object_ifmatch_good` and `_ifnonematch_failed`) now have a whole object GET that botocore validates against the copy's stored checksum, and still pass; the tests that expect an error, the UploadPartCopy tests and the versioned and second user tests are unchanged. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the checksum to CopyObject. |
+| Upload bucket and key | 330 | 508 | 195 | UploadPart, UploadPartCopy, CompleteMultipartUpload and AbortMultipartUpload check that the upload belongs to the request's bucket and key (decision 34; see "An upload belongs to one bucket and key" under Known gaps): a missing bucket is 404 NoSuchBucket, another bucket or key is 404 NoSuchUpload. Complete through a missing bucket, which was 500 InternalError, is now NoSuchBucket (fixed). No outcome changed, as forecast: the failing multipart tests fail for other reasons (the re-complete NoSuchUpload, InvalidPartOrder for a repeated part, `PartsCount`, 501 for versioning and ListMultipartUploads), and the passing ones use the upload's own bucket and key. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the check. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -1588,10 +1589,25 @@ Ignored, where a client can observe the difference:
 Ignored with no observable effect: `x-amz-request-payer`, `x-amz-bypass-governance-retention`,
 `x-amz-object-annotation-directive` and `x-amz-optional-object-attributes`.
 
-**UploadPart, CompleteMultipartUpload and AbortMultipartUpload never check that the
-bucket exists.** They look up the upload, so a request for a missing bucket gets 404
-NoSuchUpload, not NoSuchBucket. Under a wrong owner header it is 403, as for every
-operation that takes the header.
+**An upload belongs to one bucket and key.** UploadPart, UploadPartCopy,
+CompleteMultipartUpload and AbortMultipartUpload find the upload by its ID, bucket and
+key together (docs/design/storage-layout.md decision 34). A bucket that does not exist is
+404 NoSuchBucket ("Error responses" lists NoSuchBucket, 404, "The specified bucket does not
+exist."). Otherwise a request whose bucket or key is not the upload's, a key that differs
+only in case included, is 404 NoSuchUpload, the answer for an unknown ID. *Litmus's
+choice:* "UploadPart", "UploadPartCopy", "CompleteMultipartUpload" and
+"AbortMultipartUpload" say nothing about a request whose bucket or key differs from the
+upload's (not found); each documents NoSuchUpload (404) as its error for an upload that
+does not exist, so a mismatch gets that. Both checks come before any body byte is read and
+before a blob is written, so a refused request changes nothing and the upload stays usable
+through its own bucket and key. For UploadPartCopy they concern the destination. The
+order: UploadPart, the part number if it is not an integer (InvalidPart), NoSuchBucket,
+NoSuchUpload, the part number interval; Complete, NoSuchBucket, then the numbered order
+below from NoSuchUpload; Abort, NoSuchBucket, NoSuchUpload. Under a wrong owner header it
+is 403, as for every operation that takes the header. A request through a bucket that was
+deleted is NoSuchBucket, not NoSuchUpload; the deleted bucket's uploads are still gone
+(decision 7). Complete through a missing bucket used to be 500 InternalError (the object
+row violated the bucket foreign key) and is now NoSuchBucket.
 
 **Re-completing an upload.** After a Complete that committed, a retried Complete for
 the same upload gets NoSuchUpload. S3 answers it with 200 and the same ETag. The

@@ -143,7 +143,7 @@ def test_all_headers_and_metadata_on_200_206_and_head(env):
 def test_the_object_row_is_what_the_upload_row_was(env):
     sent = {**SYSTEM, "x-amz-meta-a": "1"}
     upload_id = env.create(sent)
-    upload = env.metadata.get_upload(upload_id)
+    upload = env.metadata.get_upload(upload_id, bucket=BUCKET, key="k")
     assert (upload.content_type, upload.cache_control, upload.user_metadata) == (
         "text/plain",
         "public, max-age=14400",
@@ -323,7 +323,7 @@ def test_an_aborted_upload_leaves_nothing(env):
     upload_id = env.create({**SYSTEM, "x-amz-meta-a": "1"})
     env.upload_parts(upload_id)
     assert env.client.delete(f"{URL}?uploadId={upload_id}").status_code == 204
-    assert env.metadata.get_upload(upload_id) is None
+    assert env.metadata.get_upload(upload_id, bucket=BUCKET, key="k") is None
     assert env.metadata.get_object_meta(BUCKET, "k") is None
     assert env.metadata.list_blob_records() == []
     assert env.client.get(URL).status_code == 404
@@ -356,7 +356,9 @@ def test_uploadpart_and_complete_ignore_the_headers_when_a_client_sends_them(env
     upload_id = env.create({"Content-Type": "text/create", "x-amz-meta-a": "create"})
     noise = {**SYSTEM, "Content-Type": "text/part", "x-amz-meta-a": "part", "x-amz-meta-z": "z"}
     etags = env.upload_parts(upload_id, headers=noise)
-    assert env.metadata.get_upload(upload_id).user_metadata == {"a": "create"}
+    assert env.metadata.get_upload(upload_id, bucket=BUCKET, key="k").user_metadata == {
+        "a": "create"
+    }
     resp = env.complete(upload_id, etags, headers={**noise, "Content-Type": "application/xml"})
     assert resp.status_code == 200
     row = env.row()
@@ -401,7 +403,7 @@ def _listed(env, version: int) -> list[str]:
 
 def test_last_modified_is_the_initiation_time_in_get_head_and_listings(env):
     upload_id = env.create()
-    initiated = env.metadata.get_upload(upload_id).initiated
+    initiated = env.metadata.get_upload(upload_id, bucket=BUCKET, key="k").initiated
     etags = env.upload_parts(upload_id)
     time.sleep(1.2)  # the Complete second is not the initiation second
     assert env.complete(upload_id, etags).status_code == 200
@@ -431,6 +433,6 @@ def test_completing_over_an_object_takes_the_new_uploads_initiation_time(env):
     env.client.put(URL, content=b"old")
     time.sleep(1.1)
     upload_id = env.create()
-    initiated = env.metadata.get_upload(upload_id).initiated
+    initiated = env.metadata.get_upload(upload_id, bucket=BUCKET, key="k").initiated
     env.complete(upload_id, env.upload_parts(upload_id))
     assert env.row().last_modified == initiated

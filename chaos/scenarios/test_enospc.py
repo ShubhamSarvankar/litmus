@@ -129,6 +129,6 @@ def test_enospc_assemble_parts_still_recorded(tmp_path: Path):
         client.post(f"/bucket/obj?uploadId={uid}", content=complete)
 
     # Upload must still be incomplete (not aborted) and parts still recorded
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket="bucket", key="obj")
     parts = metadata.get_parts(uid)
     assert len(parts) == 1

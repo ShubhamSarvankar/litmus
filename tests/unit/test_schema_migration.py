@@ -422,13 +422,15 @@ def test_migrated_database_serves_store_api(tmp_path):
     assert k1 is not None and k1.content_type == "text/plain" and k1.user_metadata == {"m": "1"}
     assert [o.key for o in store.list_objects(BUCKET)] == ["k1", "k2"]
     assert store.get_object_meta(BUCKET, "k2").upload_id == "done-up"
-    assert store.get_upload("open-up").user_metadata == {"a": "b"}
+    assert store.get_upload("open-up", bucket=BUCKET, key="mp").user_metadata == {"a": "b"}
     assert [p.part_number for p in store.get_parts("open-up")] == [1, 2]
     assert store.get_parts("done-up")[0].blob_id is None
 
     # Writes through the unchanged write paths.
     part_blob = store.register_blob("part", BUCKET, "mp", "open-up", 3)
-    store.record_part("open-up", PartMeta("open-up", 3, '"e3"', 4, part_blob))
+    store.record_part(
+        "open-up", PartMeta("open-up", 3, '"e3"', 4, part_blob, bucket=BUCKET, key="mp")
+    )
     assert [p.part_number for p in store.get_parts("open-up")] == [1, 2, 3]
     blob = store.register_blob("object", BUCKET, "new")
     store.put_object_meta(
@@ -438,13 +440,13 @@ def test_migrated_database_serves_store_api(tmp_path):
     )
     assert store.get_object_meta(BUCKET, "new").size == 3
     assert _scalar(db, "SELECT checksum_algorithm FROM objects WHERE key = 'new'") is None
-    store.abort_upload("open-up")
-    assert store.get_upload("open-up") is None
+    store.abort_upload("open-up", bucket=BUCKET, key="mp")
+    assert store.get_upload("open-up", bucket=BUCKET, key="mp") is None
 
 
 def test_partmeta_positional_arguments():
     blob_id = new_blob_id()
-    part = PartMeta("u", 7, '"e"', 12, blob_id)
+    part = PartMeta("u", 7, '"e"', 12, blob_id, bucket="b", key="k")
     assert (part.upload_id, part.part_number, part.etag, part.size, part.blob_id) == (
         "u",
         7,
@@ -452,4 +454,4 @@ def test_partmeta_positional_arguments():
         12,
         blob_id,
     )
-    assert PartMeta("u", 7, '"e"', 12).blob_id is None
+    assert PartMeta("u", 7, '"e"', 12, bucket="b", key="k").blob_id is None

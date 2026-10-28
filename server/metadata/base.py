@@ -70,6 +70,10 @@ class PartMeta:
     checksum: str | None = None
     checksum_algorithm: str | None = None
     last_modified: datetime | None = None
+    # The bucket and key of the request that uploads the part; record_part accepts only
+    # the upload of that bucket and key (decision 34).
+    bucket: str = field(kw_only=True)
+    key: str = field(kw_only=True)
 
 
 @dataclass
@@ -262,15 +266,19 @@ class MetadataStore(Protocol):
     # Creates the open upload with the headers and metadata it will give the object, and
     # the checksum algorithm and type it named.
 
-    def get_upload(self, upload_id: str) -> UploadMeta | None: ...
+    def get_upload(self, upload_id: str, *, bucket: str, key: str) -> UploadMeta | None: ...
 
-    def get_open_upload(self, upload_id: str) -> UploadMeta | None: ...
+    def get_open_upload(self, upload_id: str, *, bucket: str, key: str) -> UploadMeta | None: ...
 
-    # The upload in one read, or None unless it is open.
+    # The upload in one read, or None unless it is open. The upload must also be the one
+    # created for that bucket and key, compared exactly as stored (decision 34); an upload
+    # of another bucket or key is None, as an unknown ID is. The same holds for get_upload, abort_upload and
+    # upload_exists below.
 
     def record_part(self, upload_id: str, part: PartMeta) -> str | None: ...
 
-    # Returns the replaced part blob (now garbage), if any. Raises UploadNotOpen.
+    # Returns the replaced part blob (now garbage), if any. Raises UploadNotOpen, also when
+    # the upload was not created for part's bucket and key.
 
     def get_parts(self, upload_id: str) -> list[PartMeta]: ...
 
@@ -284,17 +292,18 @@ class MetadataStore(Protocol):
     ) -> bool: ...
 
     # Marks the open upload complete and commits its object row in one transaction.
-    # Returns False, changing nothing, if the upload is not open; raises PartsChanged
+    # Returns False, changing nothing, if the upload is not open or is not the upload of
+    # meta's bucket and key (decision 34); raises PartsChanged
     # if a listed part no longer names the blob that was assembled. Blobs it makes
     # garbage are appended to released. precondition is called inside the transaction,
     # after those two checks, with the ETag of the row being replaced (None if none);
     # what it raises rolls the whole commit back, the upload's state change included,
     # so the upload stays open with its parts.
 
-    def abort_upload(self, upload_id: str) -> list[str] | None: ...
+    def abort_upload(self, upload_id: str, *, bucket: str, key: str) -> list[str] | None: ...
 
     # Returns the upload's part blobs (now garbage), or None if it was not open.
 
     def list_incomplete_uploads(self) -> list[UploadMeta]: ...
 
-    def upload_exists(self, upload_id: str) -> bool: ...
+    def upload_exists(self, upload_id: str, *, bucket: str, key: str) -> bool: ...

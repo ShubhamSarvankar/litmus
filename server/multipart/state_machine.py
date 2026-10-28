@@ -42,9 +42,9 @@ def _normalize_etag(e: str) -> str:
     return e.strip('"')
 
 
-def _raise_for_missing_part(metadata, upload_id: str, blob_id: str) -> None:
+def _raise_for_missing_part(metadata, bucket: str, key: str, upload_id: str, blob_id: str) -> None:
     """A part file was missing during assembly (§6.7 C3): decide why."""
-    upload = metadata.get_upload(upload_id)
+    upload = metadata.get_upload(upload_id, bucket=bucket, key=key)
     if upload is None or upload.state != "open":
         raise NoSuchUpload(extra={"UploadId": upload_id})
     for part in metadata.get_parts(upload_id):
@@ -149,7 +149,7 @@ def complete_multipart_upload(
     part_blob_ids = {r["PartNumber"]: recorded[r["PartNumber"]].blob_id for r in requested_parts}
     etag = composite_etag([r["ETag"] for r in requested_parts])
 
-    current = metadata.get_upload(upload_id)
+    current = metadata.get_upload(upload_id, bucket=bucket, key=key)
     if current is None or current.state != "open":
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
@@ -164,7 +164,7 @@ def complete_multipart_upload(
         )
     except MissingPartBlob as missing:
         discard_new_blob(storage, metadata, blob_id)
-        _raise_for_missing_part(metadata, upload_id, missing.blob_id)
+        _raise_for_missing_part(metadata, bucket, key, upload_id, missing.blob_id)
         raise
     except BaseException:
         discard_new_blob(storage, metadata, blob_id)

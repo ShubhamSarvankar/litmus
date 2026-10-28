@@ -97,7 +97,7 @@ def _state(storage, metadata, uid: str) -> tuple:
         metadata.list_blob_records(),
         storage.temp_entries(),
         sorted(storage.scan()),
-        metadata.get_upload(uid),
+        metadata.get_upload(uid, bucket=BUCKET, key=KEY),
         metadata.get_parts(uid),
         metadata.list_incomplete_uploads(),
     )
@@ -112,7 +112,7 @@ def assert_store_clean(storage, metadata, live: int) -> None:
 
 
 def assert_upload_open(metadata, uid: str, etags: list[str]) -> None:
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     assert [u.upload_id for u in metadata.list_incomplete_uploads()] == [uid]
     parts = metadata.get_parts(uid)
     assert [(p.part_number, p.etag) for p in parts] == list(enumerate(etags, start=1))
@@ -145,7 +145,7 @@ def assert_refused(env, body: bytes, code: str, headers=None, exists=False, retr
     assert ET.fromstring(retry.text).findtext("ETag") == WHOLE_ETAG
     got = client.get(f"/{BUCKET}/{KEY}")
     assert got.content == WHOLE and got.headers["etag"] == WHOLE_ETAG
-    assert not metadata.upload_exists(uid)
+    assert not metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     assert_store_clean(storage, metadata, live=1)
 
 
@@ -201,7 +201,7 @@ def test_ascending_parts_with_gaps_are_still_accepted(env):
     assert resp.status_code == 200
     got = client.get(f"/{BUCKET}/{KEY}")
     assert got.content == PARTS[0] + PARTS[2]
-    assert not metadata.upload_exists(uid)
+    assert not metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
 
 
 def test_a_namespaced_body_is_still_accepted(env):

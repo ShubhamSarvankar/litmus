@@ -94,7 +94,7 @@ def _assert_clean(storage, metadata, live: int) -> None:
 
 
 def _assert_upload_open(metadata, uid: str, etags: list[str]) -> None:
-    assert metadata.upload_exists(uid)
+    assert metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
     parts = metadata.get_parts(uid)
     assert [(p.part_number, p.etag) for p in parts] == list(enumerate(etags, start=1))
     assert all(p.blob_id is not None for p in parts)
@@ -125,7 +125,7 @@ def test_two_uploads_completed_with_if_none_match_star_have_one_winner(env, monk
     assert ET.fromstring(responses[won].text).findtext("ETag") == _composite_etag(PARTS)
     got = clients[0].get(f"/{BUCKET}/{KEY}")
     assert got.content == b"".join(PARTS) and got.headers["etag"] == _composite_etag(PARTS)
-    assert not metadata.upload_exists(uploads[won][0])
+    assert not metadata.upload_exists(uploads[won][0], bucket=BUCKET, key=KEY)
     _assert_upload_open(metadata, *uploads[lost])
     _assert_clean(storage, metadata, live=1 + len(PARTS))
 
@@ -162,7 +162,7 @@ def test_complete_and_put_with_if_none_match_star_on_a_new_key_have_one_winner(e
     got = clients[0].get(f"/{BUCKET}/{KEY}")
     if resp_complete.status_code == 200:
         assert got.content == b"".join(PARTS) and got.headers["etag"] == _composite_etag(PARTS)
-        assert not metadata.upload_exists(uid)
+        assert not metadata.upload_exists(uid, bucket=BUCKET, key=KEY)
         _assert_clean(storage, metadata, live=1)
     else:
         assert got.content == body and got.headers["etag"] == _etag(body)

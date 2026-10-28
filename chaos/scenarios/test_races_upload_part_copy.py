@@ -258,7 +258,7 @@ def test_abort_during_the_copy_is_no_such_upload_and_leaves_nothing(env, monkeyp
 
     assert resp.status_code == 404 and b"NoSuchUpload" in resp.content
     monkeypatch.undo()
-    assert not metadata.upload_exists(upload)
+    assert not metadata.upload_exists(upload, bucket=BUCKET, key=DST)
     _assert_clean(storage, metadata, live=1)  # the source's blob only
 
 
@@ -273,7 +273,7 @@ def test_abort_between_the_bytes_and_the_commit_discards_the_new_blob(env, monke
 
     assert resp.status_code == 404 and b"NoSuchUpload" in resp.content
     monkeypatch.undo()
-    assert not metadata.upload_exists(upload)
+    assert not metadata.upload_exists(upload, bucket=BUCKET, key=DST)
     _assert_clean(storage, metadata, live=1)
 
 

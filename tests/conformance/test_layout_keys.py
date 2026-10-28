@@ -180,11 +180,18 @@ def test_delete_bucket_with_open_upload_aborts_the_upload(env):
     assert client.head(f"/{BUCKET}").status_code == 404
     part = client.put(f"/{BUCKET}/mp?partNumber=3&uploadId={upload_id}", content=b"x")
     assert part.status_code == 404
-    assert ET.fromstring(part.text).findtext("Code") == "NoSuchUpload"
-    assert metadata.get_upload(upload_id) is None
+    assert ET.fromstring(part.text).findtext("Code") == "NoSuchBucket"
+    assert metadata.get_upload(upload_id, bucket=BUCKET, key="mp") is None
     assert metadata.get_parts(upload_id) == []
     assert metadata.list_blob_records() == []
     assert list(storage.scan()) == []
+
+    # NoSuchBucket alone does not show the upload was aborted: with the bucket back, the
+    # same part PUT must find no upload.
+    assert client.put(f"/{BUCKET}").status_code == 200
+    again = client.put(f"/{BUCKET}/mp?partNumber=3&uploadId={upload_id}", content=b"x")
+    assert again.status_code == 404
+    assert ET.fromstring(again.text).findtext("Code") == "NoSuchUpload"
 
 
 def test_delete_bucket_with_an_object_keeps_the_object_and_the_upload(env):
@@ -196,6 +203,6 @@ def test_delete_bucket_with_an_object_keeps_the_object_and_the_upload(env):
     resp = client.delete(f"/{BUCKET}")
     assert resp.status_code == 409
     assert ET.fromstring(resp.text).findtext("Code") == "BucketNotEmpty"
-    assert metadata.upload_exists(upload_id)
+    assert metadata.upload_exists(upload_id, bucket=BUCKET, key="mp")
     assert (metadata.list_blob_records(), metadata.get_parts(upload_id)) == before
     _assert_object(client, "obj", b"keep me")

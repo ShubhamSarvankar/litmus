@@ -164,7 +164,7 @@ def test_complete_killed_after_assemble_leaves_the_old_headers_and_the_upload_op
     row = store.get_object_meta(BUCKET, KEY)
     assert (row.blob_id, row.last_modified) == (old.blob_id, old.last_modified)
     assert _row_headers(row) == _wire(OLD_HEADERS)
-    upload = store.get_upload(upload_id)
+    upload = store.get_upload(upload_id, bucket=BUCKET, key=KEY)
     assert upload.state == "open"
     assert _row_headers(upload) == _wire(UPLOAD_HEADERS)
 
@@ -185,7 +185,7 @@ def test_complete_killed_after_assemble_leaves_the_old_headers_and_the_upload_op
 def test_complete_killed_after_commit_shows_the_new_object_with_the_upload_headers(tmp_path: Path):
     upload_id, etags = _setup(tmp_path)
     old = _store(tmp_path).get_object_meta(BUCKET, KEY)
-    initiated = _store(tmp_path).get_upload(upload_id).initiated
+    initiated = _store(tmp_path).get_upload(upload_id, bucket=BUCKET, key=KEY).initiated
     server, client = _start(tmp_path, crash_point=COMPLETE_AFTER_COMMIT)
     _complete_into_crash(server, client, upload_id, etags)
     client.close()
@@ -198,7 +198,7 @@ def test_complete_killed_after_commit_shows_the_new_object_with_the_upload_heade
     assert _row_headers(row) == _wire(UPLOAD_HEADERS)
     assert row.last_modified == initiated
     assert row.upload_id == upload_id
-    assert store.get_upload(upload_id).state == "completed"
+    assert store.get_upload(upload_id, bucket=BUCKET, key=KEY).state == "completed"
 
     # (b) The same after a restart.
     with _restarted(tmp_path) as client2:
