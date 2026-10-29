@@ -1,4 +1,3 @@
-import re
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
@@ -32,6 +31,7 @@ from server.errors.s3errors import (
 from server.metadata.base import BucketMissing, PartMeta, UploadNotOpen
 from server.multipart.checksums import PART_ELEMENTS, ObjectChecksum
 from server.multipart.state_machine import complete_multipart_upload
+from server.numerals import numeral_text, parse_decimal, parse_signed_decimal
 from server.storage.lifecycle import collect_garbage, discard_new_blob
 
 router = APIRouter()
@@ -59,10 +59,6 @@ def _complete_xml(bucket: str, key: str, etag: str, checksum: ObjectChecksum | N
 
 
 _S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
-_INTEGER = re.compile(r"-?[0-9]+")
-# Past this many digits the number is far outside 1 to 10000, and is not worth
-# converting: int() refuses a string of more than 4300 digits.
-_MAX_DIGITS = 18
 
 
 def _child_text(element: ET.Element, tag: str) -> str:
@@ -77,17 +73,15 @@ def _child_text(element: ET.Element, tag: str) -> str:
 def _part_number(text: str) -> int:
     """The integer in a PartNumber; MalformedXML when the text is not one. A value
     outside 1 to 10000 is returned as it is: it is InvalidPart, decided with the
-    other part errors."""
-    if _INTEGER.fullmatch(text) is None:
+    other part errors. The syntax is an optional "-" and ASCII digits; a long number is
+    parse_decimal's SATURATED, whatever its sign."""
+    value = parse_signed_decimal(text)
+    if value is None:
         raise MalformedXML()
-    digits = text.lstrip("-")
-    if len(digits) > _MAX_DIGITS:
-        return -(10**_MAX_DIGITS) if text.startswith("-") else 10**_MAX_DIGITS
-    return int(text)
+    return value
 
 
 _OBJECT_SIZE_HEADER = "x-amz-mp-object-size"
-_DIGITS = re.compile(r"[0-9]+")
 
 
 def _expected_object_size(headers) -> int | None:
@@ -95,15 +89,15 @@ def _expected_object_size(headers) -> int | None:
     blank. The value must be a plain non-negative decimal integer, digits only after
     stripping whitespace; anything else is InvalidArgument. The API reference documents
     only the mismatch (InvalidRequest), so the error for a malformed value is a choice.
-    A value past _MAX_DIGITS significant digits is returned as 10**_MAX_DIGITS, which no
-    upload's size can equal."""
+    A value past 18 significant digits is parse_decimal's SATURATED, which no upload's size
+    can equal."""
     text = ", ".join(headers.getlist(_OBJECT_SIZE_HEADER)).strip()
     if not text:
         return None
-    if _DIGITS.fullmatch(text) is None:
+    value = parse_decimal(text)
+    if value is None:
         raise InvalidArgument(extra={"ArgumentName": _OBJECT_SIZE_HEADER, "ArgumentValue": text})
-    digits = text.lstrip("0")
-    return 10**_MAX_DIGITS if len(digits) > _MAX_DIGITS else int(digits or "0")
+    return value
 
 
 def _part_checksums(element: ET.Element) -> dict[str, str]:
@@ -135,6 +129,7 @@ def _parse_complete_body(body: bytes) -> list[dict]:
     parts = [
         {
             "PartNumber": _part_number(_child_text(el, "PartNumber")),
+            "PartNumberText": numeral_text(_child_text(el, "PartNumber")),
             "ETag": _child_text(el, "ETag"),
             "Checksums": _part_checksums(el),
         }
@@ -266,10 +261,10 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
     storage = request.app.state.storage
 
     upload_id = params["uploadId"]
-    try:
-        part_number = int(params["partNumber"])
-    except ValueError:
+    part_number = parse_signed_decimal(params["partNumber"])
+    if part_number is None:
         raise InvalidPart()
+    part_number_text = numeral_text(params["partNumber"])
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
@@ -279,7 +274,7 @@ async def _upload_part(bucket: str, key: str, params: dict, request: Request) ->
         raise NoSuchUpload(extra={"UploadId": upload_id})
 
     if not (1 <= part_number <= 10000):
-        raise InvalidPart(extra={"PartNumber": str(part_number)})
+        raise InvalidPart(extra={"PartNumber": part_number_text})
 
     import io
 

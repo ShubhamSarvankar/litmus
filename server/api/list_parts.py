@@ -10,43 +10,43 @@ from fastapi.responses import Response
 from server.config import settings
 from server.errors.s3errors import InvalidArgument, NoSuchBucket, NoSuchUpload
 from server.metadata.base import PartMeta, PartsPage
+from server.numerals import parse_decimal
 
 # The API reference: "The ListParts request returns a maximum of 1,000 uploaded parts. The
 # limit of 1,000 parts is also the default value."
 MAX_PARTS = 1000
-# A part number is 1 to 10000, so any marker past this many digits is above them all.
-_MAX_DIGITS = 18
-_ABOVE_ALL_PARTS = 10**_MAX_DIGITS
 
 # The query parameters ListParts takes besides uploadId. "x-id" is the SDKs' operation
 # name hint and never selects anything (server/api/request_guard.py).
 QUERY_PARAMETERS = frozenset({"uploadId", "max-parts", "part-number-marker"})
 
 
-def _decimal(params, name: str) -> str | None:
-    """The stripped-of-leading-zeros digits of a decimal integer parameter, None when it is
-    absent. Anything but ASCII digits (a sign, a space, a fraction) is InvalidArgument."""
+def _decimal(params, name: str) -> tuple[int, str] | None:
+    """A decimal integer parameter as (value, its digits without leading zeros), None when
+    it is absent. The value is parse_decimal's, so a long one is SATURATED; the digits are
+    what the response echoes. Anything but ASCII digits (a sign, a space, a fraction) is
+    InvalidArgument."""
     raw = params.get(name)
     if raw is None:
         return None
-    if not raw.isascii() or not raw.isdigit():
+    value = parse_decimal(raw)
+    if value is None:
         raise InvalidArgument(extra={"ArgumentName": name, "ArgumentValue": raw})
-    return raw.lstrip("0") or "0"
+    return value, raw.lstrip("0") or "0"
 
 
 def _max_parts(params) -> int:
     """max-parts as _max_keys reads max-keys: default 1000, larger values capped at 1000,
     0 allowed, anything but a decimal integer InvalidArgument."""
-    digits = _decimal(params, "max-parts")
-    if digits is None or len(digits) > _MAX_DIGITS:
-        return MAX_PARTS
-    return min(int(digits), MAX_PARTS)
+    parsed = _decimal(params, "max-parts")
+    return MAX_PARTS if parsed is None else min(parsed[0], MAX_PARTS)
 
 
-def _part_number_marker(params) -> str:
-    """part-number-marker as decimal digits: absent is 0, anything but a decimal integer is
-    InvalidArgument. A marker above every part number is accepted and lists no parts."""
-    return _decimal(params, "part-number-marker") or "0"
+def _part_number_marker(params) -> tuple[int, str]:
+    """part-number-marker as (value, digits to echo): absent is 0, anything but a decimal
+    integer is InvalidArgument. A marker above every part number is accepted and lists no
+    parts."""
+    return _decimal(params, "part-number-marker") or (0, "0")
 
 
 def _timestamp(part: PartMeta) -> str:
@@ -100,7 +100,7 @@ async def list_parts(bucket: str, key: str, upload_id: str, request: Request) ->
     metadata = request.app.state.metadata
     params = dict(request.query_params)
     max_parts = _max_parts(params)
-    marker = _part_number_marker(params)
+    marker, marker_digits = _part_number_marker(params)
 
     if not metadata.bucket_exists(bucket):
         raise NoSuchBucket(extra={"BucketName": bucket})
@@ -108,13 +108,13 @@ async def list_parts(bucket: str, key: str, upload_id: str, request: Request) ->
         upload_id=upload_id,
         bucket=bucket,
         key=key,
-        part_number_marker=_ABOVE_ALL_PARTS if len(marker) > _MAX_DIGITS else int(marker),
+        part_number_marker=marker,
         max_parts=max_parts,
     )
     if page is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
     return Response(
-        content=_list_parts_xml(bucket, key, upload_id, marker, max_parts, page),
+        content=_list_parts_xml(bucket, key, upload_id, marker_digits, max_parts, page),
         status_code=200,
         media_type="application/xml",
     )

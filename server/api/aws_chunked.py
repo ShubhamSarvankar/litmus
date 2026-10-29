@@ -21,7 +21,6 @@ size line or the trailer line (a few hundred bytes), and hands the decoded bytes
 back at once, so the body is written to the blob as it arrives.
 """
 
-import re
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -35,6 +34,7 @@ from server.errors.s3errors import (
     InvalidRequest,
     MissingContentLength,
 )
+from server.numerals import parse_decimal
 from server.storage.blobs import BlobStore, BlobWriter
 
 STREAMING_UNSIGNED_PAYLOAD_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
@@ -51,7 +51,6 @@ _MAX_TRAILER_LINE = 256
 # one piece and the mid-write crash point lands at a bounded offset (as in write_blob).
 _MAX_WRITE = 65536
 
-_DIGITS = re.compile(r"[0-9]+")
 _HEX = frozenset(b"0123456789abcdefABCDEF")
 
 _CR, _LF = 0x0D, 0x0A
@@ -94,17 +93,19 @@ def preflight(headers: Headers) -> FramedRequest:
     declared = headers.get(DECODED_LENGTH_HEADER)
     if declared is None:
         raise InvalidRequest(extra={"Header": DECODED_LENGTH_HEADER})
-    if not _DIGITS.fullmatch(declared) or int(declared) > MAX_DECODED_LENGTH:
+    decoded_length = parse_decimal(declared)
+    if decoded_length is None or decoded_length > MAX_DECODED_LENGTH:
         raise InvalidRequest(extra={"Header": DECODED_LENGTH_HEADER})
     content_length = headers.get("content-length")
     if content_length is None:
         raise MissingContentLength()
-    if not _DIGITS.fullmatch(content_length):
+    framed_length = parse_decimal(content_length)
+    if framed_length is None:
         raise InvalidRequest(extra={"Header": "Content-Length"})
     algorithm = trailer_algorithm(headers)
     if algorithm is None:
         raise InvalidRequest(extra={"Header": TRAILER_HEADER})
-    return FramedRequest(int(declared), int(content_length), algorithm)
+    return FramedRequest(decoded_length, framed_length, algorithm)
 
 
 def _framing(reason: str) -> InvalidRequest:

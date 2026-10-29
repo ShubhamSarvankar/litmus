@@ -213,6 +213,7 @@ server/
   config.py            settings from environment variables
   consistency.py       startup sweep
   crash_points.py      named crash points for Tier B tests
+  numerals.py          reads every decimal number in a request
   connection.py        closes the connection after an early error to an Expect: 100-continue request
   api/                 routes: buckets.py for buckets; multipart.py for every
                        /{bucket}/{key} request, handing plain object requests to

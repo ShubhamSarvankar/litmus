@@ -739,6 +739,9 @@ P1. Read-only checks, in this order: the destination bucket exists (NoSuchBucket
     the header); the source bucket exists (NoSuchBucket) and the source key has a row
     (NoSuchKey). The `x-amz-copy-source-server-side-encryption-customer-*` headers are
     501 on this operation and on CopyObject, in the guard.
+    Decision 37 supersedes "the part number is an integer (else 400 InvalidPart, as
+    UploadPart)": a part number is ASCII digits with an optional leading minus, and
+    anything else is the same 400 InvalidPart.
 
 P2. Read the source row, decide its `x-amz-copy-source-if-*` conditions against that row
     (412 PreconditionFailed), and open its blob: K2 of §6.10, the same code. The size of
@@ -2483,6 +2486,99 @@ Recorded with the Complete checksums:
       (§21), so a racing Complete, Abort or UploadPart gives either the whole list of the
       state before it or 404 NoSuchUpload, never a mixture. This is a choice; the pages say
       nothing of concurrency.
+    Decision 37 supersedes "UploadPart's partNumber integer check": the check reads ASCII
+    digits with an optional leading minus (see there).
+37. **Every decimal number in a request is read by one parser (`server/numerals.py`).**
+    Python 3.12's `int()` refuses a decimal string of more than 4300 digits with ValueError.
+    `GET /{bucket}?max-keys=`, `x-amz-copy-source-range` and `x-amz-decoded-content-length`
+    reached it with the client's digits and answered 500 InternalError for a value over 4300
+    digits, and other sites gave an oversized value an answer unlike an out of range one.
+    The rule is now one function, `parse_decimal(raw)`: it returns None unless `raw` is one
+    or more ASCII digits 0 to 9 and nothing else (no sign, no whitespace, no underscore, no
+    other Unicode digit); it strips the leading zeros first; a value of more than 18 digits
+    after that is `SATURATED`, 10^18; otherwise it is the value. It never raises. 10^18 is
+    above everything Litmus compares a request number with (5 GiB for a size, 1000 for a
+    key or part count, 10000 for a part number), so a saturated value is out of range
+    wherever a value of its size would be, and no integer is converted that `int()` or
+    SQLite would refuse. `parse_signed_decimal(raw)` takes one leading "-" and gives
+    -`SATURATED` for a long negative. Leading zeros never count toward the 18: 4300 zeros
+    and a 1 is 1. No schema change, no new write path and no new crash point. The AWS
+    documentation does not settle any oversized or malformed value (not found, for each
+    line below); each answer is Litmus's choice, the one that a value of the same kind
+    already had.
+    - *max-keys* (`_max_keys`, all three listings): an oversized value is capped to 1000
+      and answers 200 with `MaxKeys` 1000, as 1001 does. A sign, whitespace, a fraction or a
+      non-ASCII digit is still 400 InvalidArgument.
+    - *max-parts and part-number-marker* (ListParts, decision 36): unchanged. The response
+      echoes the marker's digits without leading zeros, so those are still taken from the
+      request; the value is `parse_decimal`'s. The §21 sentence that a marker of more than
+      18 digits "is passed to the store as 10^18" stays true as written: the rule is the
+      same, and it is now made by `parse_decimal`.
+    - *x-amz-mp-object-size* (decision 26): unchanged. A value of more than 18 significant
+      digits is `SATURATED`, a mismatch (400 InvalidRequest), not an error.
+    - *Complete PartNumber*: the syntax is what it was, an optional "-" and ASCII digits,
+      else 400 MalformedXML (so "+1" is still MalformedXML), and the error codes are
+      unchanged. The only change is that leading zeros are stripped before the length is
+      judged: 4300 zeros and a 1 is part 1, where it used to be a part number of more than
+      18 digits and InvalidPart. A part number of more than 18 significant digits is
+      InvalidPart. The `PartNumber` element of that InvalidPart carries the number's digits
+      as sent, without leading zeros and with a leading "-" kept (for 18 digits or fewer it is
+      the value, as before; a choice, as the pages name no detail). The order check (strictly
+      ascending, else InvalidPartOrder) compares the true signed values, not the saturated
+      ones, so two distinct oversized numbers are ordered as 10001 and 10002 are, and equal
+      values (written with or without zeros) are a repeat. No numeral over 18 digits goes
+      through `int()`: the parser keeps the canonical digit string (`numeral_text`) beside
+      the saturated value and the check orders by `numeral_key` (sign, then length, then the
+      digits, reversed for a negative), an exact comparison of strings.
+    - *UploadPart and UploadPartCopy partNumber*: ASCII digits give their value; a value
+      outside 1 to 10000, an oversized one included, is 400 InvalidPart with a `PartNumber`
+      element, as 10001 is, in the same place in the order of the checks (for an oversized
+      value the element carries the digits sent, without leading zeros and with a leading
+      "-" kept, as for Complete; a choice). "-" and ASCII digits is the answer -1 has, 400 InvalidPart with
+      `PartNumber` "-1" (or the negative of the value). Anything else is the answer "abc"
+      has: 400 InvalidPart with no `PartNumber`. That is a plus sign, whitespace, an
+      underscore, a non-ASCII digit, a fraction and an empty value. Python's `int()` used to
+      accept "+1", " 1", "1_0" and an Arabic-Indic digit as part numbers; they are now
+      refused. "Integer" in the sentences listed under *Superseded* below now means ASCII digits
+      with an optional leading minus.
+      The place of that check is unchanged and is not made uniform here: UploadPart reads
+      the number before NoSuchBucket, and UploadPartCopy after its destination NoSuchBucket
+      and before NoSuchUpload (a separate fix).
+      The S3 API reference pages "UploadPart" and "UploadPartCopy" give the part number
+      range as 1 to 10,000; they name no answer for an oversized or malformed value (not
+      found), so each answer here is a choice.
+    - *x-amz-copy-source-range* (§11): numerals are read by value. A first or last byte
+      past the source, an oversized one included, is the 416 InvalidRange that `bytes=0-100`
+      gets on a smaller source. A first byte greater than the last is the 400
+      InvalidArgument that `bytes=5-2` gets. When both saturate they are ordered by their
+      digits, so `bytes=<4301 nines>-<4300 nines>` is still reversed. A numeral with long
+      leading zeros is read by value. This supersedes nothing in §11: the syntax and the
+      two answers are as recorded, and a value over 4300 digits used to be 500.
+    - *x-amz-decoded-content-length* and *Content-Length* of an aws-chunked request
+      (`preflight`): an oversized decoded length is the 400 InvalidRequest (`Header`
+      `x-amz-decoded-content-length`) that 5 GiB plus 1 gets. Content-Length is read by
+      `parse_decimal`, so a Content-Length with long leading zeros is its value and every
+      answer for a header the old code accepted is unchanged. The HTTP parser comes first:
+      under uvicorn's httptools a Content-Length padded with 4990 zeros reaches Litmus and
+      is its value; under h11 the parser itself refuses it before Litmus sees the request
+      (its own plain text 400 "Invalid HTTP request received." and a closed connection).
+    - *Range on GET and HEAD* is not changed. It keeps its recorded rule (docs/compatibility.md,
+      "Range"): a numeral of more than 4000 digits makes the specifier invalid and the header
+      is ignored. That rule already keeps oversized numerals away from `int()` and ignores
+      them by design, so nothing is parsed with `parse_decimal` there.
+    - *Superseded.* This decision supersedes these sentences, which stay where they are
+      and point here: §6.6 P1, "the part number is an integer (else 400 InvalidPart, as
+      UploadPart)"; decision 34, "UploadPart's partNumber integer check"; docs/compatibility.md,
+      UploadPartCopy "Error order", "the part number if it is not an integer
+      (InvalidPart)"; docs/compatibility.md, "An upload belongs to one bucket and key",
+      "UploadPart, the part number if it is not an integer (InvalidPart)"; and
+      docs/compatibility.md, Complete, "A number of any length is accepted as text and is
+      out of range" (a number with long leading zeros is its value). Not superseded, and
+      now true as written: docs/compatibility.md, ListObjects, "any number of digits is
+      accepted and capped at 1000", and the AWS-chunked entry "or one above 5 GiB".
+    - *Not changed:* `int(s, 16)` for the chunk size lines of aws-chunked is hexadecimal
+      and bounded by `_MAX_SIZE_DIGITS`; `S3_MIN_PART_SIZE` is read from the environment,
+      not from a request.
 
 
 ### §20. Checksums and schema version 3

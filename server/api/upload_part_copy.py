@@ -46,6 +46,7 @@ from server.errors.s3errors import (
     PreconditionFailed,
 )
 from server.metadata.base import PartMeta, UploadNotOpen
+from server.numerals import SATURATED, numeral_text, parse_decimal, parse_signed_decimal
 from server.storage.lifecycle import collect_garbage, discard_new_blob
 
 logger = logging.getLogger(__name__)
@@ -66,9 +67,21 @@ def parse_copy_source_range(headers) -> tuple[int, int] | None:
     if not values:
         return None
     match = _RANGE.fullmatch(values[0]) if len(values) == 1 else None
-    if match is None or int(match[1]) > int(match[2]):
+    if match is None:
         raise InvalidArgument(extra={"ArgumentName": COPY_SOURCE_RANGE_HEADER})
-    return int(match[1]), int(match[2])
+    first, last = parse_decimal(match[1]), parse_decimal(match[2])
+    if _is_reversed(match[1], match[2], first, last):
+        raise InvalidArgument(extra={"ArgumentName": COPY_SOURCE_RANGE_HEADER})
+    return first, last
+
+
+def _is_reversed(first_digits: str, last_digits: str, first: int, last: int) -> bool:
+    """Whether first is greater than last. Two values that both saturate are ordered by
+    their digits, so a reversed range of very long numerals is still reversed."""
+    if first == last == SATURATED:
+        a, b = first_digits.lstrip("0"), last_digits.lstrip("0")
+        return (len(a), a) > (len(b), b)
+    return first > last
 
 
 def _result_xml(part: PartMeta, named: bool) -> str:
@@ -89,15 +102,15 @@ async def upload_part_copy(bucket: str, key: str, params: dict, request: Request
 
     # The checks of UploadPart, in its order.
     upload_id = params["uploadId"]
-    try:
-        part_number = int(params["partNumber"])
-    except ValueError:
-        raise InvalidPart() from None
+    part_number = parse_signed_decimal(params["partNumber"])
+    if part_number is None:
+        raise InvalidPart()
+    part_number_text = numeral_text(params["partNumber"])
     upload = metadata.get_open_upload(upload_id, bucket=bucket, key=key)
     if upload is None:
         raise NoSuchUpload(extra={"UploadId": upload_id})
     if not (1 <= part_number <= 10000):
-        raise InvalidPart(extra={"PartNumber": str(part_number)})
+        raise InvalidPart(extra={"PartNumber": part_number_text})
 
     named = upload.checksum_algorithm is not None
     effective = Algorithm.by_name(upload.checksum_algorithm) if named else CRC64NVME

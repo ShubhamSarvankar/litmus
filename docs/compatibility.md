@@ -136,6 +136,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | Upload bucket and key | 330 | 508 | 195 | UploadPart, UploadPartCopy, CompleteMultipartUpload and AbortMultipartUpload check that the upload belongs to the request's bucket and key (decision 34; see "An upload belongs to one bucket and key" under Known gaps): a missing bucket is 404 NoSuchBucket, another bucket or key is 404 NoSuchUpload. Complete through a missing bucket, which was 500 InternalError, is now NoSuchBucket (fixed). No outcome changed, as forecast: the failing multipart tests fail for other reasons (the re-complete NoSuchUpload, InvalidPartOrder for a repeated part, `PartsCount`, 501 for versioning and ListMultipartUploads), and the passing ones use the upload's own bucket and key. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the check. |
 | Retried Complete decided (decision 35) | 330 | 508 | 195 | A Complete on a completed upload is 404 NoSuchUpload by decision 35, no longer a gap: j3 is closed as conformant and its strict xfail is an ordinary test. `test_multipart_upload` and `test_multipart_upload_small`, which send an extra Complete, move from that gap to the ceph tests that fail on purpose (checked once in a scratch copy with the extra Complete removed: both pass, not counted). No outcome changed, as forecast: no production code changed, so the results file is not regenerated and the figures stay 195 passed, 128 failed, 7 skipped. Recorded at the commit that makes the decision. |
 | ListParts (decision 36) | 330 | 508 | 195 | `GET /{bucket}/{key}?uploadId=` lists the parts of an open upload (see "ListParts" under Known gaps), so it is no longer 501; it refuses the three SSE-C headers with 501, as UploadPart does. No outcome changed, as forecast: the only selected tests that reach `list_parts` are the six object ownership tests that call the helper `get_multipart_acl_owner`, and each fails earlier on an operation that is still 501 or refused (details under "ListParts"). The results file is identical to the previous one (`git diff -U0` is empty; the denominator stays 330, and 24 incidental, 15 borderline and 156 genuine stay). The category table is unchanged. Recorded at the commit that adds the operation. |
+| Decimal numbers decided (decision 37) | 330 | 508 | 195 | Every decimal number in a request is read by `parse_decimal` (see "Decimal numbers in a request"): a value over 4300 digits in `max-keys`, `x-amz-copy-source-range` or `x-amz-decoded-content-length` is no longer a 500, and an oversized value is answered as an out of range one. No outcome changed, as forecast: the selected tests that send an unusual value to these sites are `test_bucket_list_maxkeys_invalid` (`blah`, still 400 InvalidArgument), `test_multipart_copy_invalid_range` (`bytes=0-21` on 5 bytes, still 416 InvalidRange) and `test_multipart_copy_improper_range` (six malformed ranges, still 400 InvalidArgument); none sends a long numeral, a sign or padding. The Range tests are unaffected, as Range keeps its rule. 195 passed, 128 failed, 7 skipped of 330, unchanged. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -1273,6 +1274,9 @@ no error for a bad range, no order of errors and no ETag rule, so the points mar
   range syntax (400 InvalidArgument), the source bucket (NoSuchBucket), the source key
   (NoSuchKey), the source conditions (412), the range against the size (416), then the
   copy and the commit. The part number checks are UploadPart's, in its order.
+  Decision 37 supersedes "the part number if it is not an integer (InvalidPart)" here: the
+  number is read as ASCII digits with an optional leading minus, and anything else is
+  InvalidPart in the same place (see "Decimal numbers in a request").
 - *Part size.* The user guide gives parts of 5 MiB to 5 GiB and no minimum for the last
   part. Neither bound is checked when a part is uploaded, as for UploadPart, so a copied
   part of 1 byte is accepted whatever its number; Complete refuses it with EntityTooSmall
@@ -1677,6 +1681,8 @@ is 403, as for every operation that takes the header. A request through a bucket
 deleted is NoSuchBucket, not NoSuchUpload; the deleted bucket's uploads are still gone
 (decision 7). Complete through a missing bucket used to be 500 InternalError (the object
 row violated the bucket foreign key) and is now NoSuchBucket.
+Decision 37 supersedes "the part number if it is not an integer (InvalidPart)" in that
+order: see "Decimal numbers in a request".
 
 **Two ceph tests send a second Complete (decision 35).** `test_multipart_upload` and
 `test_multipart_upload_small` complete an upload and then send the same Complete again
@@ -1748,6 +1754,9 @@ These are Litmus's choices where the S3 documentation does not fix the answer:
 - A `PartNumber` outside 1 to 10000 is InvalidPart, not MalformedXML or InvalidArgument:
   the number is an integer, and no such part exists. A number of any length is accepted
   as text and is out of range.
+  Decision 37 supersedes "A number of any length is accepted as text and is out of range":
+  leading zeros are stripped before the length is judged, so 4300 zeros and a 1 is part 1
+  (see "Decimal numbers in a request").
 - The order of the errors, with EntityTooSmall after InvalidPart and before the
   `x-amz-mp-object-size` mismatch, is Litmus's. Neither "CompleteMultipartUpload" nor
   "Error" says where EntityTooSmall comes among the other errors: not found.
@@ -2085,6 +2094,55 @@ that documents them, and the tests in ceph/s3-tests expect it.
 - An upload created before Litmus stored these headers has the default columns: completing
   it gives an object with `binary/octet-stream` and no other header or metadata, dated by
   its initiation time. No migration is needed.
+
+**Decimal numbers in a request (decision 37).** Every decimal number taken from a request
+is read by one parser, `parse_decimal` in `server/numerals.py`: one or more ASCII digits
+0 to 9 and nothing else (no sign, whitespace, underscore or other Unicode digit); leading
+zeros are stripped first; a value of more than 18 digits after that is 10^18, which is above
+every size, count and part number Litmus compares a request value with; it never raises.
+Python 3.12's `int()` refuses more than 4300 digits, which made `max-keys`,
+`x-amz-copy-source-range` and `x-amz-decoded-content-length` answer 500 for such a value.
+The S3 documentation names no answer for an oversized or malformed number (not found, for
+each line below), so each answer is Litmus's choice: an oversized value gets the answer of an
+out of range value of its field.
+
+- *`max-keys`.* An oversized value is capped to 1000 and answers 200, as 1001 does.
+- *`max-parts` and `part-number-marker` (ListParts).* Unchanged: an oversized `max-parts` is
+  the cap, an oversized marker lists no parts, and the response echoes the marker's digits
+  without leading zeros.
+- *`x-amz-mp-object-size`.* Unchanged: an oversized value is a mismatch, 400 InvalidRequest.
+- *Complete `PartNumber`.* The syntax is unchanged (an optional `-` and ASCII digits, else
+  400 MalformedXML, so `+1` is still MalformedXML). Leading zeros are stripped before the
+  length is judged, so 4300 zeros and a 1 is part 1. A number of more than 18 significant
+  digits is InvalidPart, and its `PartNumber` element carries the digits as sent, without
+  leading zeros and with a leading `-` kept. The order check compares the true signed
+  values, not the saturated ones: two distinct oversized numbers get the answers 10001 and
+  10002 get in either order, and equal values get the answer a repeated part gets.
+- *`partNumber` of UploadPart and UploadPartCopy.* ASCII digits give their value; a value
+  outside 1 to 10000, an oversized one included, is 400 InvalidPart with a `PartNumber`
+  element, as 10001 is, in the same place in the order of the checks (for an oversized
+  value the element carries the digits sent, without leading zeros and with a leading `-`
+  kept). `-` and ASCII digits is
+  the answer `-1` has (InvalidPart, `PartNumber` `-1`). Anything else, a plus sign,
+  whitespace, an underscore, a non-ASCII digit, a fraction or an empty value, is the answer
+  `abc` has: 400 InvalidPart with no `PartNumber`. `+1`, ` 1`, `1_0` and an Arabic-Indic
+  digit used to be accepted, because Python's `int()` reads them. The documented range is
+  1 to 10,000 (S3 API reference, "UploadPart" and "UploadPartCopy"). The place of the
+  non-numeric check is unchanged: before NoSuchBucket on UploadPart, after it on
+  UploadPartCopy (making them agree is a separate fix).
+- *`x-amz-copy-source-range`.* Numerals are read by value. A first or last byte past the
+  source, an oversized one included, is the 416 InvalidRange of `bytes=0-100` on a smaller
+  source. A first byte above the last is the 400 InvalidArgument of `bytes=5-2`; two numerals
+  that are both oversized are ordered by their digits. Leading zeros are read by value.
+- *`x-amz-decoded-content-length`.* An oversized value is the 400 InvalidRequest of 5 GiB
+  plus 1. Leading zeros are read by value.
+- *`Content-Length` of an aws-chunked request.* Read by `parse_decimal`; every header the
+  old code accepted gets the same answer, and one with long leading zeros is its value. The
+  HTTP server comes first: under httptools such a header reaches Litmus; under h11 the parser
+  refuses it before Litmus sees it (its own plain text 400, "Invalid HTTP request received.").
+- *`Range` on GET and HEAD.* Unchanged, and not read with `parse_decimal`: a numeral of more
+  than 4000 digits still makes the specifier invalid and the header is ignored (see "Range"
+  above), which already keeps it away from `int()` by design.
 
 **Multipart details.** `partNumber` on GET is ignored (with `x-amz-checksum-mode` it returns the whole object and its whole object checksum).
 

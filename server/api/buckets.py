@@ -31,6 +31,7 @@ from server.errors.s3errors import (
     S3Error,
 )
 from server.metadata.base import BucketHasObjects, BucketMissing, ListPage
+from server.numerals import parse_decimal
 from server.storage.lifecycle import collect_garbage
 
 router = APIRouter()
@@ -138,9 +139,10 @@ def _max_keys(params) -> int:
     raw = params.get("max-keys")
     if raw is None:
         return MAX_KEYS
-    if not raw.isascii() or not raw.isdigit():
+    value = parse_decimal(raw)
+    if value is None:
         raise InvalidArgument(extra={"ArgumentName": "max-keys", "ArgumentValue": raw})
-    return min(int(raw), MAX_KEYS)
+    return min(value, MAX_KEYS)
 
 
 def _list_objects_v2_xml(

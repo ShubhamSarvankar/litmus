@@ -31,6 +31,7 @@ from server.multipart.checksums import (
     verify_part_elements,
 )
 from server.multipart.etag import composite_etag
+from server.numerals import numeral_key
 from server.storage.blobs import MissingPartBlob
 from server.storage.lifecycle import collect_garbage, discard_new_blob
 
@@ -102,9 +103,10 @@ def complete_multipart_upload(
     """
     previous = None
     for req in requested_parts:
-        if previous is not None and req["PartNumber"] <= previous:
+        order = numeral_key(req.get("PartNumberText") or str(req["PartNumber"]))
+        if previous is not None and order <= previous:
             raise InvalidPartOrder()
-        previous = req["PartNumber"]
+        previous = order
 
     recorded = {p.part_number: p for p in metadata.get_parts(upload_id)}
 
@@ -117,7 +119,7 @@ def complete_multipart_upload(
             or recorded_part.blob_id is None
             or _normalize_etag(recorded_part.etag) != _normalize_etag(req["ETag"])
         ):
-            raise InvalidPart(extra={"PartNumber": str(num)})
+            raise InvalidPart(extra={"PartNumber": req.get("PartNumberText") or str(num)})
 
     # S3 API reference, "CompletedPart": with part checksums the numbers start at 1 and
     # are consecutive, else 400 InvalidPartOrder. Only COMPOSITE uploads need it.
