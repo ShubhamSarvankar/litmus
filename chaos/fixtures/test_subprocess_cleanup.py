@@ -108,12 +108,13 @@ def test_servers_of_failing_tests_are_stopped(tmp_path: Path):
     probe = tmp_path / "test_probe.py"
     probe.write_text(textwrap.dedent(PROBE))
     pids_file = tmp_path / "pids"
+    basetemp = tmp_path / "basetemp"  # not numbered: no exit cleanup of other sessions' dirs
     env = {**os.environ, "PROBE_PIDS": str(pids_file)}
     pids: list[int] = []
     try:
         run = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "chaos.conftest"]
-            + [str(probe)],
+            + [f"--basetemp={basetemp}", str(probe)],
             cwd=REPO,
             env=env,
             capture_output=True,
