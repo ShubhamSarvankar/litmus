@@ -30,6 +30,7 @@ from server.api.aws_chunked import (
     trailer_is_supported,
 )
 from server.api.copy_source import COPY_SOURCE_HEADER, parse_copy_source
+from server.api.list_parts import QUERY_PARAMETERS as LIST_PARTS_QUERY
 from server.checksums import UNCOMPUTED_NAMES, unsupported_value_header
 from server.config import settings
 from server.errors.s3errors import (
@@ -89,7 +90,7 @@ OBJECT_SUBRESOURCES = frozenset(
         "select",  # SelectObjectContent (POST, with select-type)
         "tagging",  # Get/Put/DeleteObjectTagging
         "torrent",  # GetObjectTorrent
-        "uploadId",  # UploadPart / Complete / Abort (implemented), ListParts (GET, not)
+        "uploadId",  # UploadPart / Complete / Abort / ListParts (all implemented)
         "uploads",  # CreateMultipartUpload (POST, implemented)
     }
 )
@@ -104,6 +105,7 @@ _IMPLEMENTED_OBJECT = frozenset(
         ("PUT", "uploadId"),
         ("POST", "uploadId"),
         ("DELETE", "uploadId"),
+        ("GET", "uploadId"),
         ("POST", "uploads"),
         ("GET", "tagging"),
     }
@@ -193,9 +195,9 @@ _UPLOAD_PART_QUERY = frozenset({"partNumber", "uploadId"})
 # the S3 API reference's: PutObject, CreateMultipartUpload and CopyObject define the same
 # SSE, website redirect, storage class and Object Lock headers (the PutObject page lists
 # six Object Lock headers, three of them the event hold ones); UploadPart and
-# UploadPartCopy define the SSE-C headers for the destination only. The CopyObject and
-# UploadPartCopy source side (x-amz-copy-source-server-side-encryption-customer-*) is
-# refused above. The checksum headers are not decided here. The ACL and grant headers are
+# UploadPartCopy define the SSE-C headers for the destination only, and ListParts defines
+# them too. The CopyObject and UploadPartCopy source side
+# (x-amz-copy-source-server-side-encryption-customer-*) is refused above. The checksum headers are not decided here. The ACL and grant headers are
 # answered by the handlers (server/api/acl_headers.py), after the bucket lookup; on these
 # operations x-amz-object-ownership is not defined and is ignored.
 _NEW_OBJECT_FEATURE_HEADERS = (
@@ -341,12 +343,16 @@ def _check_object_feature_headers(method: str, query_keys: set[str], headers) ->
     """Refuse the encryption, website redirect, storage class and Object Lock headers on
     the operations that define them. query_keys has "x-id" removed. PutObject and
     CopyObject are a PUT with no query (CopyObject has x-amz-copy-source), and
-    CreateMultipartUpload is a POST ?uploads; those take every header. UploadPart and
-    UploadPartCopy take only the SSE-C headers. Anything else is not decided here."""
+    CreateMultipartUpload is a POST ?uploads; those take every header. UploadPart,
+    UploadPartCopy and ListParts (a GET with uploadId and no query parameter but max-parts and
+    part-number-marker) take only the SSE-C headers. Anything else is not decided here."""
     if (method == "PUT" and not query_keys) or (method == "POST" and query_keys == {"uploads"}):
         _refuse_present(headers, _NEW_OBJECT_FEATURE_HEADERS)
         _refuse_value(headers, _STORAGE_CLASS_HEADER, lambda v: v == _ACCEPTED_STORAGE_CLASS)
-    elif not (method == "PUT" and query_keys == _UPLOAD_PART_QUERY):
+    elif not (
+        (method == "PUT" and query_keys == _UPLOAD_PART_QUERY)
+        or (method == "GET" and "uploadId" in query_keys and query_keys <= LIST_PARTS_QUERY)
+    ):
         return
     _refuse_present(headers, _SSE_C_HEADERS)
 
@@ -493,6 +499,19 @@ def _check(method: str, path: str, query, headers) -> None:
     ):
         raise NotImplementedOperation(
             extra={"Method": method, "QueryParameters": ",".join(sorted(query_keys))}
+        )
+
+    # ListParts takes uploadId, max-parts and part-number-marker and nothing else: versionId
+    # (already accepted above for the operations that take it), partNumber, response-* and
+    # the like belong to other operations, so they are refused rather than ignored.
+    if (
+        key
+        and method == "GET"
+        and "uploadId" in query_keys
+        and not (set(query.keys()) - _IGNORED) <= LIST_PARTS_QUERY
+    ):
+        raise NotImplementedOperation(
+            extra={"Method": method, "QueryParameters": ",".join(sorted(set(query.keys())))}
         )
 
     if method in allowed and (query_keys - _IGNORED) not in allowed[method]:

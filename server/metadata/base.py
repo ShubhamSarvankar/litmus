@@ -97,6 +97,16 @@ class UploadMeta:
 
 
 @dataclass
+class PartsPage:
+    """One page of an open upload's parts, read together with the upload row."""
+
+    upload: UploadMeta
+    # Parts after the marker, in part number order, at most the page size.
+    parts: list[PartMeta] = field(default_factory=list)
+    is_truncated: bool = False
+
+
+@dataclass
 class BlobRecord:
     """One row of the blob registry (docs/design/storage-layout.md §3, §5)."""
 
@@ -281,6 +291,21 @@ class MetadataStore(Protocol):
     # the upload was not created for part's bucket and key.
 
     def get_parts(self, upload_id: str) -> list[PartMeta]: ...
+
+    def list_parts_page(
+        self,
+        *,
+        upload_id: str,
+        bucket: str,
+        key: str,
+        part_number_marker: int,
+        max_parts: int,
+    ) -> PartsPage | None: ...
+
+    # The open upload of that bucket and key (decision 34) and one page of its parts, in
+    # one read transaction: the parts numbered above part_number_marker, in ascending
+    # order, at most max_parts of them, with is_truncated set when more remain. None
+    # unless the upload is open. max_parts 0 gives an empty page that is not truncated.
 
     def commit_completed_upload(
         self,

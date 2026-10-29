@@ -3,7 +3,7 @@
 S3 User Guide, "Verifying bucket ownership with bucket owner condition": a request that
 names the wrong bucket owner fails with AccessDenied (403), and CreateBucket and
 ListBuckets ignore the parameter. The API reference gives x-amz-expected-bucket-owner to
-17 operations, and x-amz-source-expected-bucket-owner to CopyObject and UploadPartCopy.
+18 operations, and x-amz-source-expected-bucket-owner to CopyObject and UploadPartCopy.
 
 Litmus compares the stripped value to S3_OWNER_ID in the request guard, after every 501
 refusal and before routing, so before the body is read and before any existence check.
@@ -116,7 +116,7 @@ def _complete_body(e: Env) -> bytes:
     )
 
 
-# The 17 operations, each as a request that succeeds in a fresh Env.
+# The 18 operations, each as a request that succeeds in a fresh Env.
 OPERATIONS = {
     "HeadBucket": lambda e, h: e.client.head(f"/{BUCKET}", headers=h),
     "DeleteBucket": lambda e, h: e.client.delete(f"/{EMPTY_BUCKET}", headers=h),
@@ -139,6 +139,7 @@ OPERATIONS = {
         f"/{BUCKET}/mp?partNumber=2&uploadId={e.upload_id}",
         headers={"x-amz-copy-source": f"{SRC_BUCKET}/s.bin", **h},
     ),
+    "ListParts": lambda e, h: e.client.get(f"/{BUCKET}/mp?uploadId={e.upload_id}", headers=h),
     "CompleteMultipartUpload": lambda e, h: e.client.post(
         f"/{BUCKET}/mp?uploadId={e.upload_id}", content=_complete_body(e), headers=h
     ),
@@ -183,7 +184,7 @@ def pair(tmp_path) -> tuple[Env, Env]:
     return _new_env(tmp_path / "a"), _new_env(tmp_path / "b")
 
 
-# --- the 17 operations ---
+# --- the 18 operations ---
 
 
 @pytest.mark.parametrize("value", [OWNER, f"  {OWNER}  "])
@@ -431,7 +432,6 @@ def test_wrong_owner_beats_no_such_key_and_no_such_upload(env):
         ("DELETE", f"/{BUCKET}/{KEY}?tagging"),
         ("GET", f"/{BUCKET}/{KEY}?attributes"),
         ("GET", f"/{BUCKET}/{KEY}?versionId=other"),
-        ("GET", f"/{BUCKET}/{KEY}?uploadId=u"),
         ("PUT", f"/{BUCKET}/{KEY}?partNumber=1"),
     ],
 )
@@ -540,7 +540,7 @@ KNOWN_ROUTES = {
         {"GET", "HEAD", "PUT", "DELETE", "POST"},
         "GetObject, GetObjectTagging, HeadObject, PutObject, CopyObject, UploadPart, "
         "UploadPartCopy, DeleteObject, AbortMultipartUpload, CreateMultipartUpload, "
-        "CompleteMultipartUpload",
+        "CompleteMultipartUpload, ListParts",
     ),
 }
 
@@ -559,8 +559,8 @@ def test_every_registered_route_is_a_known_operation(env):
     assert not unknown, f"routes with no decision about x-amz-expected-bucket-owner: {unknown}"
 
 
-def test_the_guard_covers_exactly_the_17_operations(env):
-    """The 17 requests above are the whole set the guard checks: every other request that
+def test_the_guard_covers_exactly_the_18_operations(env):
+    """The 18 requests above are the whole set the guard checks: every other request that
     the routes above can carry is CreateBucket or ListBuckets."""
     takes = request_guard._takes_owner_condition
     assert not takes("PUT", "", set())  # CreateBucket
@@ -576,6 +576,7 @@ def test_the_guard_covers_exactly_the_17_operations(env):
     assert takes("DELETE", "k", set())
     assert takes("DELETE", "k", {"uploadId"})
     assert takes("GET", "k", {"tagging"})
+    assert takes("GET", "k", {"uploadId"})
     assert takes("HEAD", "", set())
 
 

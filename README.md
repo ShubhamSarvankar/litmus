@@ -47,6 +47,7 @@ parameters as follows.
 | PUT | `/{bucket}/{key}` | PutObject, with `If-Match` and `If-None-Match`; a non-empty `x-amz-tagging` is 501, since Litmus stores no tags, and so are server-side encryption, `x-amz-website-redirect-location`, Object Lock and a `x-amz-storage-class` other than `STANDARD`. With `x-amz-copy-source` and no query: CopyObject, with the `x-amz-copy-source-if-*` source conditions, `x-amz-metadata-directive`, `x-amz-checksum-algorithm` (the five computed algorithms; the other five AWS names are 501) and the destination's `If-Match` and `If-None-Match`. With `partNumber` and `uploadId`: UploadPart; with `x-amz-copy-source` as well: UploadPartCopy, with `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` source conditions. |
 | GET | `/{bucket}/{key}` | GetObject, with `Range`, `If-Match` and `versionId=null` |
 | GET | `/{bucket}/{key}?tagging` | GetObjectTagging, answered with an empty `TagSet`: Litmus stores no tags, so that is always true. This is not tagging support. `versionId=null` is accepted; any other query parameter is 501. |
+| GET | `/{bucket}/{key}?uploadId` | ListParts: the parts above `part-number-marker` (default 0), at most `max-parts` (default and cap 1000) of them, in part number order, with `IsTruncated` and `NextPartNumberMarker` for paging; the checksum of each part, and the upload's `ChecksumAlgorithm` and `ChecksumType` when it named an algorithm. A bad `max-parts` or `part-number-marker` is 400 InvalidArgument; a completed, aborted, unknown or other bucket's or key's upload is 404 NoSuchUpload. Any other query parameter is 501. |
 | HEAD | `/{bucket}/{key}` | HeadObject |
 | DELETE | `/{bucket}/{key}` | DeleteObject, with `If-Match`. With `uploadId`: AbortMultipartUpload. |
 | POST | `/{bucket}/{key}?uploads` | CreateMultipartUpload; `x-amz-checksum-algorithm` (CRC32, CRC32C, CRC64NVME, SHA1, SHA256) and `x-amz-checksum-type` are stored with the upload and echoed (SHA512, MD5 and the XXHash algorithms are 501; a disallowed pair is 400 InvalidRequest); a non-empty `x-amz-tagging` is 501, as are the encryption, redirect, Object Lock and storage class headers PutObject refuses. |
@@ -55,10 +56,10 @@ parameters as follows.
 
 The table lists POST `/{bucket}/{key}` twice because one route serves both multipart
 operations. Requests for S3 operations that are not implemented (ACLs, versioning
-configuration, tagging (other than GetObjectTagging), ListParts, ListMultipartUploads, POST Object and others)
+configuration, tagging (other than GetObjectTagging), ListMultipartUploads, POST Object and others)
 get 501 NotImplemented before reaching a handler, and change nothing. So do requests whose
 headers ask for a feature Litmus does not have: server-side encryption, SSE-C (also on
-UploadPart and UploadPartCopy), website redirects, Object Lock, a storage class other than
+UploadPart and UploadPartCopy, and on ListParts), website redirects, Object Lock, a storage class other than
 `STANDARD`, and on CreateBucket Object Lock, an account regional namespace or an Object
 Ownership setting other than `BucketOwnerEnforced`; the headers are refused before the
 body is read, not ignored. ACLs are disabled, as on a bucket with Object Ownership set
@@ -217,7 +218,7 @@ server/
                        /{bucket}/{key} request, handing plain object requests to
                        the handlers in objects.py; copy_object.py and copy_source.py
                        are CopyObject and its x-amz-copy-source; upload_part_copy.py
-                       is UploadPartCopy; request_guard.py
+                       is UploadPartCopy; list_parts.py is ListParts; request_guard.py
                        answers 501; aws_chunked.py decodes aws-chunked bodies
                        checksum_headers.py names the checksum response headers and parses
                        the algorithm and type of CreateMultipartUpload and CopyObject's algorithm

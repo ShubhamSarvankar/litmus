@@ -16,6 +16,7 @@ from server.metadata.base import (
     ObjectMeta,
     PartMeta,
     PartsChanged,
+    PartsPage,
     StoreRecord,
     UploadMeta,
     UploadNotOpen,
@@ -273,6 +274,22 @@ def _upload(row: sqlite3.Row) -> UploadMeta:
         user_metadata=json.loads(row["user_metadata"]),
         checksum_algorithm=row["checksum_algorithm"],
         checksum_type=row["checksum_type"],
+    )
+
+
+def _part(row: sqlite3.Row) -> PartMeta:
+    """A part from a row that also carries its upload's bucket and key."""
+    return PartMeta(
+        upload_id=row["upload_id"],
+        part_number=row["part_number"],
+        etag=row["etag"],
+        size=row["size"],
+        blob_id=row["blob_id"],
+        checksum=row["checksum"],
+        checksum_algorithm=row["checksum_algorithm"],
+        last_modified=_str_to_dt(row["last_modified"]) if row["last_modified"] else None,
+        bucket=row["bucket"],
+        key=row["key"],
     )
 
 
@@ -893,21 +910,42 @@ class SQLiteMetadataStore:
                WHERE p.upload_id = ? ORDER BY p.part_number""",
             (upload_id,),
         )
-        return [
-            PartMeta(
-                upload_id=r["upload_id"],
-                part_number=r["part_number"],
-                etag=r["etag"],
-                size=r["size"],
-                blob_id=r["blob_id"],
-                checksum=r["checksum"],
-                checksum_algorithm=r["checksum_algorithm"],
-                last_modified=_str_to_dt(r["last_modified"]) if r["last_modified"] else None,
-                bucket=r["bucket"],
-                key=r["key"],
-            )
-            for r in rows
-        ]
+        return [_part(r) for r in rows]
+
+    def list_parts_page(
+        self,
+        *,
+        upload_id: str,
+        bucket: str,
+        key: str,
+        part_number_marker: int,
+        max_parts: int,
+    ) -> PartsPage | None:
+        """The open upload of that bucket and key and one page of its parts (the
+        ListParts read, docs/design/storage-layout.md §21), in one read transaction, so
+        the upload and its parts are one committed state."""
+        scope, args = _scope(bucket, key)
+        with self._snapshot() as conn:
+            row = conn.execute(
+                f"SELECT * FROM multipart_uploads WHERE upload_id = ?{scope} AND state = 'open'",
+                (upload_id, *args),
+            ).fetchone()
+            if row is None:
+                return None
+            page = PartsPage(upload=_upload(row))
+            if max_parts <= 0:
+                return page
+            # One row more than the page, to tell whether it is truncated.
+            rows = conn.execute(
+                """SELECT p.*, u.bucket AS bucket, u.key AS key
+                   FROM multipart_parts p JOIN multipart_uploads u ON u.upload_id = p.upload_id
+                   WHERE p.upload_id = ? AND p.part_number > ?
+                   ORDER BY p.part_number LIMIT ?""",
+                (upload_id, part_number_marker, max_parts + 1),
+            ).fetchall()
+            page.is_truncated = len(rows) > max_parts
+            page.parts = [_part(r) for r in rows[:max_parts]]
+            return page
 
     def commit_completed_upload(
         self,

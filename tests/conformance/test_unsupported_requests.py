@@ -23,6 +23,7 @@ IMPLEMENTED_BUCKET = {("GET", "versions"), ("POST", "delete")}
 IMPLEMENTED_OBJECT = {
     ("POST", "uploadId"),
     ("DELETE", "uploadId"),
+    ("GET", "uploadId"),
     ("POST", "uploads"),
     ("GET", "tagging"),
 }

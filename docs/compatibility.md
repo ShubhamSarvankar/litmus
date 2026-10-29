@@ -135,6 +135,7 @@ the first, which rests on the reproduction recorded in commit `3e74a07`.
 | CopyObject checksums | 330 | 508 | 195 | CopyObject hashes the bytes it copies and stores the checksum, algorithm and type FULL_OBJECT with the destination row, in the algorithm `x-amz-checksum-algorithm` names, else the source's, else CRC64NVME, and returns `ChecksumType` and `Checksum<algorithm>` in `CopyObjectResult` (see "Checksums", decision 33). SHA512, MD5 and the XXHash names are 501; an unknown name is 400 InvalidArgument. No outcome changed, as forecast: the 10 selected tests that copy with CopyObject or `client.copy` and read the copy back (`test_object_copy_zero_size`, `_16m`, `_same_bucket`, `_diff_bucket`, `_verify_contenttype`, `_to_itself_with_metadata`, `_retaining_metadata`, `_replacing_metadata`, `test_copy_object_ifmatch_good` and `_ifnonematch_failed`) now have a whole object GET that botocore validates against the copy's stored checksum, and still pass; the tests that expect an error, the UploadPartCopy tests and the versioned and second user tests are unchanged. The results file is identical to the previous one (24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the checksum to CopyObject. |
 | Upload bucket and key | 330 | 508 | 195 | UploadPart, UploadPartCopy, CompleteMultipartUpload and AbortMultipartUpload check that the upload belongs to the request's bucket and key (decision 34; see "An upload belongs to one bucket and key" under Known gaps): a missing bucket is 404 NoSuchBucket, another bucket or key is 404 NoSuchUpload. Complete through a missing bucket, which was 500 InternalError, is now NoSuchBucket (fixed). No outcome changed, as forecast: the failing multipart tests fail for other reasons (the re-complete NoSuchUpload, InvalidPartOrder for a repeated part, `PartsCount`, 501 for versioning and ListMultipartUploads), and the passing ones use the upload's own bucket and key. The results file is identical to the previous one (`git diff -U0` is empty; 24 incidental, 15 borderline and 156 genuine stay). Recorded at the commit that adds the check. |
 | Retried Complete decided (decision 35) | 330 | 508 | 195 | A Complete on a completed upload is 404 NoSuchUpload by decision 35, no longer a gap: j3 is closed as conformant and its strict xfail is an ordinary test. `test_multipart_upload` and `test_multipart_upload_small`, which send an extra Complete, move from that gap to the ceph tests that fail on purpose (checked once in a scratch copy with the extra Complete removed: both pass, not counted). No outcome changed, as forecast: no production code changed, so the results file is not regenerated and the figures stay 195 passed, 128 failed, 7 skipped. Recorded at the commit that makes the decision. |
+| ListParts (decision 36) | 330 | 508 | 195 | `GET /{bucket}/{key}?uploadId=` lists the parts of an open upload (see "ListParts" under Known gaps), so it is no longer 501; it refuses the three SSE-C headers with 501, as UploadPart does. No outcome changed, as forecast: the only selected tests that reach `list_parts` are the six object ownership tests that call the helper `get_multipart_acl_owner`, and each fails earlier on an operation that is still 501 or refused (details under "ListParts"). The results file is identical to the previous one (`git diff -U0` is empty; the denominator stays 330, and 24 incidental, 15 borderline and 156 genuine stay). The category table is unchanged. Recorded at the commit that adds the operation. |
 
 So the s3-tests pin accounts for 3 more selected tests, 6 more deselected tests and
 1 more pass. Selecting the two named tests accounts for the other 2 selected tests and
@@ -346,7 +347,7 @@ request is rejected for missing or invalid credentials.
 implement get 501 NotImplemented and change nothing. That includes ACLs, policies,
 versioning configuration, tagging (except GetObjectTagging, below), CORS (including
 `OPTIONS`, the CORS preflight),
-lifecycle, POST Object, ListParts, ListMultipartUploads and GetObjectAttributes. A request
+lifecycle, POST Object, ListMultipartUploads and GetObjectAttributes. A request
 with `x-amz-copy-source` that is not a plain PUT of a key (any other method, or a
 query other than `x-id`) is 501 too.
 
@@ -1358,11 +1359,11 @@ object and any other value is 501. As for GetObject, `x-amz-request-payer` is no
 evaluated, and no `x-amz-version-id` is sent. `x-amz-expected-bucket-owner` is evaluated,
 as for every object operation (see "Bucket owner condition").
 
-**Bucket owner condition.** `x-amz-expected-bucket-owner` is evaluated on the 17
+**Bucket owner condition.** `x-amz-expected-bucket-owner` is evaluated on the 18
 operations whose API reference pages define it: HeadBucket, DeleteBucket, ListObjects,
 ListObjectsV2, ListObjectVersions, PutObject, GetObject, HeadObject, DeleteObject,
 DeleteObjects, GetObjectTagging, CreateMultipartUpload, UploadPart, UploadPartCopy,
-CompleteMultipartUpload, AbortMultipartUpload and CopyObject. On CopyObject and
+ListParts, CompleteMultipartUpload, AbortMultipartUpload and CopyObject. On CopyObject and
 UploadPartCopy it names the destination bucket's owner, and
 `x-amz-source-expected-bucket-owner` names the source bucket's owner; those are the only
 two operations that read the source header. A value that differs from `S3_OWNER_ID` is
@@ -1403,7 +1404,7 @@ The choices that the pages leave open:
 - *Selection.* The guard picks the operations by method, whether there is a key, and
   the query: CreateBucket is `PUT /{bucket}` or `PUT /{bucket}/` with no query (`x-id` is
   ignored throughout the guard), and every other request that reaches the end of the guard
-  and is one of the 17 is checked. A method no route accepts is not checked, so it still
+  and is one of the 18 is checked. A method no route accepts is not checked, so it still
   gets 405.
 
 `test_expected_bucket_owner` still fails: it calls put_bucket_acl first, which is 501, so
@@ -1432,7 +1433,11 @@ value, not found). Nothing here adds a write path.
   UploadPartCopy, any non-empty value of `x-amz-server-side-encryption-customer-algorithm`,
   `-customer-key` and `-customer-key-MD5` (S3 API reference, UploadPart and UploadPartCopy,
   which define them for the destination). The source side,
-  `x-amz-copy-source-server-side-encryption-customer-*`, was already 501.
+  `x-amz-copy-source-server-side-encryption-customer-*`, was already 501. ListParts refuses
+  the same three headers (S3 API reference, ListParts, which defines them) at the same point
+  in the guard, on a GET with `uploadId` and no query parameter but `max-parts` and
+  `part-number-marker`: it is 501 with a `Header` element naming the header, ahead of the
+  owner check, and a blank value is absent (decision 36).
 - PutObject, CreateMultipartUpload and CopyObject, `x-amz-storage-class` unless the value
   is exactly `STANDARD`. The pages list `STANDARD | REDUCED_REDUNDANCY | STANDARD_IA |
   ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | DEEP_ARCHIVE | OUTPOSTS | GLACIER_IR | SNOW |
@@ -1589,7 +1594,69 @@ Ignored, where a client can observe the difference:
 - A satisfiable `Range` on HeadObject, which does not narrow `Content-Length`.
 
 Ignored with no observable effect: `x-amz-request-payer`, `x-amz-bypass-governance-retention`,
-`x-amz-object-annotation-directive` and `x-amz-optional-object-attributes`.
+`x-amz-object-annotation-directive` and `x-amz-optional-object-attributes`. ListParts ignores
+`x-amz-request-payer` too and sends no `x-amz-request-charged`.
+
+**ListParts.** `GET /{bucket}/{key}?uploadId=` lists the parts of an open upload, one page at
+a time (docs/design/storage-layout.md decision 36 and §21). It reads and changes nothing.
+Documented: S3 API reference, "ListParts" (`API_ListParts`), "Part" (`API_Part`),
+"Initiator" (`API_Initiator`), "Owner" (`API_Owner`) and "Error responses" (`API_Error`).
+Every choice below is one the pages leave open ("not found"), unless a page is named.
+
+- *Query.* `uploadId`, `max-parts` and `part-number-marker`. Any other query parameter
+  beside `uploadId`, `versionId=null` included, is 501 (not found); `x-id` is ignored.
+  `HEAD ?uploadId` is 501.
+- *Headers.* `x-amz-expected-bucket-owner` is evaluated (403 AccessDenied on a mismatch,
+  `API_ListParts`). `x-amz-request-payer` is ignored, as everywhere. The three SSE-C headers are
+  501, as for UploadPart (see "Feature headers Litmus refuses"); CompleteMultipartUpload
+  ignores them, and which S3 follows is not found. Litmus stores no upload encrypted with a
+  key, so a request that supplies one asks for something it cannot do, and ignoring the
+  headers would answer as if it had.
+- *max-parts.* Default and cap 1000 (`API_ListParts`: "The limit of 1,000 parts is also the
+  default value"); a larger value is capped and `MaxParts` echoes the capped value; leading
+  zeros are read as the number. 0 gives no parts, `IsTruncated` false and no
+  `NextPartNumberMarker`, as `max-keys=0` does. A negative value, a sign, a space, a fraction,
+  an exponent, a non-ASCII digit or an empty value is 400 InvalidArgument with `ArgumentName`
+  and `ArgumentValue`, as for `max-keys`.
+- *part-number-marker.* Only parts with higher numbers are listed (`API_ListParts`). Absent
+  is 0 (not found). A value that is not decimal digits is 400 InvalidArgument (not found).
+  Any other integer is accepted, and a marker at or above the highest part, or above 10000,
+  lists no parts. `PartNumberMarker` echoes it without leading zeros. `max-parts` is read
+  first, so with both bad the error names `max-parts`.
+- *Paging.* `IsTruncated` is true when more parts remain. `NextPartNumberMarker` is the
+  last returned part number (`API_ListParts`), written only when `IsTruncated` is true (the
+  page does not say it is absent otherwise).
+- *Elements.* In the order of the response syntax: Bucket, Key, UploadId, PartNumberMarker,
+  NextPartNumberMarker, MaxParts, IsTruncated, Part, Initiator, Owner, StorageClass,
+  ChecksumAlgorithm, ChecksumType. Each Part is PartNumber, LastModified, ETag, Size, then
+  its checksum element: the order is the page's sample response, since the syntax lists them
+  alphabetically, and the checksum's place is not found. `ETag` is quoted as UploadPart
+  returns it. `LastModified` is the part's last commit in whole seconds, as ListObjects writes
+  it. The checksum element is `Checksum<algorithm>` in the part's stored algorithm and is
+  omitted for a part with no stored checksum, which only parts uploaded before the version 3
+  migration lack (`API_Part`: "Required: No"). An unnamed upload's parts show
+  `ChecksumCRC64NVME` (`API_Part`: present "if the object was uploaded without a checksum").
+- *Upload level.* Initiator and Owner both carry `S3_OWNER_ID` and `S3_OWNER_DISPLAY_NAME`.
+  `StorageClass` is `STANDARD`. `ChecksumAlgorithm` and `ChecksumType` are written only for an
+  upload that named an algorithm; what an unnamed upload returns is not found. No
+  `x-amz-abort-date` or `x-amz-abort-rule-id` is sent, because Litmus has no lifecycle.
+- *Errors.* The page lists none (not found). The order is the guard (501, then AccessDenied),
+  400 InvalidArgument, 404 NoSuchBucket, 404 NoSuchUpload. NoSuchUpload covers an unknown,
+  completed or aborted upload (`API_Error`) and an upload of another bucket or key (decision
+  34); a blank `uploadId` is an unknown ID, as for Complete and Abort.
+- *One read.* The upload and its page of parts are read in one transaction, so a racing
+  Complete, Abort or UploadPart gives the whole list of the earlier state or 404 NoSuchUpload.
+
+*ceph/s3-tests.* The only selected tests that reach `list_parts` are six object ownership
+tests, through the helper `get_multipart_acl_owner`; all six still fail, and none could
+pass: each fails earlier on an operation that is refused, and the helper's first call,
+`get_object_acl`, is 501 as well. `test_create_bucket_bucket_owner_enforced` fails at
+`get_bucket_ownership` (GetBucketOwnershipControls is 501); `test_create_bucket_bucket_owner_preferred`
+and `test_create_bucket_object_writer` fail at CreateBucket with an `ObjectOwnership` other than
+`BucketOwnerEnforced` (501); `test_put_bucket_ownership_bucket_owner_enforced` fails at CreateBucket
+with `ACL=public-read` (400 InvalidBucketAclWithObjectOwnership); and
+`test_put_bucket_ownership_bucket_owner_preferred` and `test_put_bucket_ownership_object_writer`
+fail at PutBucketOwnershipControls (501).
 
 **An upload belongs to one bucket and key.** UploadPart, UploadPartCopy,
 CompleteMultipartUpload and AbortMultipartUpload find the upload by its ID, bucket and

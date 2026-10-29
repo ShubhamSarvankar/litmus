@@ -2107,7 +2107,8 @@ Recorded with the feature header refusals:
     so the owner check (decision 23) stays last. The guard reads headers only and
     nothing else changed: no write path, blob or metadata. The checksum headers are
     not decided here; the ACL, grant and object ownership headers are decision 25. Details and what AWS leaves
-    unsaid: docs/compatibility.md, "Feature headers Litmus refuses".
+    unsaid: docs/compatibility.md, "Feature headers Litmus refuses". Decision 36 adds the SSE-C
+    headers on ListParts to the refusal.
 
 Recorded with the ACL header handling:
 
@@ -2396,6 +2397,92 @@ Recorded with the Complete checksums:
     Decision 10's conditions apply only to the two strict xfail tests named in item 7 of
     "Noted along the way", so they do not apply to the j3 test, which never XPASSed and whose
     assertions this decision rewrites.
+36. **ListParts is implemented (GET `?uploadId`).** `GET /{bucket}/{key}?uploadId=` lists
+    the parts of an open upload, as §21 describes. It reads and changes nothing, so no
+    write sequence, crash point or schema change is added. Each choice below names the page
+    that settles it, or says "not found" where the pages do not; every "not found" is a
+    choice. The pages are S3 API reference "ListParts" (`API_ListParts`), "Part"
+    (`API_Part`), "Initiator" (`API_Initiator`), "Owner" (`API_Owner`) and "Error
+    responses" (`API_Error`).
+    - *Request.* Query `uploadId`, `max-parts` and `part-number-marker`
+      (`API_ListParts`, "Request Syntax"). Any other query parameter beside `uploadId` is
+      501, as for GetObjectTagging, including `versionId`: ListParts takes none, so
+      `versionId=null` is not accepted here either (not found; a choice). `x-id` is ignored,
+      as everywhere in the guard, so an SDK's `x-id=ListParts` does not make the request 501
+      (not found; a choice). `HEAD ?uploadId` stays 501: the page defines no HEAD.
+    - *Headers.* `x-amz-expected-bucket-owner` is evaluated by the guard, so a wrong owner is
+      403 AccessDenied (`API_ListParts`: "the request fails with the HTTP status code `403
+      Forbidden` (access denied)"). `x-amz-request-payer` is ignored, as on every operation
+      (compatibility.md), and no `x-amz-request-charged` is sent. The three SSE-C headers
+      are 501 in the guard, as for UploadPart, decided at the same point (decision 24): a
+      non-blank value of any of them on a GET with `uploadId` and no query parameter but
+      `max-parts` and `part-number-marker`, ahead of the owner check. UploadPart and
+      CompleteMultipartUpload differ here (Complete ignores them) and the pages do not say
+      which S3 follows (not found; a choice). Litmus stores no upload encrypted with a key,
+      so a request that supplies one asks for something it cannot do.
+    - *max-parts.* "The `ListParts` request returns a maximum of 1,000 uploaded parts. The
+      limit of 1,000 parts is also the default value." (`API_ListParts`). A larger value is
+      capped at 1000 and `MaxParts` echoes the capped value; this is `_max_keys`' rule. 0 is
+      accepted and gives no parts with `IsTruncated` false and no `NextPartNumberMarker`, as
+      `max-keys=0` does; the page says nothing about 0 (not found). A negative value, a
+      sign, a space, a fraction, an exponent, a non-ASCII digit or an empty value is 400
+      InvalidArgument with `ArgumentName` and `ArgumentValue`, as for `max-keys`; the page
+      names no error for them (not found), and `API_Error` lists InvalidArgument (400
+      Bad Request). Leading zeros are read as the number.
+    - *part-number-marker.* "Specifies the part after which listing should begin. Only
+      parts with higher part numbers will be listed." (`API_ListParts`). Absent means 0
+      (not found). A value that is not decimal digits is 400 InvalidArgument as above
+      (not found). Any decimal integer is accepted: a marker above the highest part, or
+      above 10000, lists no parts (not found). `PartNumberMarker` echoes the request's
+      value, or 0, written without leading zeros. `max-parts` is read before
+      `part-number-marker`, so with both bad the error names `max-parts` (a choice).
+    - *Paging.* Parts are those above the marker, in ascending part number, at most
+      `MaxParts` of them. `IsTruncated` is true when more remain ("A list can be truncated
+      if the number of parts exceeds the limit returned in the MaxParts element"). When
+      truncated, `NextPartNumberMarker` is the last returned part number ("this element
+      specifies the last part in the list, as well as the value to use for the
+      `part-number-marker` request parameter in a subsequent request"). The page does not
+      say it is absent when the list is not truncated; Litmus omits it then (a choice).
+    - *Elements.* In the order of the response syntax: `Bucket`, `Key`, `UploadId`,
+      `PartNumberMarker`, `NextPartNumberMarker`, `MaxParts`, `IsTruncated`, the `Part`
+      elements, `Initiator`, `Owner`, `StorageClass`, `ChecksumAlgorithm`, `ChecksumType`.
+      Bucket, Key and UploadId are the request's. Within a `Part` the order is that of the
+      page's sample response, `PartNumber`, `LastModified`, `ETag`, `Size`; the response
+      syntax lists the elements alphabetically and the sample is the order S3 sends (a
+      choice). The part's checksum element follows `Size` (not found; a choice).
+    - *Part.* `ETag` is quoted as UploadPart returns it. `LastModified` is the stored
+      time of the part's last commit, in whole seconds as ListObjects writes it
+      (`YYYY-MM-DDTHH:MM:SS.000Z`); `API_Part`: "Date and time at which the part was
+      uploaded." It is always written: an open part always has the time (§20 backfills it
+      for parts that were open at the migration), so a NULL is not handled. The checksum
+      element is `Checksum<algorithm>` in the part's stored algorithm and is omitted when
+      the row has no checksum, which only parts uploaded before the version 3 migration
+      lack (`API_Part`: "Required: No"). An upload that named no algorithm still shows
+      `ChecksumCRC64NVME` on its parts: "This checksum is present if ... the object was
+      uploaded without a checksum (and Amazon S3 added the default checksum,
+      `CRC64NVME`, to the uploaded object)" (`API_Part`).
+    - *Upload level.* `Initiator` and `Owner` both carry `S3_OWNER_ID` as `ID` and
+      `S3_OWNER_DISPLAY_NAME` as `DisplayName`, as ListBuckets builds `Owner`: Litmus has
+      one identity, and `API_ListParts` says that for an AWS account Initiator "provides the
+      same information as the `Owner` element". `StorageClass` is `STANDARD`, the only class
+      Litmus stores. `ChecksumAlgorithm` and `ChecksumType` are the upload's, written only
+      for an upload that named an algorithm, as CreateMultipartUpload echoes them only
+      then; the page does not say what an upload that named none returns (not found; a
+      choice). No `x-amz-abort-date` or `x-amz-abort-rule-id` is sent: the page sends them
+      only when a lifecycle rule matches, and Litmus has no lifecycle.
+    - *Errors and their order.* The page lists no errors (not found). After the guard
+      (501 for an unimplemented request or an extra parameter, then 403 AccessDenied for a
+      wrong owner), the order is 400 InvalidArgument for a bad `max-parts` or
+      `part-number-marker`, 404 NoSuchBucket, 404 NoSuchUpload (a choice). NoSuchUpload
+      covers an unknown upload ID, an aborted or completed upload and an upload of another
+      bucket or key (decision 34), and `API_Error` describes it: "The upload ID might be
+      invalid, or the multipart upload might have been aborted or completed." A blank
+      `uploadId` is an unknown ID, as for Complete and Abort, which read `?uploadId=` as an
+      upload ID of "" and answer NoSuchUpload after the bucket check.
+    - *One read.* The upload row and the page of parts are read in one read transaction
+      (§21), so a racing Complete, Abort or UploadPart gives either the whole list of the
+      state before it or 404 NoSuchUpload, never a mixture. This is a choice; the pages say
+      nothing of concurrency.
 
 
 ### §20. Checksums and schema version 3
@@ -2489,7 +2576,7 @@ it is exact to the registration, not to the commit. S3's ListParts reports a
 `LastModified` per part, which Litmus does not answer yet; a later commit will use this
 column for it. A part whose bytes Complete released
 (`blob_id` NULL) has no blob row to read, so its `last_modified` stays NULL, as do all
-the other new columns on every existing row.
+the other new columns on every existing row. Decision 36 and §21 use `last_modified` for ListParts.
 
 **PutObject (decision 29).** `_upsert_object` writes `checksum`, `checksum_algorithm` and
 `checksum_type` on insert and in the `ON CONFLICT` update, so every overwrite replaces
@@ -2573,3 +2660,50 @@ NULL columns (schema version 2) gets CRC64NVME, and a source overwritten while t
 it gives the digest of the bytes copied, which agrees with the ETag and the body. The result
 document is built from the committed `ObjectMeta`, so `LastModified` and the checksum are the
 stored ones.
+
+### §21. ListParts
+
+ListParts (decision 36) is a read of one open upload and one page of its parts. It writes
+no row, creates no file, registers no blob and passes no crash point, and the schema is
+version 3 as §20 leaves it.
+
+**The read.** `list_parts_page(upload_id=, bucket=, key=, part_number_marker=, max_parts=)`
+on the metadata store takes all five as keyword arguments with no default. In one
+`_snapshot()` read transaction it selects the `multipart_uploads` row with that upload ID,
+bucket and key (the decision 34 scope, compared exactly as stored) and `state = 'open'`;
+if there is none it returns None. Otherwise it selects the `multipart_parts` rows of the
+upload whose `part_number` is greater than the marker, in part number order, with `LIMIT
+max_parts + 1`. The extra row is not returned: it only tells that the page is truncated.
+With `max_parts` 0 the second select is skipped and the page is empty and not truncated. A
+WAL reader sees the committed state at its first read, so the upload row and the parts are
+one state: a Complete, Abort or UploadPart that commits between the two selects is not
+seen by either. Part rows carry the upload's bucket and key through a join, as
+`get_parts` does.
+
+**The handler.** `server/api/list_parts.py`, reached from the GET route when the query has
+`uploadId`. The guard has already answered 501 for any query parameter other than
+`uploadId`, `max-parts`, `part-number-marker` and `x-id`, and AccessDenied for a wrong
+owner. The handler then:
+
+1. reads `max-parts` (default and cap 1000, 0 allowed), then `part-number-marker`
+   (absent is 0); a value that is not ASCII decimal digits is 400 InvalidArgument. A value
+   of more than 18 digits is far above 1 to 10000: a `max-parts` that long is the cap and a
+   marker that long is passed to the store as 10^18, so no integer is converted that
+   SQLite or `int()` would refuse; the response echoes the marker's digits;
+2. 404 NoSuchBucket if the bucket does not exist;
+3. calls `list_parts_page`, and 404 NoSuchUpload if it returns None;
+4. writes the document.
+
+**The document.** Element order and rules are those of decision 36. `NextPartNumberMarker`
+is written only when `IsTruncated` is true, and is the part number of the last `Part`
+written. A `Part` is `PartNumber`, `LastModified`, `ETag`, `Size` and, when both stored
+checksum columns are set, `Checksum<algorithm>`. `Initiator` and `Owner` are built from
+settings. `ChecksumAlgorithm` and `ChecksumType` are written only when the upload row has
+an algorithm.
+
+**Tests.** `tests/conformance/test_list_parts.py` pins every element and its order, the
+paging rules, the parameter values, the error order and that a read changes no row or file.
+`tests/conformance/test_list_parts_boto3.py` pages with boto3's paginator. The Tier A
+races are in `chaos/scenarios/test_races_list_parts.py`: ListParts against Complete,
+Abort and an UploadPart that replaces part 1, each run before the read, between its two
+selects and after it.

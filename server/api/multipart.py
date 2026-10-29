@@ -200,8 +200,12 @@ async def put_object_or_part(bucket: str, key: str, request: Request) -> Respons
 
 @router.get("/{bucket}/{key:path}")
 async def get_object_proxy(bucket: str, key: str, request: Request) -> Response:
-    """Proxy to objects router — multipart has no GET of its own. ?tagging is
-    GetObjectTagging; the guard has refused every other query alongside it."""
+    """Proxy to objects router. ?uploadId is ListParts and ?tagging is GetObjectTagging; the
+    guard has refused every other query alongside either."""
+    if "uploadId" in request.query_params:
+        from server.api.list_parts import list_parts
+
+        return await list_parts(bucket, key, request.query_params["uploadId"], request)
     if "tagging" in request.query_params:
         from server.api.objects import _get_object_tagging
 
