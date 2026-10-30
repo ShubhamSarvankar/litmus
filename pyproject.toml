@@ -29,6 +29,8 @@ asyncio_mode = "auto"
 testpaths = ["tests", "chaos/scenarios", "chaos/fixtures"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+# A passing test's tmp_path is removed at its teardown; a failed test's is kept.
+tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 target-version = "py312"
