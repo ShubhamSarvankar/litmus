@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -81,7 +82,9 @@ class ServerProcess:
         # Every process this object has started: restart() replaces _proc, and stop()
         # must reach the earlier ones too.
         self._procs: list[subprocess.Popen] = []
-        self._log: list[str] = []
+        # Each process's output, read as it is written so the pipe never fills and blocks
+        # the server: the reader thread and the lines it has read.
+        self._output: dict[subprocess.Popen, tuple[threading.Thread, list[str]]] = {}
 
     def start(self) -> None:
         env = os.environ.copy()
@@ -118,8 +121,30 @@ class ServerProcess:
             text=True,
         )
         self._procs.append(self._proc)
+        self._start_reader(self._proc)
         if self not in _LIVE:
             _LIVE.append(self)
+
+    def _start_reader(self, proc: subprocess.Popen) -> None:
+        lines: list[str] = []
+
+        def drain() -> None:
+            # Bytes, decoded leniently: output that is not valid UTF-8 must not end the
+            # reader and leave the pipe to fill. Ends at EOF, when the process and any
+            # child holding the pipe are gone.
+            assert proc.stdout is not None
+            for raw in proc.stdout.buffer:
+                lines.append(raw.decode(errors="replace"))
+            proc.stdout.close()
+
+        reader = threading.Thread(target=drain, name=f"server-output-{proc.pid}", daemon=True)
+        reader.start()
+        self._output[proc] = (reader, lines)
+
+    def _join_reader(self, proc: subprocess.Popen, timeout: float = 5.0) -> None:
+        """Wait, bounded, for the reader to take the last output of an exited process."""
+        reader, _ = self._output[proc]
+        reader.join(timeout)
 
     def wait_ready(self, timeout: float = 10.0) -> None:
         _wait_ready(self._port, timeout)
@@ -128,12 +153,15 @@ class ServerProcess:
         if self._proc and self._proc.poll() is None:
             os.kill(self._proc.pid, signal.SIGKILL)
             self._proc.wait()
+            self._join_reader(self._proc)
 
     def wait_for_exit(self, timeout: float = 10.0) -> int:
         """Wait for the process to exit on its own (e.g. at a crash point) and
         return its return code; -signal.SIGKILL means it was SIGKILLed."""
         assert self._proc is not None
-        return self._proc.wait(timeout=timeout)
+        returncode = self._proc.wait(timeout=timeout)
+        self._join_reader(self._proc)
+        return returncode
 
     def restart(self) -> None:
         self.start()
@@ -142,13 +170,10 @@ class ServerProcess:
     def collect_logs(self) -> str:
         if self._proc is None:
             return ""
-        # Non-blocking read of any buffered output
-        try:
-            out, _ = self._proc.communicate(timeout=0.1)
-            self._log.append(out or "")
-        except subprocess.TimeoutExpired:
-            pass
-        return "\n".join(self._log)
+        # The latest process's output so far; once it has exited, all of it.
+        if self._proc.poll() is not None:
+            self._join_reader(self._proc)
+        return "".join(self._output[self._proc][1])
 
     def stop(self) -> None:
         """Terminate every process this object started, wait up to 5s, kill the rest."""
@@ -161,6 +186,9 @@ class ServerProcess:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        for proc in self._procs:
+            if proc.poll() is not None:
+                self._join_reader(proc)
 
     @property
     def port(self) -> int:
