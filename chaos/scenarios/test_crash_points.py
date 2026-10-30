@@ -25,6 +25,7 @@ import hashlib
 import os
 import shutil
 import signal
+import tempfile
 import xml.etree.ElementTree as ET
 import zlib
 from contextlib import contextmanager
@@ -498,8 +499,9 @@ def _twin(tmp_path: Path, dead: ServerProcess, name: str = "twin") -> Path:
     checked to hold the same files with byte-identical database files.
     """
     assert dead.wait_for_exit() is not None, "the server must have exited before the copy"
-    twin = tmp_path.parent / f"{tmp_path.name}-{name}"
-    shutil.copytree(tmp_path, twin)
+    # A unique name: a passing test's tmp_path is removed, its twin is not, and the name is reused.
+    twin = Path(tempfile.mkdtemp(prefix=f"{tmp_path.name}-{name}-", dir=tmp_path.parent))
+    shutil.copytree(tmp_path, twin, dirs_exist_ok=True)
 
     def files(root: Path) -> set[Path]:
         return {p.relative_to(root) for p in root.rglob("*") if p.is_file()}
